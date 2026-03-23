@@ -1,68 +1,17 @@
 //! CPAL audio output — sends processed PCM samples to the system audio device.
 //!
-//! The output can be reconfigured to match the source's sample rate. When a
-//! new track loads at a different rate, the engine drops the old output and
-//! opens a new one at the requested rate. If the device doesn't support the
-//! rate, the engine falls back to resampling.
+//! Uses a lock-free ring buffer between the engine thread (producer) and
+//! CPAL's real-time audio callback (consumer). The callback must never block —
+//! a mutex here would cause priority inversion and audible glitches.
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, SampleRate, Stream, StreamConfig, SupportedStreamConfigRange};
-use std::sync::{Arc, Mutex};
+use ringbuf::{
+    traits::{Consumer, Observer, Producer, Split},
+    HeapRb,
+};
 
 use crate::audio::error::AudioError;
-
-/// A ring buffer that the audio engine writes to and CPAL reads from.
-/// This decouples the engine's processing rate from CPAL's callback rate.
-pub struct OutputBuffer {
-    buffer: Vec<f32>,
-    read_pos: usize,
-    write_pos: usize,
-    capacity: usize,
-}
-
-impl OutputBuffer {
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            buffer: vec![0.0; capacity],
-            read_pos: 0,
-            write_pos: 0,
-            capacity,
-        }
-    }
-
-    pub fn available(&self) -> usize {
-        if self.write_pos >= self.read_pos {
-            self.write_pos - self.read_pos
-        } else {
-            self.capacity - self.read_pos + self.write_pos
-        }
-    }
-
-    pub fn free_space(&self) -> usize {
-        self.capacity - 1 - self.available()
-    }
-
-    pub fn write(&mut self, samples: &[f32]) -> usize {
-        let to_write = samples.len().min(self.free_space());
-        for &sample in &samples[..to_write] {
-            self.buffer[self.write_pos] = sample;
-            self.write_pos = (self.write_pos + 1) % self.capacity;
-        }
-        to_write
-    }
-
-    pub fn read(&mut self, output: &mut [f32]) -> usize {
-        let to_read = output.len().min(self.available());
-        for sample in &mut output[..to_read] {
-            *sample = self.buffer[self.read_pos];
-            self.read_pos = (self.read_pos + 1) % self.capacity;
-        }
-        for sample in &mut output[to_read..] {
-            *sample = 0.0;
-        }
-        to_read
-    }
-}
 
 /// Describes the output device and its configuration.
 #[derive(Debug, Clone)]
@@ -72,9 +21,13 @@ pub struct OutputConfig {
 }
 
 /// Handle to the audio output stream.
+///
+/// The engine thread writes samples via the producer half of a lock-free
+/// ring buffer. CPAL's callback reads from the consumer half. No mutex
+/// is ever held during audio I/O.
 pub struct AudioOutput {
     _stream: Stream,
-    buffer: Arc<Mutex<OutputBuffer>>,
+    producer: ringbuf::HeapProd<f32>,
     config: StreamConfig,
 }
 
@@ -88,21 +41,14 @@ impl AudioOutput {
     }
 
     /// Write processed audio samples to the output buffer.
-    pub fn write(&self, samples: &[f32]) -> usize {
-        if let Ok(mut buf) = self.buffer.lock() {
-            buf.write(samples)
-        } else {
-            0
-        }
+    /// Returns the number of samples actually written.
+    pub fn write(&mut self, samples: &[f32]) -> usize {
+        self.producer.push_slice(samples)
     }
 
     /// How many samples can be written without blocking.
     pub fn free_space(&self) -> usize {
-        if let Ok(buf) = self.buffer.lock() {
-            buf.free_space()
-        } else {
-            0
-        }
+        self.producer.vacant_len()
     }
 }
 
@@ -133,25 +79,39 @@ impl OutputManager {
         self.build_stream(supported.into())
     }
 
-    /// Open the output at a specific sample rate. If the device doesn't
-    /// support it, returns Err so the caller can fall back to resampling.
-    pub fn open_at_rate(&self, desired_rate: u32) -> Result<AudioOutput, AudioError> {
+    /// Open the output at a specific sample rate and channel count. If the
+    /// device doesn't support the rate with at least the requested channels,
+    /// returns Err so the caller can fall back to resampling.
+    pub fn open_at_rate(
+        &self,
+        desired_rate: u32,
+        desired_channels: u16,
+    ) -> Result<AudioOutput, AudioError> {
         let desired = SampleRate(desired_rate);
 
-        // Find an F32 config range that includes the desired rate.
         let supported_configs: Vec<SupportedStreamConfigRange> = self
             .device
             .supported_output_configs()
             .map_err(|e| AudioError::Output(format!("failed to query configs: {e}")))?
             .collect();
 
-        let matching_range = supported_configs.iter().find(|range| {
-            range.sample_format() == SampleFormat::F32
-                && range.min_sample_rate() <= desired
-                && range.max_sample_rate() >= desired
-        });
+        let rate_matches: Vec<&SupportedStreamConfigRange> = supported_configs
+            .iter()
+            .filter(|range| {
+                range.sample_format() == SampleFormat::F32
+                    && range.min_sample_rate() <= desired
+                    && range.max_sample_rate() >= desired
+            })
+            .collect();
 
-        if let Some(range) = matching_range {
+        let best = rate_matches
+            .iter()
+            .copied()
+            .filter(|r| r.channels() >= desired_channels)
+            .min_by_key(|r| r.channels())
+            .or_else(|| rate_matches.iter().copied().max_by_key(|r| r.channels()));
+
+        if let Some(range) = best {
             let config: StreamConfig = range.with_sample_rate(desired).into();
             self.build_stream(config)
         } else {
@@ -163,10 +123,14 @@ impl OutputManager {
 
     /// Build and start a CPAL output stream with the given config.
     fn build_stream(&self, config: StreamConfig) -> Result<AudioOutput, AudioError> {
-        // Size the ring buffer for ~200ms of audio.
-        let buffer_size = (config.sample_rate.0 as usize) * (config.channels as usize) / 5;
-        let buffer = Arc::new(Mutex::new(OutputBuffer::new(buffer_size)));
-        let buffer_for_callback = Arc::clone(&buffer);
+        // Buffer ~1 second of audio. Generous sizing avoids underruns
+        // without adding perceptible latency (playback starts as soon as
+        // the first samples arrive, not when the buffer is full).
+        let buffer_samples =
+            (config.sample_rate.0 as usize) * (config.channels as usize);
+
+        let rb = HeapRb::<f32>::new(buffer_samples);
+        let (producer, mut consumer) = rb.split();
 
         let err_callback = |err: cpal::StreamError| {
             log::error!("audio output stream error: {err}");
@@ -177,8 +141,11 @@ impl OutputManager {
             .build_output_stream(
                 &config,
                 move |data: &mut [f32], _| {
-                    if let Ok(mut buf) = buffer_for_callback.lock() {
-                        buf.read(data);
+                    // Lock-free read from the ring buffer. If there aren't
+                    // enough samples, the remainder is filled with silence.
+                    let read = consumer.pop_slice(data);
+                    for sample in &mut data[read..] {
+                        *sample = 0.0;
                     }
                 },
                 err_callback,
@@ -198,7 +165,7 @@ impl OutputManager {
 
         Ok(AudioOutput {
             _stream: stream,
-            buffer,
+            producer,
             config,
         })
     }

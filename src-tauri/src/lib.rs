@@ -13,7 +13,7 @@ use window::manager::WindowManager;
 /// test harnesses. It sets up managed state (audio engine, window manager)
 /// and registers all Tauri commands.
 pub fn run() {
-    env_logger::init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     // Initialise the audio engine. If this fails (e.g. no audio device),
     // we still want the app to launch — the UI should show an error state

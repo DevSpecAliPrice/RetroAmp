@@ -178,6 +178,7 @@ fn audio_thread(
 
     let mut current_rate = output.config().sample_rate;
     let mut current_channels = output.config().channels;
+    eprintln!("[retroamp] output device opened: {current_rate}Hz, {current_channels}ch");
 
     if let Ok(mut fft) = fft_data.lock() {
         fft.sample_rate = current_rate;
@@ -198,22 +199,29 @@ fn audio_thread(
 
                     if let Ok(meta) = new_source.metadata() {
                         let source_rate = meta.sample_rate;
+                        eprintln!(
+                            "[retroamp] source: {}Hz, {}ch | output: {current_rate}Hz",
+                            source_rate, meta.channels
+                        );
 
                         if source_rate != current_rate {
                             // Try to reconfigure the output to match the source.
-                            match output_manager.open_at_rate(source_rate) {
+                            eprintln!("[retroamp] rate mismatch — attempting device reconfiguration");
+                            match output_manager.open_at_rate(source_rate, meta.channels) {
                                 Ok(new_output) => {
                                     output = new_output;
                                     current_rate = source_rate;
                                     current_channels = output.config().channels;
                                     eq.reconfigure(current_rate, current_channels);
+                                    eprintln!("[retroamp] output reconfigured to {source_rate}Hz (native)");
                                     log::info!(
                                         "output reconfigured to {source_rate}Hz (native)"
                                     );
                                 }
-                                Err(_) => {
+                                Err(ref e) => {
                                     // Device doesn't support this rate — fall back
                                     // to resampling.
+                                    eprintln!("[retroamp] reconfigure failed: {e}, falling back to resampler");
                                     log::info!(
                                         "device doesn't support {source_rate}Hz, \
                                          resampling to {current_rate}Hz"
@@ -223,8 +231,12 @@ fn audio_thread(
                                         current_rate,
                                         meta.channels,
                                     ) {
-                                        Ok(r) => resampler = Some(r),
+                                        Ok(r) => {
+                                            eprintln!("[retroamp] resampler created: {source_rate}Hz → {current_rate}Hz");
+                                            resampler = Some(r);
+                                        }
                                         Err(e) => {
+                                            eprintln!("[retroamp] resampler FAILED: {e}");
                                             log::error!("failed to create resampler: {e}");
                                         }
                                     }
@@ -277,11 +289,6 @@ fn audio_thread(
 
         if playback_state != PlaybackState::Playing {
             thread::sleep(Duration::from_millis(10));
-            continue;
-        }
-
-        if output.free_space() < 1024 {
-            thread::sleep(Duration::from_millis(1));
             continue;
         }
 
@@ -344,7 +351,17 @@ fn audio_thread(
             }
         }
 
-        output.write(&samples);
+        // Write ALL samples to the output, waiting for space as needed.
+        // Never discard — dropping samples causes clicks at every boundary.
+        let mut write_offset = 0;
+        while write_offset < samples.len() {
+            let written = output.write(&samples[write_offset..]);
+            write_offset += written;
+            if write_offset < samples.len() {
+                thread::sleep(Duration::from_micros(500));
+            }
+        }
+
         update_status(&status, &source, playback_state, volume);
     }
 }
