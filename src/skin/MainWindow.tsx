@@ -18,6 +18,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { SkinData } from "./parser";
+import {
+  CHAR_WIDTH,
+  CHAR_HEIGHT,
+  MARQUEE_X,
+  MARQUEE_Y,
+  MARQUEE_WIDTH,
+  MARQUEE_CHARS,
+  getCharCoords,
+} from "./charmap";
 
 interface EngineStatus {
   state: "Stopped" | "Playing" | "Paused";
@@ -101,6 +110,45 @@ export default function MainWindow({ skin, scale }: Props) {
     track_count: 0,
   });
   const [pressed, setPressed] = useState<string | null>(null);
+  const [marqueeOffset, setMarqueeOffset] = useState(0);
+
+  // Build the marquee text from current metadata.
+  const meta = status.metadata;
+  const marqueeText = (() => {
+    const artist = meta?.artist ?? "";
+    const title = meta?.title ?? "";
+    if (artist && title) return `${artist} - ${title}`;
+    if (title) return title;
+    if (status.state === "Stopped") return "RetroAmp";
+    return "";
+  })();
+
+  // Marquee scroll animation — 5px (one character) every 220ms.
+  // Only scrolls if the text is longer than the visible area.
+  const needsScroll = marqueeText.length > MARQUEE_CHARS;
+  const scrollText = needsScroll
+    ? marqueeText + "  ***  " + marqueeText
+    : marqueeText;
+
+  useEffect(() => {
+    if (!needsScroll) {
+      setMarqueeOffset(0);
+      return;
+    }
+    const interval = setInterval(() => {
+      setMarqueeOffset((prev) => {
+        const totalWidth = (marqueeText.length + 7) * CHAR_WIDTH; // text + separator
+        const next = prev + CHAR_WIDTH;
+        return next >= totalWidth ? 0 : next;
+      });
+    }, 220);
+    return () => clearInterval(interval);
+  }, [needsScroll, marqueeText]);
+
+  // Reset scroll when track changes.
+  useEffect(() => {
+    setMarqueeOffset(0);
+  }, [marqueeText]);
 
   // Poll engine and playlist state.
   useEffect(() => {
@@ -140,6 +188,29 @@ export default function MainWindow({ skin, scale }: Props) {
     if (titlebar) {
       // Selected title bar: x=27, y=0, 275x14 in titlebar.bmp
       ctx.drawImage(titlebar, 27, 0, 275, 14, 0, 0, 275, 14);
+    }
+
+    // 2.5) Draw marquee text from text.bmp.
+    const textBmp = skin.sheets["text"];
+    if (textBmp && scrollText.length > 0) {
+      // Save context and clip to the marquee area.
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(MARQUEE_X, MARQUEE_Y, MARQUEE_WIDTH, CHAR_HEIGHT);
+      ctx.clip();
+
+      // Draw each character, offset by the scroll position.
+      for (let i = 0; i < scrollText.length; i++) {
+        const destX = MARQUEE_X + i * CHAR_WIDTH - marqueeOffset;
+        // Skip characters that are fully outside the visible area.
+        if (destX + CHAR_WIDTH < MARQUEE_X || destX > MARQUEE_X + MARQUEE_WIDTH) {
+          continue;
+        }
+        const { x: srcX, y: srcY } = getCharCoords(scrollText[i]);
+        ctx.drawImage(textBmp, srcX, srcY, CHAR_WIDTH, CHAR_HEIGHT, destX, MARQUEE_Y, CHAR_WIDTH, CHAR_HEIGHT);
+      }
+
+      ctx.restore();
     }
 
     // 3) Draw play/pause/stop indicator.
@@ -248,7 +319,7 @@ export default function MainWindow({ skin, scale }: Props) {
       const thumbX = Math.round(status.volume * (68 - 14));
       ctx.drawImage(volumeSheet, 15, 422, 14, 11, 107 + thumbX, 58, 14, 11);
     }
-  }, [skin, status, playlist, pressed]);
+  }, [skin, status, playlist, pressed, marqueeOffset, scrollText]);
 
   // Click handling.
   const handleMouseDown = useCallback(
