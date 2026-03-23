@@ -50,6 +50,13 @@ pub struct EngineStatus {
     pub volume: f32,
 }
 
+/// Events emitted by the audio engine.
+#[derive(Debug, Clone)]
+pub enum EngineEvent {
+    /// The current source finished playing (reached end of data).
+    TrackFinished,
+}
+
 /// Handle held by the main thread to control the audio engine.
 ///
 /// All methods are non-blocking — they send commands to the audio thread.
@@ -57,6 +64,7 @@ pub struct AudioEngine {
     command_tx: mpsc::Sender<EngineCommand>,
     status: Arc<Mutex<EngineStatus>>,
     fft_data: Arc<Mutex<FftData>>,
+    event_rx: Mutex<mpsc::Receiver<EngineEvent>>,
     _thread: thread::JoinHandle<()>,
 }
 
@@ -66,6 +74,7 @@ impl AudioEngine {
     pub fn new() -> Result<Self, AudioError> {
         let (command_tx, command_rx) = mpsc::channel::<EngineCommand>();
         let (init_tx, init_rx) = mpsc::channel::<Result<(), AudioError>>();
+        let (event_tx, event_rx) = mpsc::channel::<EngineEvent>();
 
         let status = Arc::new(Mutex::new(EngineStatus {
             state: PlaybackState::Stopped,
@@ -86,7 +95,7 @@ impl AudioEngine {
         let thread = thread::Builder::new()
             .name("retroamp-audio".into())
             .spawn(move || {
-                audio_thread(command_rx, init_tx, status_for_thread, fft_for_thread);
+                audio_thread(command_rx, init_tx, event_tx, status_for_thread, fft_for_thread);
             })
             .map_err(|e| AudioError::Output(format!("failed to spawn audio thread: {e}")))?;
 
@@ -104,6 +113,7 @@ impl AudioEngine {
             command_tx,
             status,
             fft_data,
+            event_rx: Mutex::new(event_rx),
             _thread: thread,
         })
     }
@@ -147,12 +157,23 @@ impl AudioEngine {
     pub fn shutdown(&self) {
         let _ = self.command_tx.send(EngineCommand::Shutdown);
     }
+
+    /// Try to receive a pending engine event (non-blocking).
+    /// Used by the auto-advance listener.
+    pub fn try_recv_event(&self) -> Option<EngineEvent> {
+        if let Ok(rx) = self.event_rx.lock() {
+            rx.try_recv().ok()
+        } else {
+            None
+        }
+    }
 }
 
 /// The audio thread's main loop.
 fn audio_thread(
     command_rx: mpsc::Receiver<EngineCommand>,
     init_tx: mpsc::Sender<Result<(), AudioError>>,
+    event_tx: mpsc::Sender<EngineEvent>,
     status: Arc<Mutex<EngineStatus>>,
     fft_data: Arc<Mutex<FftData>>,
 ) {
@@ -297,10 +318,12 @@ fn audio_thread(
             Some(src) => match src.next_buffer() {
                 Ok(Some(buf)) => buf,
                 Ok(None) => {
+                    // Source exhausted — notify for auto-advance.
                     playback_state = PlaybackState::Stopped;
                     source = None;
                     resampler = None;
                     update_status(&status, &source, playback_state, volume);
+                    let _ = event_tx.send(EngineEvent::TrackFinished);
                     continue;
                 }
                 Err(e) => {
@@ -309,6 +332,7 @@ fn audio_thread(
                     source = None;
                     resampler = None;
                     update_status(&status, &source, playback_state, volume);
+                    let _ = event_tx.send(EngineEvent::TrackFinished);
                     continue;
                 }
             },

@@ -54,6 +54,9 @@ tauri-plugin-dialog = "2.6.0"
 rubato = "1.0.1"
 audioadapter-buffers = "2.0.0"
 ringbuf = "0.4"
+rand = "0.10.0"
+zip = { version = "8.4.0", default-features = false, features = ["deflate"] }
+base64 = "0.22.1"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

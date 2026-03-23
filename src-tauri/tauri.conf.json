@@ -14,9 +14,11 @@
       {
         "title": "RetroAmp",
         "width": 275,
-        "height": 116,
-        "resizable": false,
-        "decorations": false
+        "height": 500,
+        "resizable": true,
+        "decorations": false,
+        "minWidth": 275,
+        "minHeight": 300
       }
     ],
     "security": {

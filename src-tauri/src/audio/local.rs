@@ -233,7 +233,7 @@ impl AudioSource for LocalFileSource {
             // Convert decoded audio to interleaved f32.
             sample_buf.copy_interleaved_ref(decoded);
 
-            let samples = sample_buf.samples()[..num_frames * self.channels as usize].to_vec();
+            let samples = sample_buf.samples().to_vec();
 
             return Ok(Some(AudioBuffer {
                 samples,
