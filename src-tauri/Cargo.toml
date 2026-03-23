@@ -1,0 +1,58 @@
+[package]
+name = "retroamp"
+version = "0.1.0"
+edition = "2024"
+description = "Cross-platform desktop audio player inspired by Winamp 2.x"
+license = "MIT"
+
+[lib]
+name = "retroamp_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "retroamp"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Desktop shell
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Audio decoding — multi-format support
+# Features enable the specific codecs we need
+symphonia = { version = "0.5", features = [
+    "mp3",
+    "flac",
+    "aac",
+    "ogg",
+    "vorbis",
+    "wav",
+    "pcm",
+    "alac",
+] }
+
+# Cross-platform audio output
+cpal = "0.15"
+
+# FFT for spectrum analysis / visualisation data
+rustfft = "6"
+
+# Error handling
+thiserror = "2"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+tauri-plugin-dialog = "2.6.0"
+rubato = "1.0.1"
+audioadapter-buffers = "2.0.0"
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]

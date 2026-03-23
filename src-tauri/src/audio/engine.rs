@@ -1,0 +1,373 @@
+//! The audio engine — orchestrates the full playback pipeline.
+//!
+//! Owns the audio thread, manages the current source, and drives the pipeline:
+//!   AudioSource → [Resample if needed] → EQ → FFT → Output
+//!
+//! When a new track loads, the engine reconfigures the output device to match
+//! the source's native sample rate (bit-perfect path). If the device doesn't
+//! support that rate, it falls back to resampling.
+
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+
+use crate::audio::eq::{EqSettings, Equalizer};
+use crate::audio::error::AudioError;
+use crate::audio::fft::{FftAnalyser, FftData};
+use crate::audio::output::OutputManager;
+use crate::audio::resample::AudioResampler;
+use crate::audio::source::{AudioSource, TrackMetadata};
+
+/// Commands sent from the main thread to the audio thread.
+pub enum EngineCommand {
+    Play(Box<dyn AudioSource>),
+    Pause,
+    Resume,
+    Stop,
+    Seek(Duration),
+    SetEq(EqSettings),
+    SetVolume(f32),
+    Shutdown,
+}
+
+/// Playback state reported to the frontend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlaybackState {
+    Stopped,
+    Playing,
+    Paused,
+}
+
+/// Current state snapshot for the frontend to display.
+#[derive(Debug, Clone, Serialize)]
+pub struct EngineStatus {
+    pub state: PlaybackState,
+    pub position: Option<f64>,
+    pub duration: Option<f64>,
+    pub metadata: Option<TrackMetadata>,
+    pub volume: f32,
+}
+
+/// Handle held by the main thread to control the audio engine.
+///
+/// All methods are non-blocking — they send commands to the audio thread.
+pub struct AudioEngine {
+    command_tx: mpsc::Sender<EngineCommand>,
+    status: Arc<Mutex<EngineStatus>>,
+    fft_data: Arc<Mutex<FftData>>,
+    _thread: thread::JoinHandle<()>,
+}
+
+impl AudioEngine {
+    /// Start the audio engine. Spawns the audio thread, which opens the
+    /// default output device internally (CPAL streams are not Send).
+    pub fn new() -> Result<Self, AudioError> {
+        let (command_tx, command_rx) = mpsc::channel::<EngineCommand>();
+        let (init_tx, init_rx) = mpsc::channel::<Result<(), AudioError>>();
+
+        let status = Arc::new(Mutex::new(EngineStatus {
+            state: PlaybackState::Stopped,
+            position: None,
+            duration: None,
+            metadata: None,
+            volume: 1.0,
+        }));
+
+        let fft_data = Arc::new(Mutex::new(FftData {
+            magnitudes: vec![0.0; 512],
+            sample_rate: 44100,
+        }));
+
+        let status_for_thread = Arc::clone(&status);
+        let fft_for_thread = Arc::clone(&fft_data);
+
+        let thread = thread::Builder::new()
+            .name("retroamp-audio".into())
+            .spawn(move || {
+                audio_thread(command_rx, init_tx, status_for_thread, fft_for_thread);
+            })
+            .map_err(|e| AudioError::Output(format!("failed to spawn audio thread: {e}")))?;
+
+        match init_rx.recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {
+                return Err(AudioError::Output(
+                    "audio thread exited during initialisation".into(),
+                ))
+            }
+        }
+
+        Ok(Self {
+            command_tx,
+            status,
+            fft_data,
+            _thread: thread,
+        })
+    }
+
+    pub fn play(&self, source: Box<dyn AudioSource>) {
+        let _ = self.command_tx.send(EngineCommand::Play(source));
+    }
+
+    pub fn pause(&self) {
+        let _ = self.command_tx.send(EngineCommand::Pause);
+    }
+
+    pub fn resume(&self) {
+        let _ = self.command_tx.send(EngineCommand::Resume);
+    }
+
+    pub fn stop(&self) {
+        let _ = self.command_tx.send(EngineCommand::Stop);
+    }
+
+    pub fn seek(&self, position: Duration) {
+        let _ = self.command_tx.send(EngineCommand::Seek(position));
+    }
+
+    pub fn set_eq(&self, settings: EqSettings) {
+        let _ = self.command_tx.send(EngineCommand::SetEq(settings));
+    }
+
+    pub fn set_volume(&self, volume: f32) {
+        let _ = self.command_tx.send(EngineCommand::SetVolume(volume));
+    }
+
+    pub fn status(&self) -> EngineStatus {
+        self.status.lock().unwrap().clone()
+    }
+
+    pub fn fft_data(&self) -> FftData {
+        self.fft_data.lock().unwrap().clone()
+    }
+
+    pub fn shutdown(&self) {
+        let _ = self.command_tx.send(EngineCommand::Shutdown);
+    }
+}
+
+/// The audio thread's main loop.
+fn audio_thread(
+    command_rx: mpsc::Receiver<EngineCommand>,
+    init_tx: mpsc::Sender<Result<(), AudioError>>,
+    status: Arc<Mutex<EngineStatus>>,
+    fft_data: Arc<Mutex<FftData>>,
+) {
+    // Create the output manager (holds the device reference).
+    let output_manager = match OutputManager::new() {
+        Ok(m) => m,
+        Err(e) => {
+            let _ = init_tx.send(Err(e));
+            return;
+        }
+    };
+
+    // Open at the device's default rate initially.
+    let mut output = match output_manager.open_default() {
+        Ok(o) => o,
+        Err(e) => {
+            let _ = init_tx.send(Err(e));
+            return;
+        }
+    };
+
+    let _ = init_tx.send(Ok(()));
+
+    let mut current_rate = output.config().sample_rate;
+    let mut current_channels = output.config().channels;
+
+    if let Ok(mut fft) = fft_data.lock() {
+        fft.sample_rate = current_rate;
+    }
+
+    let mut source: Option<Box<dyn AudioSource>> = None;
+    let mut resampler: Option<AudioResampler> = None;
+    let mut playback_state = PlaybackState::Stopped;
+    let mut volume: f32 = 1.0;
+    let mut eq = Equalizer::new(current_rate, current_channels);
+    let mut fft_analyser = FftAnalyser::new();
+
+    loop {
+        while let Ok(cmd) = command_rx.try_recv() {
+            match cmd {
+                EngineCommand::Play(new_source) => {
+                    resampler = None;
+
+                    if let Ok(meta) = new_source.metadata() {
+                        let source_rate = meta.sample_rate;
+
+                        if source_rate != current_rate {
+                            // Try to reconfigure the output to match the source.
+                            match output_manager.open_at_rate(source_rate) {
+                                Ok(new_output) => {
+                                    output = new_output;
+                                    current_rate = source_rate;
+                                    current_channels = output.config().channels;
+                                    eq.reconfigure(current_rate, current_channels);
+                                    log::info!(
+                                        "output reconfigured to {source_rate}Hz (native)"
+                                    );
+                                }
+                                Err(_) => {
+                                    // Device doesn't support this rate — fall back
+                                    // to resampling.
+                                    log::info!(
+                                        "device doesn't support {source_rate}Hz, \
+                                         resampling to {current_rate}Hz"
+                                    );
+                                    match AudioResampler::new(
+                                        source_rate,
+                                        current_rate,
+                                        meta.channels,
+                                    ) {
+                                        Ok(r) => resampler = Some(r),
+                                        Err(e) => {
+                                            log::error!("failed to create resampler: {e}");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    source = Some(new_source);
+                    playback_state = PlaybackState::Playing;
+                    update_status(&status, &source, playback_state, volume);
+                }
+                EngineCommand::Pause => {
+                    if playback_state == PlaybackState::Playing {
+                        playback_state = PlaybackState::Paused;
+                        update_status(&status, &source, playback_state, volume);
+                    }
+                }
+                EngineCommand::Resume => {
+                    if playback_state == PlaybackState::Paused {
+                        playback_state = PlaybackState::Playing;
+                        update_status(&status, &source, playback_state, volume);
+                    }
+                }
+                EngineCommand::Stop => {
+                    source = None;
+                    resampler = None;
+                    playback_state = PlaybackState::Stopped;
+                    update_status(&status, &source, playback_state, volume);
+                }
+                EngineCommand::Seek(pos) => {
+                    if let Some(src) = source.as_mut() {
+                        if let Err(e) = src.seek(pos) {
+                            log::warn!("seek failed: {e}");
+                        }
+                    }
+                }
+                EngineCommand::SetEq(settings) => {
+                    eq.apply_settings(&settings);
+                }
+                EngineCommand::SetVolume(v) => {
+                    volume = v.clamp(0.0, 1.0);
+                    update_status(&status, &source, playback_state, volume);
+                }
+                EngineCommand::Shutdown => {
+                    return;
+                }
+            }
+        }
+
+        if playback_state != PlaybackState::Playing {
+            thread::sleep(Duration::from_millis(10));
+            continue;
+        }
+
+        if output.free_space() < 1024 {
+            thread::sleep(Duration::from_millis(1));
+            continue;
+        }
+
+        // Pull audio from the source.
+        let buffer = match source.as_mut() {
+            Some(src) => match src.next_buffer() {
+                Ok(Some(buf)) => buf,
+                Ok(None) => {
+                    playback_state = PlaybackState::Stopped;
+                    source = None;
+                    resampler = None;
+                    update_status(&status, &source, playback_state, volume);
+                    continue;
+                }
+                Err(e) => {
+                    log::error!("source error: {e}");
+                    playback_state = PlaybackState::Stopped;
+                    source = None;
+                    resampler = None;
+                    update_status(&status, &source, playback_state, volume);
+                    continue;
+                }
+            },
+            None => {
+                playback_state = PlaybackState::Stopped;
+                update_status(&status, &source, playback_state, volume);
+                continue;
+            }
+        };
+
+        // Resample only if the device couldn't match the source rate.
+        let mut samples = if let Some(ref mut r) = resampler {
+            match r.process(&buffer.samples) {
+                Ok(resampled) => {
+                    if resampled.is_empty() {
+                        continue;
+                    }
+                    resampled
+                }
+                Err(e) => {
+                    log::error!("resample error: {e}");
+                    continue;
+                }
+            }
+        } else {
+            buffer.samples
+        };
+
+        // Everything from here is at current_rate (either native or resampled).
+        eq.process(&mut samples);
+
+        fft_analyser.process(&samples, current_channels);
+        if let Ok(mut fft) = fft_data.lock() {
+            *fft = fft_analyser.current_data(current_rate);
+        }
+
+        if (volume - 1.0).abs() > f32::EPSILON {
+            for sample in &mut samples {
+                *sample *= volume;
+            }
+        }
+
+        output.write(&samples);
+        update_status(&status, &source, playback_state, volume);
+    }
+}
+
+fn update_status(
+    status: &Arc<Mutex<EngineStatus>>,
+    source: &Option<Box<dyn AudioSource>>,
+    state: PlaybackState,
+    volume: f32,
+) {
+    if let Ok(mut s) = status.lock() {
+        s.state = state;
+        s.volume = volume;
+        if let Some(src) = source {
+            s.position = src.position().map(|d| d.as_secs_f64());
+            if let Ok(meta) = src.metadata() {
+                s.duration = meta.duration.map(|d| d.as_secs_f64());
+                s.metadata = Some(meta);
+            }
+        } else {
+            s.position = None;
+            s.duration = None;
+            s.metadata = None;
+        }
+    }
+}

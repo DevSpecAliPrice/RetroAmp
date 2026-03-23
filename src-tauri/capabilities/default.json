@@ -1,0 +1,11 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicedoc/schema/master/tauri-capability.json",
+  "identifier": "default",
+  "description": "Default capability set for RetroAmp",
+  "windows": ["*"],
+  "permissions": [
+    "core:default",
+    "shell:allow-open",
+    "dialog:allow-open"
+  ]
+}
