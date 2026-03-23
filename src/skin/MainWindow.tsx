@@ -40,6 +40,7 @@ interface PlaylistState {
 
 interface Props {
   skin: SkinData;
+  scale: number;
 }
 
 // Winamp main window is exactly 275x116.
@@ -85,7 +86,7 @@ const REGIONS = {
   pl: { x: 242, y: 58, w: 23, h: 12 },
 } as const;
 
-export default function MainWindow({ skin }: Props) {
+export default function MainWindow({ skin, scale }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [status, setStatus] = useState<EngineStatus>({
     state: "Stopped",
@@ -313,8 +314,8 @@ export default function MainWindow({ skin }: Props) {
       width={W}
       height={H}
       style={{
-        width: W,
-        height: H,
+        width: W * scale,
+        height: H * scale,
         imageRendering: "pixelated",
         cursor: "default",
         flexShrink: 0,

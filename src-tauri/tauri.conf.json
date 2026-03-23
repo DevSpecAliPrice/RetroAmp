@@ -13,12 +13,12 @@
     "windows": [
       {
         "title": "RetroAmp",
-        "width": 275,
-        "height": 500,
+        "width": 550,
+        "height": 580,
         "resizable": true,
-        "decorations": false,
+        "decorations": true,
         "minWidth": 275,
-        "minHeight": 300
+        "minHeight": 176
       }
     ],
     "security": {

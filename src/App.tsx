@@ -1,6 +1,9 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { LogicalSize } from "@tauri-apps/api/dpi";
+
 import { open } from "@tauri-apps/plugin-dialog";
 import { loadSkin, type SkinData } from "./skin/parser";
 import MainWindow from "./skin/MainWindow";
@@ -24,13 +27,24 @@ interface PlaylistState {
   track_count: number;
 }
 
-// Hardcoded path to bundled skin for now.
-// TODO: Make this configurable / load from skins directory.
-const DEFAULT_SKIN_PATH = "/home/n3o/Software_Projects/RetroAmp/Winamp_Classic_CM.wsz";
+const DEFAULT_SKIN_PATH =
+  "/home/n3o/Software_Projects/RetroAmp/Winamp_Classic_CM.wsz";
+
+/** Derive integer scale from the current window width. */
+function scaleFromWidth(width: number): number {
+  const raw = width / MAIN_W;
+  // Snap to nearest integer, minimum 1, maximum 4.
+  return Math.max(1, Math.min(4, Math.round(raw)));
+}
+
+const MAIN_W = 275;
+const MAIN_H = 116;
+const PLAYLIST_ROW_HEIGHT = 13;
 
 function App() {
   const [skin, setSkin] = useState<SkinData | null>(null);
   const [skinError, setSkinError] = useState<string | null>(null);
+  const [scale, setScale] = useState(() => scaleFromWidth(window.innerWidth));
   const [playlist, setPlaylist] = useState<PlaylistState>({
     tracks: [],
     current_index: null,
@@ -49,6 +63,38 @@ function App() {
         setSkinError(String(e));
       });
   }, []);
+
+  // Derive scale from window width whenever the window is resized.
+  useEffect(() => {
+    const onResize = () => {
+      setScale(scaleFromWidth(window.innerWidth));
+    };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  // Ctrl+D to cycle scale — attempts to resize the window (best-effort on Wayland).
+  useEffect(() => {
+    const handler = async (e: KeyboardEvent) => {
+      if (e.ctrlKey && e.key === "d") {
+        e.preventDefault();
+        const nextScale = scale >= 3 ? 1 : scale + 1;
+        const width = MAIN_W * nextScale;
+        const height = MAIN_H * nextScale + (PLAYLIST_ROW_HEIGHT * 12 + 20) * nextScale;
+        try {
+          const appWindow = getCurrentWindow();
+          await appWindow.setSize(new LogicalSize(width, height));
+        } catch {
+          // Wayland may reject this — the resize listener will update scale
+          // if the user manually resizes.
+        }
+        // Update scale directly in case setSize worked.
+        setScale(nextScale);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [scale]);
 
   // Poll playlist state.
   useEffect(() => {
@@ -127,6 +173,9 @@ function App() {
     );
   }
 
+  const scaledRowHeight = PLAYLIST_ROW_HEIGHT * scale;
+  const scaledFontSize = Math.round(11 * scale);
+
   return (
     <div
       style={{
@@ -137,8 +186,8 @@ function App() {
         background: "#000",
       }}
     >
-      {/* Skinned main window */}
-      <MainWindow skin={skin} />
+      {/* Skinned main window — rendered at native res, displayed at scale */}
+      <MainWindow skin={skin} scale={scale} />
 
       {/* Playlist below the main window */}
       <div
@@ -149,7 +198,7 @@ function App() {
           minHeight: 0,
           background: skin.playlistStyle.normalbg,
           fontFamily: `"${skin.playlistStyle.font}", Arial, sans-serif`,
-          fontSize: "11px",
+          fontSize: `${scaledFontSize}px`,
         }}
       >
         {/* Playlist header bar */}
@@ -158,22 +207,25 @@ function App() {
             display: "flex",
             justifyContent: "space-between",
             alignItems: "center",
-            padding: "2px 6px",
+            padding: `${2 * scale}px ${6 * scale}px`,
             background: "#1a1a2e",
             color: "#888",
-            fontSize: "9px",
+            fontSize: `${Math.round(9 * scale)}px`,
             flexShrink: 0,
             cursor: "move",
           }}
           data-tauri-drag-region
         >
           <span>
-            {playlist.track_count} track{playlist.track_count !== 1 ? "s" : ""}
+            {playlist.track_count} track
+            {playlist.track_count !== 1 ? "s" : ""}
             {playlist.total_duration
               ? ` — ${formatTotalTime(playlist.total_duration)}`
               : ""}
+            {" "}
+            <span style={{ color: "#555" }}>({scale}x)</span>
           </span>
-          <div style={{ display: "flex", gap: "8px" }}>
+          <div style={{ display: "flex", gap: `${8 * scale}px` }}>
             <span
               style={{ cursor: "pointer" }}
               onClick={openFiles}
@@ -201,20 +253,19 @@ function App() {
           style={{
             flex: 1,
             overflowY: "auto",
-            padding: "1px 0",
+            padding: `${scale}px 0`,
           }}
         >
           {playlist.tracks.length === 0 ? (
             <div
               style={{
-                padding: "20px",
+                padding: `${20 * scale}px`,
                 textAlign: "center",
                 color: "#555",
-                fontSize: "11px",
                 userSelect: "none",
               }}
             >
-              Drop audio files here or click +ADD
+              Drop audio files here, click +ADD, or press Ctrl+D to resize
             </div>
           ) : (
             playlist.tracks.map((track, index) => (
@@ -224,9 +275,9 @@ function App() {
                 style={{
                   display: "flex",
                   alignItems: "center",
-                  padding: "0 6px",
-                  height: "13px",
-                  lineHeight: "13px",
+                  padding: `0 ${6 * scale}px`,
+                  height: `${scaledRowHeight}px`,
+                  lineHeight: `${scaledRowHeight}px`,
                   cursor: "default",
                   userSelect: "none",
                   backgroundColor: track.is_current
@@ -239,9 +290,9 @@ function App() {
               >
                 <span
                   style={{
-                    minWidth: "22px",
+                    minWidth: `${22 * scale}px`,
                     textAlign: "right",
-                    marginRight: "4px",
+                    marginRight: `${4 * scale}px`,
                     opacity: 0.6,
                   }}
                 >
@@ -259,10 +310,10 @@ function App() {
                 </span>
                 <span
                   style={{
-                    marginLeft: "6px",
+                    marginLeft: `${6 * scale}px`,
                     opacity: 0.7,
                     fontFamily: "monospace",
-                    fontSize: "10px",
+                    fontSize: `${Math.round(10 * scale)}px`,
                   }}
                 >
                   {track.duration}
