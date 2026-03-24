@@ -60,6 +60,11 @@ pub fn set_volume(engine: State<'_, Arc<AudioEngine>>, volume: f32) {
     engine.set_volume(volume);
 }
 
+#[tauri::command]
+pub fn set_balance(engine: State<'_, Arc<AudioEngine>>, balance: f32) {
+    engine.set_balance(balance);
+}
+
 // -- Playlist commands --
 
 /// Add files to the playlist and start playing the first one if nothing
@@ -280,13 +285,22 @@ pub async fn toggle_window(
         let h = if resizable { main_h * 2.0 } else { main_h };
 
         eprintln!("[retroamp] creating window: label={label} size={w}x{h} (main={main_w}x{main_h})");
-        WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
+
+        let mut builder = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
             .title(format!("RetroAmp — {}", label))
             .inner_size(w, h)
             .decorations(false)
             .resizable(resizable)
             .visible(true)
-            .build()
+            .skip_taskbar(true); // Don't show separate taskbar entry.
+
+        // Set the main window as parent so closing main closes everything.
+        if let Some(main_win) = app.get_webview_window("main") {
+            builder = builder.parent(&main_win)
+                .map_err(|e| format!("failed to set parent window: {e}"))?;
+        }
+
+        builder.build()
             .map_err(|e| {
                 eprintln!("[retroamp] window creation failed: {e}");
                 e.to_string()
@@ -327,6 +341,64 @@ pub async fn set_scale(
     Ok(wm.get_states())
 }
 
+// -- Shade mode commands --
+
+/// Enter shade mode: create a compact 275x14 shade window and hide the main window.
+/// The main window is hidden (not closed) so child windows remain valid.
+#[tauri::command]
+pub async fn enter_shade(
+    app: AppHandle,
+    window_manager: State<'_, Mutex<WindowManager>>,
+) -> Result<(), String> {
+    let scale = {
+        let wm = window_manager.lock().map_err(|e| e.to_string())?;
+        wm.scale()
+    };
+
+    // Derive shade size from the main window's actual dimensions so we
+    // match whatever the compositor is actually giving us.
+    // shade height = main height * (14 / 116)
+    let (w, h) = app
+        .get_webview_window("main")
+        .and_then(|win| win.inner_size().ok())
+        .map(|s| (s.width as f64, (s.height as f64 * 14.0 / 116.0).round()))
+        .unwrap_or((275.0 * scale as f64, 14.0 * scale as f64));
+
+    eprintln!("[retroamp] shade window size: {w}x{h}");
+
+    // Only create if it doesn't already exist.
+    if app.get_webview_window("shade").is_none() {
+        WebviewWindowBuilder::new(&app, "shade", WebviewUrl::App("/?window=shade".into()))
+            .title("RetroAmp")
+            .inner_size(w, h)
+            .decorations(false)
+            .resizable(false)
+            .visible(true)
+            .build()
+            .map_err(|e| e.to_string())?;
+    }
+
+    // Hide main window.
+    if let Some(main) = app.get_webview_window("main") {
+        main.hide().map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+/// Exit shade mode: show the main window and close the shade window.
+#[tauri::command]
+pub async fn exit_shade(app: AppHandle) -> Result<(), String> {
+    if let Some(main) = app.get_webview_window("main") {
+        main.show().map_err(|e| e.to_string())?;
+        main.set_focus().map_err(|e| e.to_string())?;
+    }
+    if let Some(shade) = app.get_webview_window("shade") {
+        shade.close().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 // -- Skin commands --
 
 /// Load a skin from a .wsz archive or extracted directory.
@@ -336,37 +408,107 @@ pub fn load_skin(path: String) -> Result<SkinContents, String> {
 }
 
 /// Set the active skin path (so all windows can pick it up).
+/// Also persists the choice to config so it survives restarts.
 #[tauri::command]
 pub fn set_active_skin(
     window_manager: State<'_, Mutex<WindowManager>>,
     path: String,
 ) -> Result<(), String> {
     let mut wm = window_manager.lock().map_err(|e| e.to_string())?;
-    wm.set_active_skin_path(path);
+    wm.set_active_skin_path(path.clone());
+
+    // Persist to config (best-effort — don't fail the command if this errors).
+    let mut cfg = crate::config::AppConfig::load();
+    cfg.last_skin_path = Some(path);
+    let _ = cfg.save();
+
     Ok(())
+}
+
+/// Return the last-used skin path from config (if any and still exists on disk).
+#[tauri::command]
+pub fn get_last_skin_path() -> Option<String> {
+    let cfg = crate::config::AppConfig::load();
+    cfg.last_skin_path.filter(|p| std::path::Path::new(p).exists())
+}
+
+/// Return the platform-appropriate skins directory, creating it if needed.
+///
+/// - Linux:   `~/.config/retroamp/skins/`
+/// - macOS:   `~/Library/Application Support/retroamp/skins/`
+/// - Windows: `C:\Users\<user>\AppData\Roaming\retroamp\skins\`
+#[tauri::command]
+pub fn get_skins_dir() -> Result<String, String> {
+    let dir = skins_dir().ok_or("could not determine config directory")?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("failed to create skins directory: {e}"))?;
+    Ok(dir.to_string_lossy().into_owned())
 }
 
 /// List all available skins from the skins directories.
 #[tauri::command]
 pub fn get_skins() -> Vec<SkinInfo> {
-    use std::path::PathBuf;
-
     let mut dirs = Vec::new();
 
-    // Project skins directory (for development).
-    let project_skins = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map(|p| p.join("skins"));
-    if let Some(dir) = project_skins {
+    // Platform skins directory (primary).
+    if let Some(dir) = skins_dir() {
+        // Ensure it exists so users always have a place to drop skins.
+        let _ = std::fs::create_dir_all(&dir);
         dirs.push(dir);
     }
 
-    // XDG user skins directory.
-    if let Some(config) = dirs::config_dir() {
-        dirs.push(config.join("retroamp").join("skins"));
+    // User-configured extra skin directories.
+    for dir in crate::config::AppConfig::load().extra_skin_dirs {
+        if dir.is_dir() {
+            dirs.push(dir);
+        }
+    }
+
+    // Project skins directory (development convenience).
+    if cfg!(debug_assertions) {
+        let project_skins = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .map(|p| p.join("skins"));
+        if let Some(dir) = project_skins {
+            if dir.is_dir() {
+                dirs.push(dir);
+            }
+        }
     }
 
     crate::skin::scanner::scan_all(&dirs)
+}
+
+/// Add a user-chosen directory to the skin scan list.
+#[tauri::command]
+pub fn add_skin_dir(path: String) -> Result<Vec<String>, String> {
+    let mut cfg = crate::config::AppConfig::load();
+    cfg.add_skin_dir(path.into());
+    cfg.save()?;
+    Ok(cfg.extra_skin_dirs.iter().map(|p| p.to_string_lossy().into_owned()).collect())
+}
+
+/// Remove a directory from the skin scan list.
+#[tauri::command]
+pub fn remove_skin_dir(path: String) -> Result<Vec<String>, String> {
+    let mut cfg = crate::config::AppConfig::load();
+    cfg.remove_skin_dir(&path.into());
+    cfg.save()?;
+    Ok(cfg.extra_skin_dirs.iter().map(|p| p.to_string_lossy().into_owned()).collect())
+}
+
+/// Get the list of extra skin directories.
+#[tauri::command]
+pub fn get_extra_skin_dirs() -> Vec<String> {
+    crate::config::AppConfig::load()
+        .extra_skin_dirs
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect()
+}
+
+fn skins_dir() -> Option<std::path::PathBuf> {
+    dirs::config_dir().map(|c| c.join("retroamp").join("skins"))
 }
 
 // -- Internal helpers --

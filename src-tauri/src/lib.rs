@@ -2,6 +2,7 @@
 
 pub mod audio;
 pub mod commands;
+pub mod config;
 pub mod playlist;
 pub mod skin;
 pub mod window;
@@ -54,11 +55,27 @@ pub fn run() {
         .manage(playlist_manager)
         .manage(Mutex::new(window_manager))
         .on_window_event(|window, event| {
-            // When a secondary window is closed by the compositor (e.g. user
-            // clicks the X), update the WindowManager so the PL/EQ buttons
-            // reflect the correct state.
             if let tauri::WindowEvent::Destroyed = event {
                 let label = window.label();
+
+                if label == "main" {
+                    // Main window closed — exit the entire application.
+                    // Child windows are destroyed automatically by the parent
+                    // relationship, but we also need to stop the audio engine
+                    // and exit the process.
+                    std::process::exit(0);
+                }
+
+                // Shade window closed — restore main window.
+                if label == "shade" {
+                    if let Some(main) = window.app_handle().get_webview_window("main") {
+                        let _ = main.show();
+                        let _ = main.set_focus();
+                    }
+                }
+
+                // Secondary window closed — update WindowManager state
+                // so PL/EQ buttons reflect the correct state.
                 let window_id = match label {
                     "playlist" => Some(WindowId::Playlist),
                     "equalizer" => Some(WindowId::Equalizer),
@@ -83,6 +100,7 @@ pub fn run() {
             commands::seek,
             commands::set_eq,
             commands::set_volume,
+            commands::set_balance,
             // Playlist
             commands::play_file,
             commands::playlist_add_files,
@@ -97,12 +115,19 @@ pub fn run() {
             // Skin
             commands::load_skin,
             commands::get_skins,
+            commands::get_skins_dir,
             commands::set_active_skin,
+            commands::get_last_skin_path,
+            commands::add_skin_dir,
+            commands::remove_skin_dir,
+            commands::get_extra_skin_dirs,
             // Windows
             commands::toggle_window,
             commands::get_window_states,
             commands::cycle_scale,
             commands::set_scale,
+            commands::enter_shade,
+            commands::exit_shade,
         ])
         .run(tauri::generate_context!())
         .expect("error while running RetroAmp");

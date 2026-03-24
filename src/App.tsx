@@ -5,8 +5,7 @@ import { loadSkin, type SkinData } from "./skin/parser";
 import MainWindow from "./skin/MainWindow";
 import PlaylistWindow from "./skin/PlaylistWindow";
 
-const DEFAULT_SKIN_PATH =
-  "/home/n3o/Software_Projects/RetroAmp/skins/Winamp_Classic_CM.wsz";
+const DEFAULT_SKIN_NAME = "Winamp_Classic_CM.wsz";
 
 function detectPanel(): string {
   const params = new URLSearchParams(window.location.search);
@@ -24,7 +23,7 @@ function App() {
   const [skin, setSkin] = useState<SkinData | null>(null);
   const [skinError, setSkinError] = useState<string | null>(null);
   const [scale, setScale] = useState(2);
-  const currentSkinPath = useRef<string>(DEFAULT_SKIN_PATH);
+  const currentSkinPath = useRef<string>("");
 
   // Load skin — used both for initial load and skin switching.
   const doLoadSkin = async (path: string) => {
@@ -48,9 +47,25 @@ function App() {
         // and also restarts where the main window re-opens).
         await doLoadSkin(ws.active_skin_path);
       } else {
-        // No skin active yet — this is the first window. Set the default.
-        await invoke("set_active_skin", { path: DEFAULT_SKIN_PATH });
-        await doLoadSkin(DEFAULT_SKIN_PATH);
+        // No skin active in memory — check if we have a persisted choice.
+        const lastPath = await invoke<string | null>("get_last_skin_path");
+        if (lastPath) {
+          await invoke("set_active_skin", { path: lastPath });
+          await doLoadSkin(lastPath);
+        } else {
+          // First launch — pick a default from available skins.
+          const skins = await invoke<{ name: string; path: string }[]>("get_skins");
+          const preferred = skins.find((s) => s.name === DEFAULT_SKIN_NAME);
+          const fallback = preferred ?? skins[0];
+          if (fallback) {
+            await invoke("set_active_skin", { path: fallback.path });
+            await doLoadSkin(fallback.path);
+          } else {
+            setSkinError(
+              "No skins found. Drop .wsz files into the skins directory."
+            );
+          }
+        }
       }
     })();
   }, []);
@@ -120,6 +135,8 @@ function App() {
           EQ (coming soon)
         </div>
       );
+    case "shade":
+      return <MainWindow skin={skin} scale={scale} isShade />;
     default:
       return <MainWindow skin={skin} scale={scale} onSkinChange={handleSkinChange} />;
   }

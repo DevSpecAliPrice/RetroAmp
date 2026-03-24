@@ -29,6 +29,7 @@ pub enum EngineCommand {
     Seek(Duration),
     SetEq(EqSettings),
     SetVolume(f32),
+    SetBalance(f32),
     Shutdown,
 }
 
@@ -48,6 +49,7 @@ pub struct EngineStatus {
     pub duration: Option<f64>,
     pub metadata: Option<TrackMetadata>,
     pub volume: f32,
+    pub balance: f32,
 }
 
 /// Events emitted by the audio engine.
@@ -82,6 +84,7 @@ impl AudioEngine {
             duration: None,
             metadata: None,
             volume: 1.0,
+            balance: 0.0,
         }));
 
         let fft_data = Arc::new(Mutex::new(FftData {
@@ -144,6 +147,10 @@ impl AudioEngine {
 
     pub fn set_volume(&self, volume: f32) {
         let _ = self.command_tx.send(EngineCommand::SetVolume(volume));
+    }
+
+    pub fn set_balance(&self, balance: f32) {
+        let _ = self.command_tx.send(EngineCommand::SetBalance(balance));
     }
 
     pub fn status(&self) -> EngineStatus {
@@ -209,6 +216,7 @@ fn audio_thread(
     let mut resampler: Option<AudioResampler> = None;
     let mut playback_state = PlaybackState::Stopped;
     let mut volume: f32 = 1.0;
+    let mut balance: f32 = 0.0;
     let mut eq = Equalizer::new(current_rate, current_channels);
     let mut fft_analyser = FftAnalyser::new();
 
@@ -268,25 +276,25 @@ fn audio_thread(
 
                     source = Some(new_source);
                     playback_state = PlaybackState::Playing;
-                    update_status(&status, &source, playback_state, volume);
+                    update_status(&status, &source, playback_state, volume, balance);
                 }
                 EngineCommand::Pause => {
                     if playback_state == PlaybackState::Playing {
                         playback_state = PlaybackState::Paused;
-                        update_status(&status, &source, playback_state, volume);
+                        update_status(&status, &source, playback_state, volume, balance);
                     }
                 }
                 EngineCommand::Resume => {
                     if playback_state == PlaybackState::Paused {
                         playback_state = PlaybackState::Playing;
-                        update_status(&status, &source, playback_state, volume);
+                        update_status(&status, &source, playback_state, volume, balance);
                     }
                 }
                 EngineCommand::Stop => {
                     source = None;
                     resampler = None;
                     playback_state = PlaybackState::Stopped;
-                    update_status(&status, &source, playback_state, volume);
+                    update_status(&status, &source, playback_state, volume, balance);
                 }
                 EngineCommand::Seek(pos) => {
                     if let Some(src) = source.as_mut() {
@@ -300,7 +308,11 @@ fn audio_thread(
                 }
                 EngineCommand::SetVolume(v) => {
                     volume = v.clamp(0.0, 1.0);
-                    update_status(&status, &source, playback_state, volume);
+                    update_status(&status, &source, playback_state, volume, balance);
+                }
+                EngineCommand::SetBalance(b) => {
+                    balance = b.clamp(-1.0, 1.0);
+                    update_status(&status, &source, playback_state, volume, balance);
                 }
                 EngineCommand::Shutdown => {
                     return;
@@ -322,7 +334,7 @@ fn audio_thread(
                     playback_state = PlaybackState::Stopped;
                     source = None;
                     resampler = None;
-                    update_status(&status, &source, playback_state, volume);
+                    update_status(&status, &source, playback_state, volume, balance);
                     let _ = event_tx.send(EngineEvent::TrackFinished);
                     continue;
                 }
@@ -331,14 +343,14 @@ fn audio_thread(
                     playback_state = PlaybackState::Stopped;
                     source = None;
                     resampler = None;
-                    update_status(&status, &source, playback_state, volume);
+                    update_status(&status, &source, playback_state, volume, balance);
                     let _ = event_tx.send(EngineEvent::TrackFinished);
                     continue;
                 }
             },
             None => {
                 playback_state = PlaybackState::Stopped;
-                update_status(&status, &source, playback_state, volume);
+                update_status(&status, &source, playback_state, volume, balance);
                 continue;
             }
         };
@@ -369,7 +381,20 @@ fn audio_thread(
             *fft = fft_analyser.current_data(current_rate);
         }
 
-        if (volume - 1.0).abs() > f32::EPSILON {
+        // Apply volume and balance (pan). For stereo interleaved [L, R, L, R, ...]:
+        // balance: -1.0 = full left, 0.0 = center, 1.0 = full right.
+        let left_gain = volume * if balance > 0.0 { 1.0 - balance } else { 1.0 };
+        let right_gain = volume * if balance < 0.0 { 1.0 + balance } else { 1.0 };
+        let needs_gain = (left_gain - 1.0).abs() > f32::EPSILON
+            || (right_gain - 1.0).abs() > f32::EPSILON;
+
+        if needs_gain && current_channels >= 2 {
+            for frame in samples.chunks_exact_mut(current_channels as usize) {
+                frame[0] *= left_gain;
+                frame[1] *= right_gain;
+            }
+        } else if needs_gain {
+            // Mono — just apply volume, balance has no effect.
             for sample in &mut samples {
                 *sample *= volume;
             }
@@ -386,7 +411,7 @@ fn audio_thread(
             }
         }
 
-        update_status(&status, &source, playback_state, volume);
+        update_status(&status, &source, playback_state, volume, balance);
     }
 }
 
@@ -395,10 +420,12 @@ fn update_status(
     source: &Option<Box<dyn AudioSource>>,
     state: PlaybackState,
     volume: f32,
+    balance: f32,
 ) {
     if let Ok(mut s) = status.lock() {
         s.state = state;
         s.volume = volume;
+        s.balance = balance;
         if let Some(src) = source {
             s.position = src.position().map(|d| d.as_secs_f64());
             if let Ok(meta) = src.metadata() {

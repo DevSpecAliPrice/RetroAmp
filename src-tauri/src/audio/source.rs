@@ -22,6 +22,7 @@ pub struct TrackMetadata {
     pub duration: Option<Duration>,
     pub sample_rate: u32,
     pub channels: u16,
+    pub bitrate: Option<u32>,
     pub genre: Option<String>,
     pub year: Option<u32>,
     pub track_number: Option<u32>,

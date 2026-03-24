@@ -39,8 +39,10 @@ interface EngineStatus {
     artist: string | null;
     sample_rate: number;
     channels: number;
+    bitrate: number | null;
   } | null;
   volume: number;
+  balance: number;
 }
 
 interface PlaylistState {
@@ -52,12 +54,14 @@ interface PlaylistState {
 interface Props {
   skin: SkinData;
   scale: number;
+  isShade?: boolean;
   onSkinChange?: (path: string) => void;
 }
 
-// Winamp main window is exactly 275x116.
+// Winamp main window is exactly 275x116, shade mode is 275x14.
 const W = 275;
 const H = 116;
+const SHADE_H = 14;
 
 /**
  * Positions of interactive elements in the main window.
@@ -89,6 +93,9 @@ const REGIONS = {
   // Volume slider
   volume: { x: 107, y: 57, w: 68, h: 14 },
 
+  // Balance slider
+  balance: { x: 177, y: 57, w: 38, h: 14 },
+
   // Shuffle/repeat
   shuffle: { x: 164, y: 89, w: 47, h: 15 },
   repeat: { x: 211, y: 89, w: 28, h: 15 },
@@ -98,13 +105,27 @@ const REGIONS = {
   pl: { x: 242, y: 58, w: 23, h: 12 },
 } as const;
 
+/** Click regions for shade mode (275x14). */
+const SHADE_REGIONS = {
+  titleBar: { x: 0, y: 0, w: 244, h: 14 },
+  minimize: { x: 244, y: 3, w: 9, h: 9 },
+  unshade: { x: 254, y: 3, w: 9, h: 9 },
+  close: { x: 264, y: 3, w: 9, h: 9 },
+  posbar: { x: 226, y: 4, w: 17, h: 7 },
+  timeDisplay: { x: 127, y: 4, w: 26, h: 6 },
+} as const;
+
+/** Shade mode text area for scrolling track title. */
+const SHADE_TEXT_X = 24;
+const SHADE_TEXT_Y = 4;
+const SHADE_TEXT_W = 100;
 interface SkinListItem {
   name: string;
   path: string;
   skin_type: "Classic" | "Modern" | "Unknown";
 }
 
-export default function MainWindow({ skin, onSkinChange }: Props) {
+export default function MainWindow({ skin, isShade = false, onSkinChange }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [status, setStatus] = useState<EngineStatus>({
     state: "Stopped",
@@ -112,6 +133,7 @@ export default function MainWindow({ skin, onSkinChange }: Props) {
     duration: null,
     metadata: null,
     volume: 1.0,
+    balance: 0.0,
   });
   const [windowStates, setWindowStates] = useState<Record<string, { visible: boolean }>>({});
   const [playlist, setPlaylist] = useState<PlaylistState>({
@@ -122,6 +144,14 @@ export default function MainWindow({ skin, onSkinChange }: Props) {
   const [pressed, setPressed] = useState<string | null>(null);
   const [marqueeOffset, setMarqueeOffset] = useState(0);
   const [fftData, setFftData] = useState<number[]>([]);
+  const [showRemaining, setShowRemaining] = useState(false);
+  const [tooltip, setTooltip] = useState<{ text: string; x: number; y: number } | null>(null);
+  const tooltipTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const tooltipText = useRef("");
+  const dragging = useRef<"volume" | "balance" | "posbar" | null>(null);
+
+  // Shorthand for playlist style (used by context menu theming).
+  const ps = skin.playlistStyle;
 
   // Build the marquee text from current metadata.
   const meta = status.metadata;
@@ -186,6 +216,9 @@ export default function MainWindow({ skin, onSkinChange }: Props) {
     return () => clearInterval(interval);
   }, []);
 
+  // Current canvas height depends on shade mode.
+  const canvasH = isShade ? SHADE_H : H;
+
   // Render the main window.
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -193,8 +226,78 @@ export default function MainWindow({ skin, onSkinChange }: Props) {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
+    const titlebar = skin.sheets["titlebar"];
+    const textBmp = skin.sheets["text"];
+
     // Clear.
-    ctx.clearRect(0, 0, W, H);
+    ctx.clearRect(0, 0, W, canvasH);
+
+    // ── SHADE MODE ──
+    if (isShade) {
+      // 1) Shade background from titlebar.bmp — active/focused at (27, 29).
+      if (titlebar) {
+        ctx.drawImage(titlebar, 27, 29, 275, 14, 0, 0, 275, 14);
+      }
+
+      // 2) Scrolling track title using text.bmp.
+      if (textBmp && scrollText.length > 0) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(SHADE_TEXT_X, SHADE_TEXT_Y, SHADE_TEXT_W, CHAR_HEIGHT);
+        ctx.clip();
+        for (let i = 0; i < scrollText.length; i++) {
+          const destX = SHADE_TEXT_X + i * CHAR_WIDTH - marqueeOffset;
+          if (destX + CHAR_WIDTH < SHADE_TEXT_X || destX > SHADE_TEXT_X + SHADE_TEXT_W) continue;
+          const { x: sx, y: sy } = getCharCoords(scrollText[i]);
+          ctx.drawImage(textBmp, sx, sy, CHAR_WIDTH, CHAR_HEIGHT, destX, SHADE_TEXT_Y, CHAR_WIDTH, CHAR_HEIGHT);
+        }
+        ctx.restore();
+      }
+
+      // 3) Mini time display using text.bmp at (127, 4).
+      if (textBmp && status.position !== null) {
+        let displaySecs: number;
+        let prefix = "";
+        if (showRemaining && status.duration && status.duration > 0) {
+          displaySecs = Math.floor(status.duration - status.position);
+          if (displaySecs < 0) displaySecs = 0;
+          prefix = "-";
+        } else {
+          displaySecs = Math.floor(status.position);
+        }
+        const m = Math.floor(displaySecs / 60);
+        const s = displaySecs % 60;
+        const timeStr = `${prefix}${m}:${s.toString().padStart(2, "0")}`;
+        for (let i = 0; i < timeStr.length; i++) {
+          const { x: sx, y: sy } = getCharCoords(timeStr[i]);
+          ctx.drawImage(textBmp, sx, sy, CHAR_WIDTH, CHAR_HEIGHT, 127 + i * CHAR_WIDTH, 4, CHAR_WIDTH, CHAR_HEIGHT);
+        }
+      }
+
+      // 4) Mini position bar from titlebar.bmp.
+      if (titlebar) {
+        // Background: (0, 36, 17, 7) → dest (226, 4).
+        ctx.drawImage(titlebar, 0, 36, 17, 7, 226, 4, 17, 7);
+        // Thumb: 3px wide.
+        if (status.position !== null && status.duration && status.duration > 0) {
+          const fraction = status.position / status.duration;
+          const thumbX = Math.round(fraction * (17 - 3));
+          ctx.drawImage(titlebar, 20, 36, 3, 7, 226 + thumbX, 4, 3, 7);
+        }
+      }
+
+      // 5) Title bar buttons — minimize, unshade, close.
+      // These are part of the shade background; draw pressed states on top.
+      if (titlebar) {
+        if (pressed === "minimize") ctx.drawImage(titlebar, 9, 9, 9, 9, 244, 3, 9, 9);
+        if (pressed === "unshade") ctx.drawImage(titlebar, 9, 27, 9, 9, 254, 3, 9, 9);
+        if (pressed === "close") ctx.drawImage(titlebar, 18, 9, 9, 9, 264, 3, 9, 9);
+      }
+
+      // Done — skip normal rendering.
+    } else {
+
+    // ── NORMAL MODE ──
 
     // 1) Draw the main background.
     const bg = skin.sheets["main"];
@@ -203,14 +306,12 @@ export default function MainWindow({ skin, onSkinChange }: Props) {
     }
 
     // 2) Draw the active title bar on top.
-    const titlebar = skin.sheets["titlebar"];
     if (titlebar) {
       // Selected title bar: x=27, y=0, 275x14 in titlebar.bmp
       ctx.drawImage(titlebar, 27, 0, 275, 14, 0, 0, 275, 14);
     }
 
     // 2.5) Draw marquee text from text.bmp.
-    const textBmp = skin.sheets["text"];
     if (textBmp && scrollText.length > 0) {
       // Save context and clip to the marquee area.
       ctx.save();
@@ -282,9 +383,19 @@ export default function MainWindow({ skin, onSkinChange }: Props) {
     // Prefer nums_ex.bmp if available (many skins only include this).
     const numbers = skin.sheets["nums_ex"] ?? skin.sheets["numbers"];
     if (numbers && status.position !== null) {
-      const totalSecs = Math.floor(status.position);
-      const mins = Math.floor(totalSecs / 60);
-      const secs = totalSecs % 60;
+      let displaySecs: number;
+      let isNegative = false;
+
+      if (showRemaining && status.duration && status.duration > 0) {
+        displaySecs = Math.floor(status.duration - status.position);
+        if (displaySecs < 0) displaySecs = 0;
+        isNegative = true;
+      } else {
+        displaySecs = Math.floor(status.position);
+      }
+
+      const mins = Math.floor(displaySecs / 60);
+      const secs = displaySecs % 60;
       const digits = [
         Math.floor(mins / 10),
         mins % 10,
@@ -293,8 +404,13 @@ export default function MainWindow({ skin, onSkinChange }: Props) {
       ];
       // Time display starts at x=48, y=26 — two digits, colon gap, two digits.
       const positions = [36, 48, 60, 78, 90]; // min10, min1, (colon), sec10, sec1
-      // First digit (tens of minutes) — only draw if > 0
-      if (digits[0] > 0) {
+
+      // Draw minus sign for remaining time (index 10 in the numbers strip, at srcX=90).
+      if (isNegative) {
+        ctx.drawImage(numbers, 90, 0, 9, 13, 27, 26, 9, 13);
+      }
+      // First digit (tens of minutes) — only draw if > 0 or showing remaining
+      if (digits[0] > 0 || isNegative) {
         drawDigit(ctx, numbers, digits[0], positions[0], 26);
       }
       drawDigit(ctx, numbers, digits[1], positions[1], 26);
@@ -311,6 +427,26 @@ export default function MainWindow({ skin, onSkinChange }: Props) {
         ctx.drawImage(monoster, 0, 0, 29, 12, 212, 41, 29, 12);
       } else {
         ctx.drawImage(monoster, 29, 0, 27, 12, 241, 41, 27, 12);
+      }
+    }
+
+    // 5b) Draw bitrate (kbps) and sample rate (kHz) using text.bmp.
+    // Classic Winamp positions: kbps at x=111, y=43; kHz at x=156, y=43.
+    if (textBmp && status.metadata) {
+      const bitrate = status.metadata.bitrate;
+      if (bitrate !== null && bitrate !== undefined) {
+        const kbpsStr = String(Math.min(bitrate, 999)).padStart(3, " ");
+        for (let i = 0; i < kbpsStr.length; i++) {
+          const { x: sx, y: sy } = getCharCoords(kbpsStr[i]);
+          ctx.drawImage(textBmp, sx, sy, CHAR_WIDTH, CHAR_HEIGHT, 111 + i * CHAR_WIDTH, 43, CHAR_WIDTH, CHAR_HEIGHT);
+        }
+      }
+
+      const khz = Math.floor(status.metadata.sample_rate / 1000);
+      const khzStr = String(khz).padStart(2, " ");
+      for (let i = 0; i < khzStr.length; i++) {
+        const { x: sx, y: sy } = getCharCoords(khzStr[i]);
+        ctx.drawImage(textBmp, sx, sy, CHAR_WIDTH, CHAR_HEIGHT, 156 + i * CHAR_WIDTH, 43, CHAR_WIDTH, CHAR_HEIGHT);
       }
     }
 
@@ -375,15 +511,75 @@ export default function MainWindow({ skin, onSkinChange }: Props) {
     const volumeSheet = skin.sheets["volume"];
     if (volumeSheet) {
       // The volume BMP has 28 frames stacked vertically, each 68x15.
-      // Frame index is determined by the current volume level.
       const frame = Math.round(status.volume * 27);
       const srcY = frame * 15;
       ctx.drawImage(volumeSheet, 0, srcY, 68, 14, 107, 57, 68, 14);
       // Draw thumb.
       const thumbX = Math.round(status.volume * (68 - 14));
-      ctx.drawImage(volumeSheet, 15, 422, 14, 11, 107 + thumbX, 58, 14, 11);
+      const volThumbSrcX = pressed === "volume" ? 0 : 15;
+      ctx.drawImage(volumeSheet, volThumbSrcX, 422, 14, 11, 107 + thumbX, 58, 14, 11);
     }
-  }, [skin, status, playlist, pressed, marqueeOffset, scrollText, fftData, windowStates]);
+
+    // 10) Draw balance slider.
+    const balanceSheet = skin.sheets["balance"];
+    if (balanceSheet) {
+      // Balance BMP: 28 frames of 38x15, same vertical layout as volume.
+      // balance: -1.0..1.0 → fraction 0.0..1.0
+      const balFraction = (status.balance + 1) / 2;
+      const balFrame = Math.round(balFraction * 27);
+      const balSrcY = balFrame * 15;
+      ctx.drawImage(balanceSheet, 9, balSrcY, 38, 14, 177, 57, 38, 14);
+      // Draw thumb.
+      const balThumbX = Math.round(balFraction * (38 - 14));
+      const balThumbSrcX = pressed === "balance" ? 0 : 15;
+      ctx.drawImage(balanceSheet, balThumbSrcX, 422, 14, 11, 177 + balThumbX, 58, 14, 11);
+    }
+
+    } // end normal mode
+  }, [skin, status, playlist, pressed, marqueeOffset, scrollText, fftData, windowStates, showRemaining, isShade, canvasH]);
+
+  // Slider drag helper — converts pixel x to the appropriate invoke call.
+  const applySlider = useCallback(
+    (type: "volume" | "balance" | "posbar", x: number) => {
+      if (type === "volume") {
+        const fraction = Math.max(0, Math.min(1, (x - REGIONS.volume.x) / REGIONS.volume.w));
+        invoke("set_volume", { volume: fraction });
+      } else if (type === "balance") {
+        // Balance: 0.0 at left edge → 1.0 at right edge, map to -1.0..1.0
+        const fraction = Math.max(0, Math.min(1, (x - REGIONS.balance.x) / REGIONS.balance.w));
+        invoke("set_balance", { balance: fraction * 2 - 1 });
+      } else if (type === "posbar") {
+        if (status.duration && status.duration > 0) {
+          const fraction = Math.max(0, Math.min(1, (x - REGIONS.posbar.x) / REGIONS.posbar.w));
+          invoke("seek", { positionSecs: fraction * status.duration });
+        }
+      }
+    },
+    [status.duration],
+  );
+
+  // Global drag listeners for smooth slider dragging.
+  useEffect(() => {
+    const onMouseMove = (e: MouseEvent) => {
+      if (!dragging.current) return;
+      const rect = canvasRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const x = Math.round((e.clientX - rect.left) * (W / rect.width));
+      applySlider(dragging.current, x);
+    };
+    const onMouseUp = () => {
+      if (dragging.current) {
+        dragging.current = null;
+        setPressed(null);
+      }
+    };
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+    return () => {
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+    };
+  }, [applySlider]);
 
   // Click handling.
   const handleMouseDown = useCallback(
@@ -391,10 +587,46 @@ export default function MainWindow({ skin, onSkinChange }: Props) {
       const rect = canvasRef.current?.getBoundingClientRect();
       if (!rect) return;
       const x = Math.round((e.clientX - rect.left) * (W / rect.width));
-      const y = Math.round((e.clientY - rect.top) * (H / rect.height));
+      const y = Math.round((e.clientY - rect.top) * (canvasH / rect.height));
 
       const hit = (r: { x: number; y: number; w: number; h: number }) =>
         x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
+
+      // ── SHADE MODE CLICKS ──
+      if (isShade) {
+        if (hit(SHADE_REGIONS.titleBar) && !hit(SHADE_REGIONS.minimize) && !hit(SHADE_REGIONS.unshade) && !hit(SHADE_REGIONS.close)) {
+          getCurrentWindow().startDragging();
+          return;
+        }
+        if (hit(SHADE_REGIONS.minimize)) {
+          setPressed("minimize");
+          getCurrentWindow().minimize();
+          return;
+        }
+        if (hit(SHADE_REGIONS.unshade)) {
+          setPressed("unshade");
+          invoke("exit_shade");
+          return;
+        }
+        if (hit(SHADE_REGIONS.close)) {
+          getCurrentWindow().close();
+          return;
+        }
+        if (hit(SHADE_REGIONS.timeDisplay)) {
+          setShowRemaining((prev) => !prev);
+          return;
+        }
+        if (hit(SHADE_REGIONS.posbar)) {
+          if (status.duration && status.duration > 0) {
+            const fraction = Math.max(0, Math.min(1, (x - SHADE_REGIONS.posbar.x) / SHADE_REGIONS.posbar.w));
+            invoke("seek", { positionSecs: fraction * status.duration });
+          }
+          return;
+        }
+        return;
+      }
+
+      // ── NORMAL MODE CLICKS ──
 
       // Title bar drag — must be called synchronously from mousedown
       // for Wayland to accept the drag initiation.
@@ -410,9 +642,22 @@ export default function MainWindow({ skin, onSkinChange }: Props) {
         return;
       }
 
+      // Shade button
+      if (hit(REGIONS.shade)) {
+        setPressed("shade");
+        invoke("enter_shade");
+        return;
+      }
+
       // Close button
       if (hit(REGIONS.close)) {
         getCurrentWindow().close();
+        return;
+      }
+
+      // Time display — toggle elapsed/remaining.
+      if (hit(REGIONS.timeDisplay)) {
+        setShowRemaining((prev) => !prev);
         return;
       }
 
@@ -441,19 +686,17 @@ export default function MainWindow({ skin, onSkinChange }: Props) {
         setPressed("repeat");
         invoke("cycle_repeat");
       } else if (hit(REGIONS.posbar)) {
-        // Seek.
-        if (status.duration && status.duration > 0) {
-          const fraction = (x - REGIONS.posbar.x) / REGIONS.posbar.w;
-          const seekTo = fraction * status.duration;
-          invoke("seek", { positionSecs: seekTo });
-        }
         setPressed("posbar");
+        dragging.current = "posbar";
+        applySlider("posbar", x);
       } else if (hit(REGIONS.volume)) {
-        const fraction = Math.max(
-          0,
-          Math.min(1, (x - REGIONS.volume.x) / REGIONS.volume.w),
-        );
-        invoke("set_volume", { volume: fraction });
+        setPressed("volume");
+        dragging.current = "volume";
+        applySlider("volume", x);
+      } else if (hit(REGIONS.balance)) {
+        setPressed("balance");
+        dragging.current = "balance";
+        applySlider("balance", x);
       } else if (hit(REGIONS.eject)) {
         setPressed("eject");
         import("@tauri-apps/plugin-dialog").then(({ open: openDialog }) => {
@@ -475,25 +718,99 @@ export default function MainWindow({ skin, onSkinChange }: Props) {
         invoke("toggle_window", { windowId: "Equalizer" });
       }
     },
-    [status],
+    [status, playlist, applySlider, isShade, canvasH],
   );
 
   const handleMouseUp = useCallback(() => {
     setPressed(null);
   }, []);
 
+  // Tooltip — custom delayed tooltip on hover.
+  const handleMouseMove = useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>) => {
+      const rect = canvasRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const x = Math.round((e.clientX - rect.left) * (W / rect.width));
+      const y = Math.round((e.clientY - rect.top) * (canvasH / rect.height));
+
+      const hit = (r: { x: number; y: number; w: number; h: number }) =>
+        x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
+
+      let tip = "";
+      if (isShade) {
+        if (hit(SHADE_REGIONS.minimize)) tip = "Minimize";
+        else if (hit(SHADE_REGIONS.unshade)) tip = "Toggle Window Shade";
+        else if (hit(SHADE_REGIONS.close)) tip = "Close";
+        else if (hit(SHADE_REGIONS.posbar)) tip = "Seek";
+        else if (hit(SHADE_REGIONS.timeDisplay)) tip = "Toggle Elapsed/Remaining Time";
+      } else {
+        if (hit(REGIONS.minimize)) tip = "Minimize";
+        else if (hit(REGIONS.shade)) tip = "Toggle Window Shade";
+        else if (hit(REGIONS.close)) tip = "Close";
+        else if (hit(REGIONS.previous)) tip = "Previous Track";
+        else if (hit(REGIONS.play)) tip = "Play";
+        else if (hit(REGIONS.pause)) tip = "Pause";
+        else if (hit(REGIONS.stop)) tip = "Stop";
+        else if (hit(REGIONS.next)) tip = "Next Track";
+        else if (hit(REGIONS.eject)) tip = "Open File(s)";
+        else if (hit(REGIONS.shuffle)) tip = `Shuffle ${playlist.shuffle === "Off" ? "Off" : "On"}`;
+        else if (hit(REGIONS.repeat)) tip = `Repeat ${playlist.repeat}`;
+        else if (hit(REGIONS.eq)) tip = "Toggle Equalizer";
+        else if (hit(REGIONS.pl)) tip = "Toggle Playlist";
+        else if (hit(REGIONS.volume)) tip = `Volume: ${Math.round(status.volume * 100)}%`;
+        else if (hit(REGIONS.balance)) {
+          const bal = Math.round(status.balance * 100);
+          tip = bal === 0 ? "Balance: Center" : bal < 0 ? `Balance: ${-bal}% Left` : `Balance: ${bal}% Right`;
+        }
+        else if (hit(REGIONS.posbar) && status.position !== null && status.duration) {
+          const pos = formatTime(status.position);
+          const dur = formatTime(status.duration);
+          tip = `${pos} / ${dur}`;
+        }
+        else if (hit(REGIONS.timeDisplay)) tip = "Toggle Elapsed/Remaining Time";
+      }
+
+      // If the tip text changed, reset the delay timer.
+      if (tip !== tooltipText.current) {
+        tooltipText.current = tip;
+        setTooltip(null);
+        if (tooltipTimer.current) clearTimeout(tooltipTimer.current);
+        if (tip) {
+          const cx = e.clientX;
+          const cy = e.clientY;
+          tooltipTimer.current = setTimeout(() => {
+            setTooltip({ text: tip, x: cx, y: cy });
+          }, 800);
+        }
+      }
+    },
+    [status, playlist, isShade, canvasH],
+  );
+
+  const handleMouseLeave = useCallback(() => {
+    setPressed(null);
+    setTooltip(null);
+    tooltipText.current = "";
+    if (tooltipTimer.current) clearTimeout(tooltipTimer.current);
+  }, []);
+
   // Right-click context menu for settings.
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [skinList, setSkinList] = useState<SkinListItem[]>([]);
+  const [extraDirs, setExtraDirs] = useState<string[]>([]);
   const [showSkins, setShowSkins] = useState(false);
+
+  const refreshSkinList = useCallback(() => {
+    invoke<SkinListItem[]>("get_skins").then(setSkinList).catch(console.error);
+    invoke<string[]>("get_extra_skin_dirs").then(setExtraDirs).catch(console.error);
+  }, []);
 
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     setContextMenu({ x: e.clientX, y: e.clientY });
     setShowSkins(false);
-    // Fetch skin list.
-    invoke<SkinListItem[]>("get_skins").then(setSkinList).catch(console.error);
-  }, []);
+    refreshSkinList();
+  }, [refreshSkinList]);
 
   // Close context menu on any click.
   useEffect(() => {
@@ -512,7 +829,7 @@ export default function MainWindow({ skin, onSkinChange }: Props) {
       <canvas
         ref={canvasRef}
         width={W}
-        height={H}
+        height={canvasH}
         style={{
           width: "100vw",
           height: "100vh",
@@ -522,9 +839,33 @@ export default function MainWindow({ skin, onSkinChange }: Props) {
         }}
         onMouseDown={handleMouseDown}
         onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseUp}
+        onMouseLeave={handleMouseLeave}
+        onMouseMove={handleMouseMove}
         onContextMenu={handleContextMenu}
       />
+
+      {/* Tooltip */}
+      {tooltip && createPortal(
+        <div
+          style={{
+            position: "fixed",
+            left: tooltip.x + 12,
+            top: tooltip.y + 16,
+            background: "#ffffe1",
+            border: "1px solid #000",
+            padding: "2px 6px",
+            fontFamily: "system-ui, sans-serif",
+            fontSize: "11px",
+            color: "#000",
+            whiteSpace: "nowrap",
+            pointerEvents: "none",
+            zIndex: 2000,
+          }}
+        >
+          {tooltip.text}
+        </div>,
+        document.body
+      )}
 
       {/* Context menu — rendered via portal so it can overflow the window */}
       {contextMenu && createPortal(
@@ -533,31 +874,32 @@ export default function MainWindow({ skin, onSkinChange }: Props) {
             position: "fixed",
             left: contextMenu.x,
             top: contextMenu.y,
-            background: "#1a1a2e",
-            border: "1px solid #444",
+            background: ps.normalbg,
+            border: `1px solid ${ps.selectedbg}`,
             padding: "4px 0",
             zIndex: 1000,
-            fontFamily: "system-ui, sans-serif",
+            fontFamily: `"${ps.font}", system-ui, sans-serif`,
             fontSize: "12px",
-            color: "#ccc",
+            color: ps.normal,
             minWidth: "180px",
             boxShadow: "2px 2px 8px rgba(0,0,0,0.5)",
           }}
           onMouseDown={(e) => e.stopPropagation()}
         >
-          <MenuItem label="Toggle Playlist" onClick={() => { invoke("toggle_window", { windowId: "Playlist" }); setContextMenu(null); }} />
-          <MenuItem label="Toggle Equalizer" onClick={() => { invoke("toggle_window", { windowId: "Equalizer" }); setContextMenu(null); }} />
-          <div style={{ height: "1px", background: "#444", margin: "4px 0" }} />
-          <MenuItem label="Add Files..." onClick={() => {
+          <MenuItem label="Toggle Playlist" hoverBg={ps.selectedbg} onClick={() => { invoke("toggle_window", { windowId: "Playlist" }); setContextMenu(null); }} />
+          <MenuItem label="Toggle Equalizer" hoverBg={ps.selectedbg} onClick={() => { invoke("toggle_window", { windowId: "Equalizer" }); setContextMenu(null); }} />
+          <div style={{ height: "1px", background: ps.selectedbg, margin: "4px 0" }} />
+          <MenuItem label="Add Files..." hoverBg={ps.selectedbg} onClick={() => {
             import("@tauri-apps/plugin-dialog").then(({ open: openDialog }) => {
               openDialog({ multiple: true, filters: [{ name: "Audio", extensions: ["mp3", "flac", "ogg", "wav", "aac", "m4a"] }] })
                 .then((selected) => { if (selected) { const paths = Array.isArray(selected) ? selected : [selected]; invoke("playlist_add_files", { paths }); } });
             });
             setContextMenu(null);
           }} />
-          <div style={{ height: "1px", background: "#444", margin: "4px 0" }} />
+          <div style={{ height: "1px", background: ps.selectedbg, margin: "4px 0" }} />
           <MenuItem
             label={showSkins ? "▾ Skins" : "▸ Skins"}
+            hoverBg={ps.selectedbg}
             onClick={() => setShowSkins(!showSkins)}
           />
           {showSkins && (
@@ -566,7 +908,7 @@ export default function MainWindow({ skin, onSkinChange }: Props) {
                 <div
                   key={s.path}
                   style={{ padding: "4px 12px 4px 24px", cursor: "pointer", fontSize: "11px" }}
-                  onMouseEnter={(e) => ((e.target as HTMLElement).style.background = "#333")}
+                  onMouseEnter={(e) => ((e.target as HTMLElement).style.background = ps.selectedbg)}
                   onMouseLeave={(e) => ((e.target as HTMLElement).style.background = "transparent")}
                   onMouseDown={(e) => {
                     e.stopPropagation();
@@ -578,10 +920,61 @@ export default function MainWindow({ skin, onSkinChange }: Props) {
                 </div>
               ))}
               {skinList.filter(s => s.skin_type === "Classic").length === 0 && (
-                <div style={{ padding: "4px 24px", color: "#666", fontSize: "11px" }}>
+                <div style={{ padding: "4px 24px", color: ps.current, fontSize: "11px" }}>
                   No skins found
                 </div>
               )}
+              <div style={{ height: "1px", background: ps.selectedbg, margin: "4px 0" }} />
+              <div
+                style={{ padding: "4px 12px 4px 24px", cursor: "pointer", fontSize: "11px" }}
+                onMouseEnter={(e) => ((e.target as HTMLElement).style.background = ps.selectedbg)}
+                onMouseLeave={(e) => ((e.target as HTMLElement).style.background = "transparent")}
+                onMouseDown={(e) => {
+                  e.stopPropagation();
+                  import("@tauri-apps/plugin-dialog").then(({ open: openDialog }) => {
+                    openDialog({ directory: true, title: "Add Skin Folder" }).then((selected) => {
+                      if (selected && typeof selected === "string") {
+                        invoke<string[]>("add_skin_dir", { path: selected }).then((dirs) => {
+                          setExtraDirs(dirs);
+                          refreshSkinList();
+                        });
+                      }
+                    });
+                  });
+                  setContextMenu(null);
+                }}
+              >
+                Add Skin Folder...
+              </div>
+              {extraDirs.map((dir) => (
+                <div
+                  key={dir}
+                  style={{
+                    padding: "4px 12px 4px 24px",
+                    cursor: "pointer",
+                    fontSize: "10px",
+                    color: ps.current,
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                  }}
+                  onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = ps.selectedbg)}
+                  onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "transparent")}
+                  onMouseDown={(e) => {
+                    e.stopPropagation();
+                    invoke<string[]>("remove_skin_dir", { path: dir }).then((dirs) => {
+                      setExtraDirs(dirs);
+                      refreshSkinList();
+                    });
+                    setContextMenu(null);
+                  }}
+                >
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginRight: "8px" }}>
+                    {dir.split(/[\\/]/).pop()}
+                  </span>
+                  <span style={{ color: ps.current, flexShrink: 0 }}>✕</span>
+                </div>
+              ))}
             </div>
           )}
         </div>,
@@ -589,6 +982,14 @@ export default function MainWindow({ skin, onSkinChange }: Props) {
       )}
     </div>
   );
+}
+
+/** Format seconds as M:SS or MM:SS. */
+function formatTime(secs: number): string {
+  const total = Math.floor(secs);
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
 /** Draw a single digit from the numbers sprite sheet. */
@@ -603,11 +1004,11 @@ function drawDigit(
   ctx.drawImage(numbersImg, digit * 9, 0, 9, 13, x, y, 9, 13);
 }
 
-function MenuItem({ label, onClick }: { label: string; onClick: () => void }) {
+function MenuItem({ label, onClick, hoverBg }: { label: string; onClick: () => void; hoverBg: string }) {
   return (
     <div
       style={{ padding: "6px 12px", cursor: "pointer" }}
-      onMouseEnter={(e) => ((e.target as HTMLElement).style.background = "#333")}
+      onMouseEnter={(e) => ((e.target as HTMLElement).style.background = hoverBg)}
       onMouseLeave={(e) => ((e.target as HTMLElement).style.background = "transparent")}
       onMouseDown={(e) => {
         e.stopPropagation();

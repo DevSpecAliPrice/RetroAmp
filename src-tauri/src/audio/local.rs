@@ -117,7 +117,15 @@ impl LocalFileSource {
             probe_visuals
         };
 
-        let metadata = build_metadata(&all_tags, &all_visuals, sample_rate, channels, duration);
+        // Compute average bitrate from file size and duration.
+        let bitrate = match (std::fs::metadata(&path).ok().map(|m| m.len()), duration) {
+            (Some(size), Some(dur)) if dur.as_secs_f64() > 0.0 => {
+                Some((size as f64 * 8.0 / dur.as_secs_f64() / 1000.0) as u32)
+            }
+            _ => None,
+        };
+
+        let metadata = build_metadata(&all_tags, &all_visuals, sample_rate, channels, duration, bitrate);
 
         // Create the decoder.
         let decoder = symphonia::default::get_codecs()
@@ -327,6 +335,7 @@ fn build_metadata(
     sample_rate: u32,
     channels: u16,
     duration: Option<Duration>,
+    bitrate: Option<u32>,
 ) -> TrackMetadata {
     let mut metadata = TrackMetadata {
         title: None,
@@ -335,6 +344,7 @@ fn build_metadata(
         duration,
         sample_rate,
         channels,
+        bitrate,
         genre: None,
         year: None,
         track_number: None,
