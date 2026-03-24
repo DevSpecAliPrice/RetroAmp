@@ -12,13 +12,12 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "RetroAmp",
         "width": 550,
-        "height": 580,
-        "resizable": true,
-        "decorations": true,
-        "minWidth": 275,
-        "minHeight": 176
+        "height": 232,
+        "resizable": false,
+        "decorations": false
       }
     ],
     "security": {

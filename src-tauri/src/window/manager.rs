@@ -1,229 +1,146 @@
-//! Window manager — tracks all application windows, handles position
-//! persistence, snap-to-dock behaviour, and layout state restoration.
+//! Window manager — creates and manages Tauri windows for each panel.
 //!
-//! Every window in RetroAmp (main player, EQ, playlist, library browser,
-//! tag editor, skin browser, Milkdrop) registers with the window manager.
-//! This is the single place where window behaviour is defined.
+//! Each panel (main player, EQ, playlist, etc.) is a separate Tauri window
+//! with its own WebView. The window manager tracks which windows are open,
+//! creates them on demand, and persists their state.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Identifies a specific window type.
+/// Identifies a specific window/panel type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum WindowId {
     Main,
     Equalizer,
     Playlist,
-    LibraryBrowser,
-    TagEditor,
-    SkinBrowser,
-    Milkdrop,
 }
 
-/// Stored position and size of a window.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct WindowGeometry {
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
+impl WindowId {
+    /// The Tauri window label for this panel.
+    pub fn label(&self) -> &'static str {
+        match self {
+            WindowId::Main => "main",
+            WindowId::Equalizer => "equalizer",
+            WindowId::Playlist => "playlist",
+        }
+    }
+
+    /// The URL path this window loads (used for routing in the React app).
+    pub fn url_path(&self) -> &'static str {
+        match self {
+            WindowId::Main => "/",
+            WindowId::Equalizer => "/?window=equalizer",
+            WindowId::Playlist => "/?window=playlist",
+        }
+    }
+
+    /// Default width in native Winamp pixels (before scaling).
+    pub fn native_width(&self) -> u32 {
+        275
+    }
+
+    /// Default height in native Winamp pixels (before scaling).
+    pub fn native_height(&self) -> u32 {
+        match self {
+            WindowId::Main => 116,
+            WindowId::Equalizer => 116,
+            WindowId::Playlist => 232, // 116 * 2 — a reasonable default
+        }
+    }
+
+    /// Whether this window should be resizable.
+    pub fn resizable(&self) -> bool {
+        match self {
+            WindowId::Main => false,
+            WindowId::Equalizer => false,
+            WindowId::Playlist => true,
+        }
+    }
 }
 
-/// Full state of a managed window.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Tracks the state of all managed windows.
+#[derive(Debug, Clone, Serialize)]
+pub struct WindowStates {
+    pub windows: HashMap<String, WindowState>,
+    pub scale: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct WindowState {
     pub id: WindowId,
-    pub geometry: WindowGeometry,
     pub visible: bool,
-    /// Which window this one is snapped to, if any.
-    pub snapped_to: Option<WindowId>,
-    /// Which edge it's snapped on.
-    pub snap_edge: Option<SnapEdge>,
 }
-
-/// The edge along which one window snaps to another.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SnapEdge {
-    Bottom,
-    Right,
-    Left,
-    Top,
-}
-
-/// Snap distance in pixels — windows within this distance of each other's
-/// edges will magnetise together.
-const SNAP_DISTANCE: i32 = 10;
 
 /// The window manager.
-///
-/// Tracks all window states and provides snap logic. Window positions are
-/// persisted to SQLite (not implemented yet — will be added when the SQLite
-/// layer lands in Phase 3, but the data model is ready).
 pub struct WindowManager {
-    windows: HashMap<WindowId, WindowState>,
+    /// Which windows are currently open (visible).
+    states: HashMap<WindowId, bool>,
+    /// Global UI scale factor (1, 2, 3).
+    scale: u32,
 }
 
 impl WindowManager {
     pub fn new() -> Self {
-        Self {
-            windows: HashMap::new(),
-        }
+        let mut states = HashMap::new();
+        states.insert(WindowId::Main, true);
+        states.insert(WindowId::Equalizer, false);
+        states.insert(WindowId::Playlist, false);
+        Self { states, scale: 2 }
     }
 
-    /// Register a window with its initial state.
-    pub fn register(&mut self, state: WindowState) {
-        self.windows.insert(state.id, state);
+    pub fn scale(&self) -> u32 {
+        self.scale
     }
 
-    /// Update the geometry of a window (e.g. after the user drags it).
-    pub fn update_geometry(&mut self, id: WindowId, geometry: WindowGeometry) {
-        if let Some(state) = self.windows.get_mut(&id) {
-            state.geometry = geometry;
-        }
+    pub fn set_scale(&mut self, scale: u32) {
+        self.scale = scale.clamp(1, 3);
     }
 
-    /// Set visibility of a window.
-    pub fn set_visible(&mut self, id: WindowId, visible: bool) {
-        if let Some(state) = self.windows.get_mut(&id) {
-            state.visible = visible;
-        }
-    }
-
-    /// Get the state of a specific window.
-    pub fn get(&self, id: WindowId) -> Option<&WindowState> {
-        self.windows.get(&id)
-    }
-
-    /// Get all window states (for layout persistence).
-    pub fn all_states(&self) -> Vec<&WindowState> {
-        self.windows.values().collect()
-    }
-
-    /// Get all visible window states.
-    pub fn visible_windows(&self) -> Vec<&WindowState> {
-        self.windows.values().filter(|w| w.visible).collect()
-    }
-
-    /// Calculate the snap position for a window being dragged to a proposed
-    /// position. Returns the snapped position if within snap distance of
-    /// another window's edge, otherwise returns the proposed position unchanged.
-    pub fn calculate_snap(
-        &self,
-        id: WindowId,
-        proposed: WindowGeometry,
-    ) -> (WindowGeometry, Option<WindowId>, Option<SnapEdge>) {
-        let mut best_x = proposed.x;
-        let mut best_y = proposed.y;
-        let mut snapped_to = None;
-        let mut snap_edge = None;
-        let mut min_distance = SNAP_DISTANCE + 1;
-
-        for (other_id, other) in &self.windows {
-            if *other_id == id || !other.visible {
-                continue;
-            }
-
-            let other_geo = &other.geometry;
-
-            // Check bottom snap: proposed window's top edge near other's bottom edge
-            let dy_bottom =
-                (proposed.y - (other_geo.y + other_geo.height as i32)).abs();
-            if dy_bottom < min_distance
-                && horizontal_overlap(&proposed, other_geo)
-            {
-                best_y = other_geo.y + other_geo.height as i32;
-                min_distance = dy_bottom;
-                snapped_to = Some(*other_id);
-                snap_edge = Some(SnapEdge::Bottom);
-            }
-
-            // Check top snap: proposed window's bottom edge near other's top edge
-            let dy_top =
-                ((proposed.y + proposed.height as i32) - other_geo.y).abs();
-            if dy_top < min_distance
-                && horizontal_overlap(&proposed, other_geo)
-            {
-                best_y = other_geo.y - proposed.height as i32;
-                if dy_top < min_distance {
-                    min_distance = dy_top;
-                    snapped_to = Some(*other_id);
-                    snap_edge = Some(SnapEdge::Top);
-                }
-            }
-
-            // Check right snap: proposed window's left edge near other's right edge
-            let dx_right =
-                (proposed.x - (other_geo.x + other_geo.width as i32)).abs();
-            if dx_right < min_distance
-                && vertical_overlap(&proposed, other_geo)
-            {
-                best_x = other_geo.x + other_geo.width as i32;
-                min_distance = dx_right;
-                snapped_to = Some(*other_id);
-                snap_edge = Some(SnapEdge::Right);
-            }
-
-            // Check left snap: proposed window's right edge near other's left edge
-            let dx_left =
-                ((proposed.x + proposed.width as i32) - other_geo.x).abs();
-            if dx_left < min_distance
-                && vertical_overlap(&proposed, other_geo)
-            {
-                best_x = other_geo.x - proposed.width as i32;
-                min_distance = dx_left;
-                snapped_to = Some(*other_id);
-                snap_edge = Some(SnapEdge::Left);
-            }
-
-            // Also snap left edges to align
-            let dx_align_left = (proposed.x - other_geo.x).abs();
-            if dx_align_left < SNAP_DISTANCE && dx_align_left < min_distance {
-                best_x = other_geo.x;
-            }
-        }
-
-        let snapped_geo = WindowGeometry {
-            x: best_x,
-            y: best_y,
-            ..proposed
+    pub fn cycle_scale(&mut self) -> u32 {
+        self.scale = match self.scale {
+            1 => 2,
+            2 => 3,
+            _ => 1,
         };
-
-        (snapped_geo, snapped_to, snap_edge)
+        self.scale
     }
 
-    /// When the main window is dragged, move all snapped windows with it.
-    pub fn drag_group(&mut self, dragged_id: WindowId, dx: i32, dy: i32) {
-        // Collect IDs of windows snapped to the dragged window
-        let snapped_ids: Vec<WindowId> = self
-            .windows
-            .values()
-            .filter(|w| w.snapped_to == Some(dragged_id))
-            .map(|w| w.id)
+    /// Check if a window is currently visible.
+    pub fn is_visible(&self, id: WindowId) -> bool {
+        *self.states.get(&id).unwrap_or(&false)
+    }
+
+    /// Mark a window as visible or hidden.
+    pub fn set_visible(&mut self, id: WindowId, visible: bool) {
+        self.states.insert(id, visible);
+    }
+
+    /// Toggle a window's visibility. Returns the new state.
+    pub fn toggle(&mut self, id: WindowId) -> bool {
+        let current = self.is_visible(id);
+        let new_state = !current;
+        self.states.insert(id, new_state);
+        new_state
+    }
+
+    /// Get the state of all windows (for the frontend to render button states).
+    pub fn get_states(&self) -> WindowStates {
+        let windows = self
+            .states
+            .iter()
+            .map(|(id, visible)| {
+                (
+                    id.label().to_string(),
+                    WindowState {
+                        id: *id,
+                        visible: *visible,
+                    },
+                )
+            })
             .collect();
-
-        // Move the dragged window
-        if let Some(state) = self.windows.get_mut(&dragged_id) {
-            state.geometry.x += dx;
-            state.geometry.y += dy;
-        }
-
-        // Move all snapped windows by the same delta (and recurse)
-        for snapped_id in snapped_ids {
-            self.drag_group(snapped_id, dx, dy);
+        WindowStates {
+            windows,
+            scale: self.scale,
         }
     }
-}
-
-/// Check if two geometries overlap horizontally (for vertical snapping).
-fn horizontal_overlap(a: &WindowGeometry, b: &WindowGeometry) -> bool {
-    let a_right = a.x + a.width as i32;
-    let b_right = b.x + b.width as i32;
-    a.x < b_right && a_right > b.x
-}
-
-/// Check if two geometries overlap vertically (for horizontal snapping).
-fn vertical_overlap(a: &WindowGeometry, b: &WindowGeometry) -> bool {
-    let a_bottom = a.y + a.height as i32;
-    let b_bottom = b.y + b.height as i32;
-    a.y < b_bottom && a_bottom > b.y
 }

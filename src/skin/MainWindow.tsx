@@ -17,6 +17,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { SkinData } from "./parser";
 import {
   CHAR_WIDTH,
@@ -95,7 +96,7 @@ const REGIONS = {
   pl: { x: 242, y: 58, w: 23, h: 12 },
 } as const;
 
-export default function MainWindow({ skin, scale }: Props) {
+export default function MainWindow({ skin }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [status, setStatus] = useState<EngineStatus>({
     state: "Stopped",
@@ -104,6 +105,7 @@ export default function MainWindow({ skin, scale }: Props) {
     metadata: null,
     volume: 1.0,
   });
+  const [windowStates, setWindowStates] = useState<Record<string, { visible: boolean }>>({});
   const [playlist, setPlaylist] = useState<PlaylistState>({
     shuffle: "Off",
     repeat: "Off",
@@ -155,12 +157,14 @@ export default function MainWindow({ skin, scale }: Props) {
   useEffect(() => {
     const interval = setInterval(async () => {
       try {
-        const [s, pl] = await Promise.all([
+        const [s, pl, ws] = await Promise.all([
           invoke<EngineStatus>("get_status"),
           invoke<PlaylistState>("get_playlist"),
+          invoke<{ windows: Record<string, { visible: boolean }> }>("get_window_states"),
         ]);
         setStatus(s);
         setPlaylist(pl);
+        setWindowStates(ws.windows);
         if (s.state === "Playing") {
           const fft = await invoke<{ magnitudes: number[] }>("get_fft_data");
           setFftData(fft.magnitudes);
@@ -345,10 +349,17 @@ export default function MainWindow({ skin, scale }: Props) {
       const repY = pressed === "repeat" ? repBaseY + 15 : repBaseY;
       ctx.drawImage(shufrep, 0, repY, 28, 15, 211, 89, 28, 15);
 
-      // EQ button (inactive for now)
-      ctx.drawImage(shufrep, 0, 61, 23, 12, 219, 58, 23, 12);
-      // PL button (active since playlist is shown)
-      ctx.drawImage(shufrep, 23, 73, 23, 12, 242, 58, 23, 12);
+      // EQ button — active when EQ window is visible
+      const eqActive = windowStates["equalizer"]?.visible ?? false;
+      const eqBaseY = eqActive ? 73 : 61;
+      const eqY = pressed === "eq" ? (eqActive ? 61 : 73) : eqBaseY;
+      ctx.drawImage(shufrep, 0, eqY, 23, 12, 219, 58, 23, 12);
+
+      // PL button — active when playlist window is visible
+      const plActive = windowStates["playlist"]?.visible ?? false;
+      const plBaseY = plActive ? 73 : 61;
+      const plY = pressed === "pl" ? (plActive ? 61 : 73) : plBaseY;
+      ctx.drawImage(shufrep, 23, plY, 23, 12, 242, 58, 23, 12);
     }
 
     // 9) Draw volume slider.
@@ -363,7 +374,7 @@ export default function MainWindow({ skin, scale }: Props) {
       const thumbX = Math.round(status.volume * (68 - 14));
       ctx.drawImage(volumeSheet, 15, 422, 14, 11, 107 + thumbX, 58, 14, 11);
     }
-  }, [skin, status, playlist, pressed, marqueeOffset, scrollText, fftData]);
+  }, [skin, status, playlist, pressed, marqueeOffset, scrollText, fftData, windowStates]);
 
   // Click handling.
   const handleMouseDown = useCallback(
@@ -375,6 +386,26 @@ export default function MainWindow({ skin, scale }: Props) {
 
       const hit = (r: { x: number; y: number; w: number; h: number }) =>
         x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
+
+      // Title bar drag — must be called synchronously from mousedown
+      // for Wayland to accept the drag initiation.
+      if (hit(REGIONS.titleBar) && !hit(REGIONS.minimize) && !hit(REGIONS.shade) && !hit(REGIONS.close)) {
+        getCurrentWindow().startDragging();
+        return;
+      }
+
+      // Minimize button
+      if (hit(REGIONS.minimize)) {
+        setPressed("minimize");
+        getCurrentWindow().minimize();
+        return;
+      }
+
+      // Close button
+      if (hit(REGIONS.close)) {
+        getCurrentWindow().close();
+        return;
+      }
 
       if (hit(REGIONS.previous)) {
         setPressed("previous");
@@ -414,8 +445,25 @@ export default function MainWindow({ skin, scale }: Props) {
           Math.min(1, (x - REGIONS.volume.x) / REGIONS.volume.w),
         );
         invoke("set_volume", { volume: fraction });
-      } else if (hit(REGIONS.close)) {
-        // TODO: close app
+      } else if (hit(REGIONS.eject)) {
+        setPressed("eject");
+        import("@tauri-apps/plugin-dialog").then(({ open: openDialog }) => {
+          openDialog({
+            multiple: true,
+            filters: [{ name: "Audio", extensions: ["mp3", "flac", "ogg", "wav", "aac", "m4a"] }],
+          }).then((selected) => {
+            if (selected) {
+              const paths = Array.isArray(selected) ? selected : [selected];
+              invoke("playlist_add_files", { paths });
+            }
+          });
+        });
+      } else if (hit(REGIONS.pl)) {
+        setPressed("pl");
+        invoke("toggle_window", { windowId: "Playlist" });
+      } else if (hit(REGIONS.eq)) {
+        setPressed("eq");
+        invoke("toggle_window", { windowId: "Equalizer" });
       }
     },
     [status],
@@ -425,22 +473,115 @@ export default function MainWindow({ skin, scale }: Props) {
     setPressed(null);
   }, []);
 
+  // Right-click context menu for settings.
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+
+  const handleContextMenu = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setContextMenu({ x: e.clientX, y: e.clientY });
+  }, []);
+
+  // Close context menu on any click.
+  useEffect(() => {
+    if (!contextMenu) return;
+    const close = () => setContextMenu(null);
+    window.addEventListener("mousedown", close);
+    return () => window.removeEventListener("mousedown", close);
+  }, [contextMenu]);
+
   return (
-    <canvas
-      ref={canvasRef}
-      width={W}
-      height={H}
-      style={{
-        width: W * scale,
-        height: H * scale,
-        imageRendering: "pixelated",
-        cursor: "default",
-        flexShrink: 0,
-      }}
-      onMouseDown={handleMouseDown}
-      onMouseUp={handleMouseUp}
-      onMouseLeave={handleMouseUp}
-    />
+    <div style={{
+      width: "100vw",
+      height: "100vh",
+      position: "relative",
+      overflow: "hidden",
+    }}>
+      <canvas
+        ref={canvasRef}
+        width={W}
+        height={H}
+        style={{
+          width: "100vw",
+          height: "100vh",
+          imageRendering: "pixelated",
+          cursor: "default",
+          display: "block",
+        }}
+        onMouseDown={handleMouseDown}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseUp}
+        onContextMenu={handleContextMenu}
+      />
+
+      {/* Context menu */}
+      {contextMenu && (
+        <div
+          style={{
+            position: "fixed",
+            left: contextMenu.x,
+            top: contextMenu.y,
+            background: "#1a1a2e",
+            border: "1px solid #444",
+            padding: "4px 0",
+            zIndex: 1000,
+            fontFamily: "system-ui, sans-serif",
+            fontSize: "12px",
+            color: "#ccc",
+            minWidth: "160px",
+            boxShadow: "2px 2px 8px rgba(0,0,0,0.5)",
+          }}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <div
+            style={{ padding: "6px 12px", cursor: "pointer" }}
+            onMouseEnter={(e) => ((e.target as HTMLElement).style.background = "#333")}
+            onMouseLeave={(e) => ((e.target as HTMLElement).style.background = "transparent")}
+            onMouseDown={(e) => {
+              e.stopPropagation();
+              invoke("toggle_window", { windowId: "Playlist" });
+              setContextMenu(null);
+            }}
+          >
+            Toggle Playlist
+          </div>
+          <div
+            style={{ padding: "6px 12px", cursor: "pointer" }}
+            onMouseEnter={(e) => ((e.target as HTMLElement).style.background = "#333")}
+            onMouseLeave={(e) => ((e.target as HTMLElement).style.background = "transparent")}
+            onMouseDown={(e) => {
+              e.stopPropagation();
+              invoke("toggle_window", { windowId: "Equalizer" });
+              setContextMenu(null);
+            }}
+          >
+            Toggle Equalizer
+          </div>
+          <div style={{ height: "1px", background: "#444", margin: "4px 0" }} />
+          <div
+            style={{ padding: "6px 12px", cursor: "pointer" }}
+            onMouseEnter={(e) => ((e.target as HTMLElement).style.background = "#333")}
+            onMouseLeave={(e) => ((e.target as HTMLElement).style.background = "transparent")}
+            onMouseDown={(e) => {
+              e.stopPropagation();
+              import("@tauri-apps/plugin-dialog").then(({ open: openDialog }) => {
+                openDialog({
+                  multiple: true,
+                  filters: [{ name: "Audio", extensions: ["mp3", "flac", "ogg", "wav", "aac", "m4a"] }],
+                }).then((selected) => {
+                  if (selected) {
+                    const paths = Array.isArray(selected) ? selected : [selected];
+                    invoke("playlist_add_files", { paths });
+                  }
+                });
+              });
+              setContextMenu(null);
+            }}
+          >
+            Add Files...
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 

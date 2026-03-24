@@ -6,7 +6,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use tauri::State;
+use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 use crate::audio::engine::{AudioEngine, EngineStatus};
 use crate::audio::eq::EqSettings;
@@ -15,6 +15,7 @@ use crate::audio::local::LocalFileSource;
 use crate::audio::source::AudioSource;
 use crate::playlist::manager::{PlaylistManager, PlaylistState};
 use crate::skin::loader::SkinContents;
+use crate::window::manager::{WindowId, WindowManager, WindowStates};
 
 // -- Engine commands --
 
@@ -231,6 +232,129 @@ pub fn playlist_clear(
     })
 }
 
+// -- Window commands --
+
+/// Toggle a panel window (playlist, equalizer). Creates the window if it
+/// doesn't exist yet, otherwise shows/hides it.
+#[tauri::command]
+pub async fn toggle_window(
+    app: AppHandle,
+    window_manager: State<'_, Mutex<WindowManager>>,
+    window_id: WindowId,
+) -> Result<WindowStates, String> {
+    let (should_show, label, url, width, height, resizable) = {
+        let mut wm = window_manager.lock().map_err(|e| e.to_string())?;
+        let should_show = wm.toggle(window_id);
+        (
+            should_show,
+            window_id.label().to_string(),
+            window_id.url_path().to_string(),
+            window_id.native_width(),
+            window_id.native_height(),
+            window_id.resizable(),
+        )
+    };
+
+    eprintln!("[retroamp] toggle_window: id={window_id:?} label={label} should_show={should_show}");
+
+    // Try to find an existing window with this label.
+    if let Some(existing) = app.get_webview_window(&label) {
+        if should_show {
+            existing.show().map_err(|e| e.to_string())?;
+            existing.set_focus().map_err(|e| e.to_string())?;
+        } else {
+            existing.hide().map_err(|e| e.to_string())?;
+        }
+    } else if should_show {
+        // Create the window. Scale factor is read from the main window's size.
+        let scale = get_scale_from_main(&app);
+        let w = (width * scale) as f64;
+        let h = (height * scale) as f64;
+
+        eprintln!("[retroamp] creating window: label={label} size={w}x{h} scale={scale}");
+        WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
+            .title(format!("RetroAmp — {}", label))
+            .inner_size(w, h)
+            .decorations(false)
+            .resizable(resizable)
+            .visible(true)
+            .build()
+            .map_err(|e| {
+                eprintln!("[retroamp] window creation failed: {e}");
+                e.to_string()
+            })?;
+    }
+
+    let wm = window_manager.lock().map_err(|e| e.to_string())?;
+    Ok(wm.get_states())
+}
+
+/// Get the current state of all windows.
+#[tauri::command]
+pub fn get_window_states(
+    window_manager: State<'_, Mutex<WindowManager>>,
+) -> Result<WindowStates, String> {
+    let wm = window_manager.lock().map_err(|e| e.to_string())?;
+    Ok(wm.get_states())
+}
+
+/// Cycle the global UI scale (1x → 2x → 3x → 1x) and resize all windows.
+#[tauri::command]
+pub async fn cycle_scale(
+    app: AppHandle,
+    window_manager: State<'_, Mutex<WindowManager>>,
+) -> Result<WindowStates, String> {
+    let (new_scale, states) = {
+        let mut wm = window_manager.lock().map_err(|e| e.to_string())?;
+        let new_scale = wm.cycle_scale();
+        (new_scale, wm.get_states())
+    };
+
+    // Resize all open windows to match the new scale.
+    resize_all_windows(&app, new_scale);
+
+    Ok(states)
+}
+
+/// Set a specific scale value and resize all windows.
+#[tauri::command]
+pub async fn set_scale(
+    app: AppHandle,
+    window_manager: State<'_, Mutex<WindowManager>>,
+    scale: u32,
+) -> Result<WindowStates, String> {
+    let states = {
+        let mut wm = window_manager.lock().map_err(|e| e.to_string())?;
+        wm.set_scale(scale);
+        wm.get_states()
+    };
+
+    resize_all_windows(&app, scale);
+
+    Ok(states)
+}
+
+/// Resize all open windows to match a scale factor.
+fn resize_all_windows(app: &AppHandle, scale: u32) {
+    for id in &[WindowId::Main, WindowId::Equalizer, WindowId::Playlist] {
+        if let Some(win) = app.get_webview_window(id.label()) {
+            let w = (id.native_width() * scale) as f64;
+            // For the playlist, preserve the current height ratio.
+            let h = if *id == WindowId::Playlist {
+                // Keep current height or default.
+                if let Ok(size) = win.inner_size() {
+                    size.height as f64
+                } else {
+                    (id.native_height() * scale) as f64
+                }
+            } else {
+                (id.native_height() * scale) as f64
+            };
+            let _ = win.set_size(tauri::Size::Logical(tauri::LogicalSize { width: w, height: h }));
+        }
+    }
+}
+
 // -- Skin commands --
 
 /// Load a .wsz skin file and return its contents for the frontend to render.
@@ -240,6 +364,17 @@ pub fn load_skin(path: String) -> Result<SkinContents, String> {
 }
 
 // -- Internal helpers --
+
+/// Derive the current scale factor from the main window's width.
+fn get_scale_from_main(app: &AppHandle) -> u32 {
+    if let Some(main_win) = app.get_webview_window("main") {
+        if let Ok(size) = main_win.inner_size() {
+            let scale = (size.width as f64 / 275.0).round() as u32;
+            return scale.max(1).min(4);
+        }
+    }
+    2 // Default to 2x if we can't determine.
+}
 
 fn play_path(engine: &AudioEngine, path: &str) -> Result<(), String> {
     let source = LocalFileSource::open(path).map_err(|e| e.to_string())?;

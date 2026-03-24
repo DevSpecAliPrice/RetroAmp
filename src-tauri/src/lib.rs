@@ -10,11 +10,13 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use tauri::Manager;
+
 use audio::engine::{AudioEngine, EngineEvent};
 use audio::local::LocalFileSource;
 use audio::source::AudioSource;
 use playlist::manager::PlaylistManager;
-use window::manager::WindowManager;
+use window::manager::{WindowId, WindowManager};
 
 pub fn run() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -51,6 +53,26 @@ pub fn run() {
         .manage(engine)
         .manage(playlist_manager)
         .manage(Mutex::new(window_manager))
+        .on_window_event(|window, event| {
+            // When a secondary window is closed by the compositor (e.g. user
+            // clicks the X), update the WindowManager so the PL/EQ buttons
+            // reflect the correct state.
+            if let tauri::WindowEvent::Destroyed = event {
+                let label = window.label();
+                let window_id = match label {
+                    "playlist" => Some(WindowId::Playlist),
+                    "equalizer" => Some(WindowId::Equalizer),
+                    _ => None,
+                };
+                if let Some(id) = window_id {
+                    if let Some(wm) = window.try_state::<Mutex<WindowManager>>() {
+                        if let Ok(mut wm) = wm.lock() {
+                            wm.set_visible(id, false);
+                        }
+                    }
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             // Engine
             commands::get_status,
@@ -74,6 +96,11 @@ pub fn run() {
             commands::playlist_clear,
             // Skin
             commands::load_skin,
+            // Windows
+            commands::toggle_window,
+            commands::get_window_states,
+            commands::cycle_scale,
+            commands::set_scale,
         ])
         .run(tauri::generate_context!())
         .expect("error while running RetroAmp");
