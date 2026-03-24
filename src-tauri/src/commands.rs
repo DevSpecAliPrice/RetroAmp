@@ -51,8 +51,23 @@ pub fn seek(engine: State<'_, Arc<AudioEngine>>, position_secs: f64) {
 }
 
 #[tauri::command]
-pub fn set_eq(engine: State<'_, Arc<AudioEngine>>, settings: EqSettings) {
-    engine.set_eq(settings);
+pub fn get_eq(
+    eq_settings: State<'_, Arc<Mutex<EqSettings>>>,
+) -> Result<EqSettings, String> {
+    let s = eq_settings.lock().map_err(|e| e.to_string())?;
+    Ok(s.clone())
+}
+
+#[tauri::command]
+pub fn set_eq(
+    engine: State<'_, Arc<AudioEngine>>,
+    eq_settings: State<'_, Arc<Mutex<EqSettings>>>,
+    settings: EqSettings,
+) {
+    engine.set_eq(settings.clone());
+    if let Ok(mut s) = eq_settings.lock() {
+        *s = settings;
+    }
 }
 
 #[tauri::command]
@@ -272,27 +287,43 @@ pub async fn toggle_window(
             existing.hide().map_err(|e| e.to_string())?;
         }
     } else if should_show {
-        // Match the main window's actual dimensions so panels align visually.
+        // Derive panel size from the main window's actual logical dimensions
+        // so all panels share exactly the same width. We convert the main
+        // window's physical inner_size back to logical using its scale_factor.
         let (main_w, main_h) = app
             .get_webview_window("main")
-            .and_then(|win| win.inner_size().ok())
-            .map(|s| (s.width as f64, s.height as f64))
-            .unwrap_or(((width * 2) as f64, (height * 2) as f64));
+            .and_then(|win| {
+                let size = win.inner_size().ok()?;
+                let sf = win.scale_factor().ok().unwrap_or(1.0);
+                Some((size.width as f64 / sf, size.height as f64 / sf))
+            })
+            .unwrap_or_else(|| {
+                let wm = window_manager.lock().unwrap();
+                let s = wm.scale() as f64;
+                (width as f64 * s, height as f64 * s)
+            });
 
         let w = main_w;
-        // Playlist height: 2x the main window height by default.
-        // EQ: same height as main window.
+        // EQ: same height as main. Playlist: 2x the main height.
         let h = if resizable { main_h * 2.0 } else { main_h };
 
         eprintln!("[retroamp] creating window: label={label} size={w}x{h} (main={main_w}x{main_h})");
 
+        // On Wayland, non-resizable toplevel windows get a compositor-enforced
+        // minimum size. Work around this by always creating resizable windows
+        // and clamping with min/max for ones that shouldn't resize.
         let mut builder = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
             .title(format!("RetroAmp — {}", label))
             .inner_size(w, h)
             .decorations(false)
-            .resizable(resizable)
+            .resizable(true)
             .visible(true)
             .skip_taskbar(true); // Don't show separate taskbar entry.
+
+        // Clamp non-resizable panels so they can't actually be resized.
+        if !resizable {
+            builder = builder.min_inner_size(w, h).max_inner_size(w, h);
+        }
 
         // Set the main window as parent so closing main closes everything.
         if let Some(main_win) = app.get_webview_window("main") {

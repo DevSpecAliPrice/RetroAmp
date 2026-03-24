@@ -4,6 +4,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { loadSkin, type SkinData } from "./skin/parser";
 import MainWindow from "./skin/MainWindow";
 import PlaylistWindow from "./skin/PlaylistWindow";
+import EqualizerWindow from "./skin/EqualizerWindow";
 
 const DEFAULT_SKIN_NAME = "RetroAmp Default";
 
@@ -130,11 +131,7 @@ function App() {
     case "playlist":
       return <PlaylistWindow skin={skin} scale={scale} />;
     case "equalizer":
-      return (
-        <div style={{ background: "#000", width: "100%", height: "100vh" }}>
-          EQ (coming soon)
-        </div>
-      );
+      return <EqualizerWindow skin={skin} scale={scale} />;
     case "shade":
       return <MainWindow skin={skin} scale={scale} isShade />;
     default:

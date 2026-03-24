@@ -153,6 +153,67 @@ export const MONOSTER: Sprite[] = [
   { name: "MAIN_MONO_SELECTED", x: 29, y: 0, width: 27, height: 12 },
 ];
 
+// -- EQMAIN.BMP -- Equalizer window
+export const EQMAIN: Sprite[] = [
+  // Background
+  { name: "EQ_WINDOW_BACKGROUND", x: 0, y: 0, width: 275, height: 116 },
+  // Title bar
+  { name: "EQ_TITLE_BAR", x: 0, y: 149, width: 275, height: 14 },
+  { name: "EQ_TITLE_BAR_SELECTED", x: 0, y: 134, width: 275, height: 14 },
+  // Title bar buttons
+  { name: "EQ_CLOSE_BUTTON", x: 0, y: 116, width: 9, height: 9 },
+  { name: "EQ_CLOSE_BUTTON_ACTIVE", x: 0, y: 125, width: 9, height: 9 },
+  // ON button (4 states)
+  { name: "EQ_ON_BUTTON", x: 10, y: 119, width: 26, height: 12 },
+  { name: "EQ_ON_BUTTON_DEPRESSED", x: 128, y: 119, width: 26, height: 12 },
+  { name: "EQ_ON_BUTTON_SELECTED", x: 69, y: 119, width: 26, height: 12 },
+  { name: "EQ_ON_BUTTON_SELECTED_DEPRESSED", x: 187, y: 119, width: 26, height: 12 },
+  // AUTO button (4 states)
+  { name: "EQ_AUTO_BUTTON", x: 36, y: 119, width: 32, height: 12 },
+  { name: "EQ_AUTO_BUTTON_DEPRESSED", x: 154, y: 119, width: 32, height: 12 },
+  { name: "EQ_AUTO_BUTTON_SELECTED", x: 95, y: 119, width: 32, height: 12 },
+  { name: "EQ_AUTO_BUTTON_SELECTED_DEPRESSED", x: 213, y: 119, width: 32, height: 12 },
+  // Slider sprite sheet (28 frames: 14 columns × 2 rows, each 15×65)
+  { name: "EQ_SLIDER_BACKGROUND", x: 13, y: 164, width: 209, height: 129 },
+  // Slider thumb
+  { name: "EQ_SLIDER_THUMB", x: 0, y: 164, width: 11, height: 11 },
+  { name: "EQ_SLIDER_THUMB_SELECTED", x: 0, y: 176, width: 11, height: 11 },
+  // Presets button
+  { name: "EQ_PRESETS_BUTTON", x: 224, y: 164, width: 44, height: 12 },
+  { name: "EQ_PRESETS_BUTTON_SELECTED", x: 224, y: 176, width: 44, height: 12 },
+  // EQ graph
+  { name: "EQ_GRAPH_BACKGROUND", x: 0, y: 294, width: 113, height: 19 },
+  { name: "EQ_GRAPH_LINE_COLORS", x: 115, y: 294, width: 1, height: 19 },
+  { name: "EQ_PREAMP_LINE", x: 0, y: 314, width: 113, height: 1 },
+];
+
+// -- PLEDIT.BMP -- Playlist window
+export const PLEDIT: Sprite[] = [
+  // Title bar — selected (active/focused)
+  { name: "PL_TOP_LEFT_SELECTED", x: 0, y: 0, width: 25, height: 20 },
+  { name: "PL_TITLE_BAR_SELECTED", x: 26, y: 0, width: 100, height: 20 },
+  { name: "PL_TOP_TILE_SELECTED", x: 127, y: 0, width: 25, height: 20 },
+  { name: "PL_TOP_RIGHT_SELECTED", x: 153, y: 0, width: 25, height: 20 },
+  // Title bar — inactive
+  { name: "PL_TOP_LEFT", x: 0, y: 21, width: 25, height: 20 },
+  { name: "PL_TITLE_BAR", x: 26, y: 21, width: 100, height: 20 },
+  { name: "PL_TOP_TILE", x: 127, y: 21, width: 25, height: 20 },
+  { name: "PL_TOP_RIGHT", x: 153, y: 21, width: 25, height: 20 },
+  // Left/right edge tiles (tile vertically)
+  { name: "PL_LEFT_TILE", x: 0, y: 42, width: 12, height: 29 },
+  { name: "PL_RIGHT_TILE", x: 31, y: 42, width: 20, height: 29 },
+  // Scrollbar handle
+  { name: "PL_SCROLL_HANDLE", x: 52, y: 53, width: 8, height: 18 },
+  { name: "PL_SCROLL_HANDLE_SELECTED", x: 61, y: 53, width: 8, height: 18 },
+  // Window control buttons (selected state)
+  { name: "PL_CLOSE_SELECTED", x: 52, y: 42, width: 9, height: 9 },
+  { name: "PL_SHADE_SELECTED", x: 62, y: 42, width: 9, height: 9 },
+  // Bottom bar
+  { name: "PL_BOTTOM_LEFT", x: 0, y: 72, width: 125, height: 38 },
+  { name: "PL_BOTTOM_RIGHT", x: 126, y: 72, width: 150, height: 38 },
+  { name: "PL_BOTTOM_TILE", x: 179, y: 0, width: 25, height: 38 },
+];
+
 /**
  * Map from BMP filename key (lowercase, no extension) to its sprite definitions.
  */
@@ -168,4 +229,6 @@ export const SPRITE_SHEETS: Record<string, Sprite[]> = {
   balance: BALANCE,
   shufrep: SHUFREP,
   monoster: MONOSTER,
+  eqmain: EQMAIN,
+  pledit: PLEDIT,
 };

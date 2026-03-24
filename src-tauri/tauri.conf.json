@@ -10,16 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [
-      {
-        "label": "main",
-        "title": "RetroAmp",
-        "width": 550,
-        "height": 232,
-        "resizable": false,
-        "decorations": false
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": null
     }

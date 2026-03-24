@@ -14,6 +14,7 @@ use std::time::Duration;
 use tauri::Manager;
 
 use audio::engine::{AudioEngine, EngineEvent};
+use audio::eq::EqSettings;
 use audio::local::LocalFileSource;
 use audio::source::AudioSource;
 use playlist::manager::PlaylistManager;
@@ -35,6 +36,7 @@ pub fn run() {
 
     let engine = Arc::new(engine);
     let playlist_manager = Arc::new(Mutex::new(PlaylistManager::new()));
+    let eq_settings = Arc::new(Mutex::new(EqSettings::default()));
     let window_manager = WindowManager::new();
 
     // Spawn the auto-advance listener. When the engine signals that a track
@@ -51,12 +53,49 @@ pub fn run() {
             .expect("failed to spawn auto-advance thread");
     }
 
+    // Capture scale before moving window_manager into Tauri state.
+    let initial_scale = window_manager.scale() as f64;
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(engine)
         .manage(playlist_manager)
+        .manage(eq_settings)
         .manage(Mutex::new(window_manager))
+        .setup(move |app| {
+            // Create the main window programmatically (same code path as
+            // EQ/playlist windows) so Wayland handles it consistently.
+            let w = 275.0 * initial_scale;
+            let h = 116.0 * initial_scale;
+            eprintln!("[retroamp] creating main window: {w}x{h} (scale={initial_scale})");
+
+            tauri::WebviewWindowBuilder::new(
+                app,
+                "main",
+                tauri::WebviewUrl::App("/".into()),
+            )
+            .title("RetroAmp")
+            .inner_size(w, h)
+            .min_inner_size(w, h)
+            .max_inner_size(w, h)
+            .decorations(false)
+            .resizable(true)
+            .visible(true)
+            .build()?;
+
+            // Report what the compositor actually gave us.
+            if let Some(win) = app.get_webview_window("main") {
+                let actual = win.inner_size().unwrap_or_default();
+                let sf = win.scale_factor().unwrap_or(1.0);
+                eprintln!(
+                    "[retroamp] main window ACTUAL: {}x{} physical, scale_factor={sf}, logical={}x{}",
+                    actual.width, actual.height, actual.width as f64 / sf, actual.height as f64 / sf
+                );
+            }
+
+            Ok(())
+        })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
                 let label = window.label();
@@ -101,6 +140,7 @@ pub fn run() {
             commands::resume,
             commands::stop,
             commands::seek,
+            commands::get_eq,
             commands::set_eq,
             commands::set_volume,
             commands::set_balance,

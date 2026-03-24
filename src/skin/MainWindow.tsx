@@ -126,6 +126,11 @@ interface SkinListItem {
 }
 
 export default function MainWindow({ skin, isShade = false, onSkinChange }: Props) {
+  // Derive scale from window width. The canvas is rendered at this higher
+  // resolution (W*s × H*s pixels) then CSS-stretched to fill the window,
+  // giving crisp integer-scaled pixels with no gaps.
+  const s = Math.max(1, Math.round(window.innerWidth / W));
+  console.log(`[MainWindow] window.innerWidth=${window.innerWidth} window.innerHeight=${window.innerHeight} → scale=${s} → skin=${W*s}x${(isShade?14:116)*s}`);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [status, setStatus] = useState<EngineStatus>({
     state: "Stopped",
@@ -228,6 +233,10 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
 
     const titlebar = skin.sheets["titlebar"];
     const textBmp = skin.sheets["text"];
+
+    // Scale all drawing to the higher-resolution canvas. All coordinates
+    // below remain in native 275x116 space — ctx.scale handles the rest.
+    ctx.setTransform(s, 0, 0, s, 0, 0);
 
     // Clear.
     ctx.clearRect(0, 0, W, canvasH);
@@ -536,7 +545,7 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
     }
 
     } // end normal mode
-  }, [skin, status, playlist, pressed, marqueeOffset, scrollText, fftData, windowStates, showRemaining, isShade, canvasH]);
+  }, [skin, status, playlist, pressed, marqueeOffset, scrollText, fftData, windowStates, showRemaining, isShade, canvasH, s]);
 
   // Slider drag helper — converts pixel x to the appropriate invoke call.
   const applySlider = useCallback(
@@ -794,6 +803,26 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
     if (tooltipTimer.current) clearTimeout(tooltipTimer.current);
   }, []);
 
+  // Double-click resets volume (100%) or balance (center).
+  const handleDoubleClick = useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>) => {
+      if (isShade) return;
+      const rect = canvasRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const x = Math.round((e.clientX - rect.left) * (W / rect.width));
+      const y = Math.round((e.clientY - rect.top) * (canvasH / rect.height));
+      const hit = (r: { x: number; y: number; w: number; h: number }) =>
+        x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
+
+      if (hit(REGIONS.volume)) {
+        invoke("set_volume", { volume: 1.0 });
+      } else if (hit(REGIONS.balance)) {
+        invoke("set_balance", { balance: 0.0 });
+      }
+    },
+    [isShade, canvasH],
+  );
+
   // Right-click context menu for settings.
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [skinList, setSkinList] = useState<SkinListItem[]>([]);
@@ -822,18 +851,18 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
 
   return (
     <div style={{
-      width: "100vw",
-      height: "100vh",
+      width: W * s,
+      height: canvasH * s,
       position: "relative",
       background: "#000",
     }}>
       <canvas
         ref={canvasRef}
-        width={W}
-        height={canvasH}
+        width={W * s}
+        height={canvasH * s}
         style={{
-          width: "100vw",
-          height: isShade ? "auto" : "100vh",
+          width: W * s,
+          height: canvasH * s,
           imageRendering: "pixelated",
           cursor: "default",
           display: "block",
@@ -842,6 +871,7 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseLeave}
         onMouseMove={handleMouseMove}
+        onDoubleClick={handleDoubleClick}
         onContextMenu={handleContextMenu}
       />
 

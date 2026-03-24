@@ -1,14 +1,20 @@
 /**
- * Playlist window — a separate borderless Tauri window that renders the
- * playlist using the skin's pledit.bmp colours. Handles its own dragging
- * and resize edges since there are no compositor decorations.
+ * Skinned playlist window — uses sprites from pledit.bmp for the chrome
+ * (title bar, edges, bottom bar) and HTML for the scrollable track list.
+ *
+ * Layout (9-slice):
+ *   Top bar:    [corner-L 25px] [tile...] [title 100px] [tile...] [corner-R 25px]  (20px tall)
+ *   Middle:     [left-edge 12px] [track list flex] [right-edge 20px + scrollbar]
+ *   Bottom bar: [bottom-L 125px] [tile...] [bottom-R 150px]                        (38px tall)
  */
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { SkinData } from "./parser";
+
+// -- Interfaces --
 
 interface PlaylistEntry {
   id: number;
@@ -32,10 +38,16 @@ interface Props {
   scale: number;
 }
 
-const ROW_HEIGHT = 13;
+// -- Constants --
+
+const TRACK_HEIGHT = 13; // px per track row (native)
 const RESIZE_EDGE = 5;
 
-export default function PlaylistWindow({ skin, scale }: Props) {
+// -- Component --
+
+export default function PlaylistWindow({ skin }: Props) {
+  // Derive scale from window width so we always match the actual window dimensions.
+  const s = Math.max(1, Math.round(window.innerWidth / 275));
   const [playlist, setPlaylist] = useState<PlaylistState>({
     tracks: [],
     current_index: null,
@@ -44,7 +56,12 @@ export default function PlaylistWindow({ skin, scale }: Props) {
     total_duration: null,
     track_count: 0,
   });
+  const trackListRef = useRef<HTMLDivElement>(null);
 
+  const ps = skin.playlistStyle;
+  const sp = skin.sprites;
+
+  // Poll playlist state.
   useEffect(() => {
     const interval = setInterval(async () => {
       try {
@@ -57,15 +74,17 @@ export default function PlaylistWindow({ skin, scale }: Props) {
     return () => clearInterval(interval);
   }, []);
 
+  // Auto-scroll to current track when it changes.
+  useEffect(() => {
+    if (playlist.current_index == null || !trackListRef.current) return;
+    const row = trackListRef.current.children[playlist.current_index] as HTMLElement;
+    if (row) row.scrollIntoView({ block: "nearest" });
+  }, [playlist.current_index]);
+
   const openFiles = useCallback(async () => {
     const selected = await open({
       multiple: true,
-      filters: [
-        {
-          name: "Audio",
-          extensions: ["mp3", "flac", "ogg", "wav", "aac", "m4a", "alac"],
-        },
-      ],
+      filters: [{ name: "Audio", extensions: ["mp3", "flac", "ogg", "wav", "aac", "m4a", "alac"] }],
     });
     if (selected) {
       const paths = Array.isArray(selected) ? selected : [selected];
@@ -77,26 +96,20 @@ export default function PlaylistWindow({ skin, scale }: Props) {
     await invoke("playlist_play_index", { index });
   }, []);
 
-  // Handle resize — only vertical (top/bottom edge). Width is fixed.
-  const handleEdgeMouseDown = useCallback(
-    (e: React.MouseEvent) => {
-      const h = window.innerHeight;
-      const y = e.clientY;
+  // Resize from bottom/top edge.
+  const handleEdgeMouseDown = useCallback((e: React.MouseEvent) => {
+    const h = window.innerHeight;
+    const y = e.clientY;
+    let direction: string | null = null;
+    if (y < RESIZE_EDGE) direction = "North";
+    else if (y > h - RESIZE_EDGE) direction = "South";
+    if (direction) {
+      e.preventDefault();
+      e.stopPropagation();
+      getCurrentWindow().startResizeDragging(direction as any);
+    }
+  }, []);
 
-      let direction: string | null = null;
-      if (y < RESIZE_EDGE) direction = "North";
-      else if (y > h - RESIZE_EDGE) direction = "South";
-
-      if (direction) {
-        e.preventDefault();
-        e.stopPropagation();
-        getCurrentWindow().startResizeDragging(direction as any);
-      }
-    },
-    [],
-  );
-
-  // Update cursor for resize edges.
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
     const h = window.innerHeight;
     const y = e.clientY;
@@ -104,10 +117,20 @@ export default function PlaylistWindow({ skin, scale }: Props) {
     (e.currentTarget as HTMLElement).style.cursor = onEdge ? "ns-resize" : "default";
   }, []);
 
-  const s = scale;
-  const ps = skin.playlistStyle;
-  const fontSize = Math.round(11 * s);
-  const rowH = ROW_HEIGHT * s;
+  /** Helper to make a CSS background from a sprite data URI. */
+  const bg = (name: string, repeat = "no-repeat") => ({
+    backgroundImage: sp[name] ? `url(${sp[name]})` : "none",
+    backgroundRepeat: repeat,
+    backgroundSize: "100% 100%",
+  });
+
+  /** Helper for tiling backgrounds (repeats at native size). */
+  const bgTile = (name: string, dir: "repeat-x" | "repeat-y") => ({
+    backgroundImage: sp[name] ? `url(${sp[name]})` : "none",
+    backgroundRepeat: dir,
+    backgroundSize: "auto 100%",
+    ...(dir === "repeat-y" && { backgroundSize: "100% auto" }),
+  });
 
   return (
     <div
@@ -116,156 +139,177 @@ export default function PlaylistWindow({ skin, scale }: Props) {
         flexDirection: "column",
         height: "100vh",
         overflow: "hidden",
-        background: ps.normalbg,
-        fontFamily: `"${ps.font}", Arial, sans-serif`,
-        fontSize: `${fontSize}px`,
-        color: ps.normal,
+        imageRendering: "pixelated" as any,
       }}
       onMouseDown={handleEdgeMouseDown}
       onMouseMove={handleMouseMove}
     >
-      {/* Title bar — draggable */}
+      {/* ── TOP BAR (20*s px) ── */}
       <div
         style={{
           display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          padding: `${2 * s}px ${6 * s}px`,
-          background: ps.selectedbg,
-          color: ps.current,
-          fontSize: `${Math.round(9 * s)}px`,
+          height: 20 * s,
+          minHeight: 20 * s,
           flexShrink: 0,
           cursor: "move",
-          height: `${14 * s}px`,
-          boxSizing: "border-box",
         }}
         onMouseDown={(e) => {
-          // Don't start dragging if clicking on a button.
           if ((e.target as HTMLElement).closest("[data-action]")) return;
           e.stopPropagation();
           getCurrentWindow().startDragging();
         }}
       >
-        <span>
-          PLAYLIST — {playlist.track_count} track
-          {playlist.track_count !== 1 ? "s" : ""}
-          {playlist.total_duration
-            ? ` [${formatTime(playlist.total_duration)}]`
-            : ""}
-        </span>
-        <div style={{ display: "flex", gap: `${6 * s}px`, alignItems: "center" }}>
-          <span data-action="add" style={{ cursor: "pointer" }} onClick={openFiles}>+</span>
-          <span
+        <div style={{ width: 25 * s, height: 20 * s, flexShrink: 0, ...bg("PL_TOP_LEFT_SELECTED") }} />
+        <div style={{ flex: 1, ...bgTile("PL_TOP_TILE_SELECTED", "repeat-x") }} />
+        <div style={{ width: 100 * s, flexShrink: 0, ...bg("PL_TITLE_BAR_SELECTED") }} />
+        <div style={{ flex: 1, ...bgTile("PL_TOP_TILE_SELECTED", "repeat-x") }} />
+        <div style={{
+          width: 25 * s, height: 20 * s, flexShrink: 0, position: "relative",
+          ...bg("PL_TOP_RIGHT_SELECTED"),
+        }}>
+          <div
             data-action="close"
-            style={{ cursor: "pointer", fontSize: `${Math.round(11 * s)}px` }}
-            onClick={() => getCurrentWindow().close()}
-          >
-            ✕
-          </span>
+            style={{
+              position: "absolute", right: 3 * s, top: 3 * s,
+              width: 9 * s, height: 9 * s, cursor: "pointer",
+            }}
+            onClick={() => invoke("toggle_window", { windowId: "Playlist" })}
+          />
         </div>
       </div>
 
-      {/* Track list */}
-      <div
-        style={{
-          flex: 1,
-          overflowY: "auto",
-          padding: `${s}px 0`,
-        }}
-      >
-        {playlist.tracks.length === 0 ? (
+      {/* ── MIDDLE (flex) ── */}
+      <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
+        <div style={{ width: 12 * s, flexShrink: 0, ...bgTile("PL_LEFT_TILE", "repeat-y") }} />
+
+        {/* Track list area */}
+        <div
+          ref={trackListRef}
+          style={{
+            flex: 1,
+            overflowY: "auto",
+            overflowX: "hidden",
+            background: ps.normalbg,
+            fontFamily: `"${ps.font}", Arial, sans-serif`,
+            fontSize: Math.round(9 * s),
+            color: ps.normal,
+            padding: `${s}px 0`,
+            scrollbarWidth: "none",
+          }}
+        >
+          {playlist.tracks.length === 0 ? (
+            <div style={{
+              padding: 20 * s, textAlign: "center", color: ps.normal,
+              opacity: 0.5, userSelect: "none", fontSize: Math.round(11 * s),
+            }}>
+              Drop audio files here or click + Add
+            </div>
+          ) : (
+            playlist.tracks.map((track, index) => (
+              <div
+                key={track.id}
+                onDoubleClick={() => playIndex(index)}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  padding: `0 ${4 * s}px`,
+                  height: TRACK_HEIGHT * s,
+                  lineHeight: `${TRACK_HEIGHT * s}px`,
+                  cursor: "default",
+                  userSelect: "none",
+                  whiteSpace: "nowrap",
+                  backgroundColor: track.is_current ? ps.selectedbg : "transparent",
+                  color: track.is_current ? ps.current : ps.normal,
+                }}
+              >
+                <span style={{
+                  minWidth: 18 * s, textAlign: "right", marginRight: 3 * s, opacity: 0.6,
+                }}>
+                  {index + 1}.
+                </span>
+                <span style={{
+                  flex: 1, overflow: "hidden", textOverflow: "ellipsis",
+                }}>
+                  {track.display_name}
+                </span>
+                <span style={{
+                  marginLeft: 4 * s, opacity: 0.7, fontFamily: "monospace",
+                  fontSize: Math.round(8 * s),
+                }}>
+                  {track.duration}
+                </span>
+              </div>
+            ))
+          )}
+        </div>
+
+        <div style={{ width: 20 * s, flexShrink: 0, ...bgTile("PL_RIGHT_TILE", "repeat-y") }} />
+      </div>
+
+      {/* ── BOTTOM BAR (38*s px) ── */}
+      <div style={{
+        display: "flex",
+        height: 38 * s,
+        minHeight: 38 * s,
+        flexShrink: 0,
+      }}>
+        <div style={{
+          width: 125 * s, flexShrink: 0, position: "relative",
+          ...bg("PL_BOTTOM_LEFT"),
+        }}>
+          <div
+            data-action="add" title="Add Files" onClick={openFiles}
+            style={{
+              position: "absolute", left: 12 * s, bottom: 1 * s,
+              width: 25 * s, height: 18 * s, cursor: "pointer",
+            }}
+          />
+          <div
+            data-action="remove" title="Remove Selected"
+            onClick={() => invoke("playlist_remove_selected")}
+            style={{
+              position: "absolute", left: 40 * s, bottom: 1 * s,
+              width: 29 * s, height: 18 * s, cursor: "pointer",
+            }}
+          />
+          <div
+            data-action="clear" title="Clear Playlist"
+            onClick={() => invoke("playlist_clear")}
+            style={{
+              position: "absolute", left: 70 * s, bottom: 1 * s,
+              width: 29 * s, height: 18 * s, cursor: "pointer",
+            }}
+          />
+        </div>
+
+        <div style={{ flex: 1, ...bgTile("PL_BOTTOM_TILE", "repeat-x") }}>
+          <div style={{
+            display: "flex", alignItems: "center", justifyContent: "center",
+            height: "100%",
+            fontFamily: `"${ps.font}", Arial, sans-serif`,
+            fontSize: Math.round(9 * s),
+            color: ps.normal,
+          }}>
+            {playlist.total_duration ? formatTime(playlist.total_duration) : ""}
+          </div>
+        </div>
+
+        <div style={{
+          width: 150 * s, flexShrink: 0, position: "relative",
+          ...bg("PL_BOTTOM_RIGHT"),
+        }}>
           <div
             style={{
-              padding: `${20 * s}px`,
-              textAlign: "center",
-              color: ps.normal,
-              opacity: 0.5,
-              userSelect: "none",
+              position: "absolute", right: 0, bottom: 0,
+              width: 20 * s, height: 20 * s, cursor: "se-resize",
             }}
-          >
-            Drop audio files here or click +
-          </div>
-        ) : (
-          playlist.tracks.map((track, index) => (
-            <div
-              key={track.id}
-              onDoubleClick={() => playIndex(index)}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                padding: `0 ${6 * s}px`,
-                height: `${rowH}px`,
-                lineHeight: `${rowH}px`,
-                cursor: "default",
-                userSelect: "none",
-                backgroundColor: track.is_current ? ps.selectedbg : "transparent",
-                color: track.is_current ? ps.current : ps.normal,
-              }}
-            >
-              <span
-                style={{
-                  minWidth: `${22 * s}px`,
-                  textAlign: "right" as const,
-                  marginRight: `${4 * s}px`,
-                  opacity: 0.6,
-                }}
-              >
-                {index + 1}.
-              </span>
-              <span
-                style={{
-                  flex: 1,
-                  overflow: "hidden",
-                  whiteSpace: "nowrap" as const,
-                  textOverflow: "ellipsis",
-                }}
-              >
-                {track.display_name}
-              </span>
-              <span
-                style={{
-                  marginLeft: `${6 * s}px`,
-                  opacity: 0.7,
-                  fontFamily: "monospace",
-                  fontSize: `${Math.round(10 * s)}px`,
-                }}
-              >
-                {track.duration}
-              </span>
-            </div>
-          ))
-        )}
-      </div>
-
-      {/* Bottom bar */}
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          padding: `${3 * s}px ${6 * s}px`,
-          background: ps.selectedbg,
-          color: ps.current,
-          fontSize: `${Math.round(9 * s)}px`,
-          flexShrink: 0,
-        }}
-      >
-        <div style={{ display: "flex", gap: `${8 * s}px` }}>
-          <span style={{ cursor: "pointer" }} onClick={openFiles}>
-            +ADD
-          </span>
-          <span
-            style={{ cursor: "pointer" }}
-            onClick={async () => {
-              await invoke("playlist_clear");
+            onMouseDown={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              getCurrentWindow().startResizeDragging("SouthEast" as any);
             }}
-          >
-            CLEAR
-          </span>
+          />
         </div>
-        <span style={{ opacity: 0.6 }}>
-          {playlist.total_duration ? formatTime(playlist.total_duration) : ""}
-        </span>
       </div>
     </div>
   );
