@@ -106,3 +106,79 @@ pub fn load_wsz(path: impl AsRef<Path>) -> Result<SkinContents, String> {
 
     Ok(SkinContents { images, texts })
 }
+
+/// Load a skin from an extracted directory.
+pub fn load_directory(dir: impl AsRef<Path>) -> Result<SkinContents, String> {
+    let dir = dir.as_ref();
+    let mut images: HashMap<String, String> = HashMap::new();
+    let mut texts: HashMap<String, String> = HashMap::new();
+
+    let entries = std::fs::read_dir(dir)
+        .map_err(|e| format!("failed to read skin directory: {e}"))?;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        let filename = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        let key = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        if key.is_empty() {
+            continue;
+        }
+
+        match ext.as_str() {
+            "bmp" | "png" | "jpg" | "jpeg" | "gif" => {
+                let data = std::fs::read(&path)
+                    .map_err(|e| format!("failed to read {filename}: {e}"))?;
+                let mime = match ext.as_str() {
+                    "bmp" => "image/bmp",
+                    "png" => "image/png",
+                    "jpg" | "jpeg" => "image/jpeg",
+                    "gif" => "image/gif",
+                    _ => "application/octet-stream",
+                };
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+                images.insert(key, format!("data:{mime};base64,{b64}"));
+            }
+            "txt" | "ini" => {
+                let data = std::fs::read(&path)
+                    .map_err(|e| format!("failed to read {filename}: {e}"))?;
+                let text = String::from_utf8(data.clone()).unwrap_or_else(|_| {
+                    data.iter().map(|&b| b as char).collect()
+                });
+                texts.insert(key, text);
+            }
+            _ => {}
+        }
+    }
+
+    Ok(SkinContents { images, texts })
+}
+
+/// Load a skin from either a .wsz archive or an extracted directory.
+/// Auto-detects the format from the path.
+pub fn load_skin(path: impl AsRef<Path>) -> Result<SkinContents, String> {
+    let path = path.as_ref();
+    if path.is_dir() {
+        load_directory(path)
+    } else {
+        load_wsz(path)
+    }
+}

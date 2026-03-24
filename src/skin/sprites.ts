@@ -75,6 +75,22 @@ export const NUMBERS: Sprite[] = [
   { name: "NO_MINUS_SIGN", x: 9, y: 6, width: 5, height: 1 },
 ];
 
+// -- NUMS_EX.BMP -- Extended time display digits (overrides NUMBERS if present)
+export const NUMS_EX: Sprite[] = [
+  { name: "DIGIT_0_EX", x: 0, y: 0, width: 9, height: 13 },
+  { name: "DIGIT_1_EX", x: 9, y: 0, width: 9, height: 13 },
+  { name: "DIGIT_2_EX", x: 18, y: 0, width: 9, height: 13 },
+  { name: "DIGIT_3_EX", x: 27, y: 0, width: 9, height: 13 },
+  { name: "DIGIT_4_EX", x: 36, y: 0, width: 9, height: 13 },
+  { name: "DIGIT_5_EX", x: 45, y: 0, width: 9, height: 13 },
+  { name: "DIGIT_6_EX", x: 54, y: 0, width: 9, height: 13 },
+  { name: "DIGIT_7_EX", x: 63, y: 0, width: 9, height: 13 },
+  { name: "DIGIT_8_EX", x: 72, y: 0, width: 9, height: 13 },
+  { name: "DIGIT_9_EX", x: 81, y: 0, width: 9, height: 13 },
+  { name: "MINUS_SIGN_EX", x: 90, y: 0, width: 9, height: 13 },
+  { name: "NO_MINUS_SIGN_EX", x: 99, y: 0, width: 9, height: 13 },
+];
+
 // -- PLAYPAUS.BMP -- Play/pause/stop indicators
 export const PLAYPAUS: Sprite[] = [
   { name: "MAIN_PLAYING_INDICATOR", x: 0, y: 0, width: 9, height: 9 },
@@ -145,6 +161,7 @@ export const SPRITE_SHEETS: Record<string, Sprite[]> = {
   titlebar: TITLEBAR,
   cbuttons: CBUTTONS,
   numbers: NUMBERS,
+  nums_ex: NUMS_EX,
   playpaus: PLAYPAUS,
   posbar: POSBAR,
   volume: VOLUME,

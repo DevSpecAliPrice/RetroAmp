@@ -96,6 +96,8 @@ pub fn run() {
             commands::playlist_clear,
             // Skin
             commands::load_skin,
+            commands::get_skins,
+            commands::set_active_skin,
             // Windows
             commands::toggle_window,
             commands::get_window_states,

@@ -63,6 +63,7 @@ impl WindowId {
 pub struct WindowStates {
     pub windows: HashMap<String, WindowState>,
     pub scale: u32,
+    pub active_skin_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -77,6 +78,8 @@ pub struct WindowManager {
     states: HashMap<WindowId, bool>,
     /// Global UI scale factor (1, 2, 3).
     scale: u32,
+    /// Path to the currently active skin.
+    active_skin_path: Option<String>,
 }
 
 impl WindowManager {
@@ -85,7 +88,38 @@ impl WindowManager {
         states.insert(WindowId::Main, true);
         states.insert(WindowId::Equalizer, false);
         states.insert(WindowId::Playlist, false);
-        Self { states, scale: 2 }
+
+        // Determine scale from screen height.
+        let scale = Self::detect_scale();
+        eprintln!("[retroamp] detected UI scale: {scale}x");
+
+        Self { states, scale, active_skin_path: None }
+    }
+
+    /// Pick scale based on primary monitor resolution.
+    fn detect_scale() -> u32 {
+        // Use the SCREEN_HEIGHT env or fall back to a reasonable default.
+        // On Linux we can read the display resolution.
+        if let Ok(output) = std::process::Command::new("xdpyinfo")
+            .output()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                if line.contains("dimensions:") {
+                    // Format: "  dimensions:    2560x1440 pixels ..."
+                    if let Some(dims) = line.split_whitespace().nth(1) {
+                        if let Some(h) = dims.split('x').nth(1) {
+                            if let Ok(height) = h.parse::<u32>() {
+                                if height >= 2160 { return 3; } // 4K
+                                if height >= 1080 { return 2; } // 1080p, 1440p
+                                return 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        2 // Safe default
     }
 
     pub fn scale(&self) -> u32 {
@@ -103,6 +137,14 @@ impl WindowManager {
             _ => 1,
         };
         self.scale
+    }
+
+    pub fn active_skin_path(&self) -> Option<&str> {
+        self.active_skin_path.as_deref()
+    }
+
+    pub fn set_active_skin_path(&mut self, path: String) {
+        self.active_skin_path = Some(path);
     }
 
     /// Check if a window is currently visible.
@@ -141,6 +183,7 @@ impl WindowManager {
         WindowStates {
             windows,
             scale: self.scale,
+            active_skin_path: self.active_skin_path.clone(),
         }
     }
 }

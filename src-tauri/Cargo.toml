@@ -57,6 +57,7 @@ ringbuf = "0.4"
 rand = "0.10.0"
 zip = { version = "8.4.0", default-features = false, features = ["deflate"] }
 base64 = "0.22.1"
+dirs = "6.0.0"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

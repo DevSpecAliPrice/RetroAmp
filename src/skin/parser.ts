@@ -25,6 +25,8 @@ export interface SkinData {
   colors: string[];
   /** Playlist style from pledit.txt. */
   playlistStyle: PlaylistStyle;
+  /** Whether nums_ex.bmp is present (use extended digits). */
+  hasNumsEx: boolean;
 }
 
 interface SkinContents {
@@ -97,7 +99,22 @@ function normalizeColor(color: string): string {
 function parsePledit(text: string): PlaylistStyle {
   const style = { ...DEFAULT_PLAYLIST_STYLE };
   const lines = text.split(/[\r\n]+/);
+  // Some skins have [text] section, some don't. Accept both.
   let inTextSection = false;
+  let hasAnySectionHeader = false;
+
+  // Pre-scan to see if the file uses section headers at all.
+  for (const line of lines) {
+    if (line.trim().match(/^\[.+\]$/)) {
+      hasAnySectionHeader = true;
+      break;
+    }
+  }
+
+  // If no section headers, treat entire file as the text section.
+  if (!hasAnySectionHeader) {
+    inTextSection = true;
+  }
 
   for (const line of lines) {
     const trimmed = line.trim().toLowerCase();
@@ -201,6 +218,15 @@ export async function loadSkin(path: string): Promise<SkinData> {
     }
   }
 
+  // Apply fallbacks for missing sprite sheets.
+  // Balance falls back to Volume (many skins don't include balance.bmp).
+  if (!sheets["balance"] && sheets["volume"]) {
+    sheets["balance"] = sheets["volume"];
+  }
+
+  // Check if nums_ex is available (overrides numbers for time display).
+  const hasNumsEx = "nums_ex" in sheets;
+
   // Parse text files.
   const colors = contents.texts["viscolor"]
     ? parseViscolors(contents.texts["viscolor"])
@@ -215,5 +241,6 @@ export async function loadSkin(path: string): Promise<SkinData> {
     sheets,
     colors,
     playlistStyle,
+    hasNumsEx,
   };
 }

@@ -3246,6 +3246,7 @@ dependencies = [
  "audioadapter-buffers",
  "base64 0.22.1",
  "cpal",
+ "dirs",
  "env_logger",
  "log",
  "rand 0.10.0",

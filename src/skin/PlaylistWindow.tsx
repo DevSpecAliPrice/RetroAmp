@@ -32,22 +32,10 @@ interface Props {
   scale: number;
 }
 
-const NATIVE_W = 275;
 const ROW_HEIGHT = 13;
 const RESIZE_EDGE = 5;
 
-export default function PlaylistWindow({ skin }: Props) {
-  // Derive scale from window width — the window is always 275 × scale wide.
-  const [scale, setLocalScale] = useState(() =>
-    Math.max(1, Math.round(window.innerWidth / NATIVE_W))
-  );
-
-  useEffect(() => {
-    const onResize = () =>
-      setLocalScale(Math.max(1, Math.round(window.innerWidth / NATIVE_W)));
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, []);
+export default function PlaylistWindow({ skin, scale }: Props) {
   const [playlist, setPlaylist] = useState<PlaylistState>({
     tracks: [],
     current_index: null,

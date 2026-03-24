@@ -16,6 +16,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { SkinData } from "./parser";
@@ -51,6 +52,7 @@ interface PlaylistState {
 interface Props {
   skin: SkinData;
   scale: number;
+  onSkinChange?: (path: string) => void;
 }
 
 // Winamp main window is exactly 275x116.
@@ -96,7 +98,13 @@ const REGIONS = {
   pl: { x: 242, y: 58, w: 23, h: 12 },
 } as const;
 
-export default function MainWindow({ skin }: Props) {
+interface SkinListItem {
+  name: string;
+  path: string;
+  skin_type: "Classic" | "Modern" | "Unknown";
+}
+
+export default function MainWindow({ skin, onSkinChange }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [status, setStatus] = useState<EngineStatus>({
     state: "Stopped",
@@ -271,7 +279,8 @@ export default function MainWindow({ skin }: Props) {
     }
 
     // 4) Draw time display digits.
-    const numbers = skin.sheets["numbers"];
+    // Prefer nums_ex.bmp if available (many skins only include this).
+    const numbers = skin.sheets["nums_ex"] ?? skin.sheets["numbers"];
     if (numbers && status.position !== null) {
       const totalSecs = Math.floor(status.position);
       const mins = Math.floor(totalSecs / 60);
@@ -475,10 +484,15 @@ export default function MainWindow({ skin }: Props) {
 
   // Right-click context menu for settings.
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+  const [skinList, setSkinList] = useState<SkinListItem[]>([]);
+  const [showSkins, setShowSkins] = useState(false);
 
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     setContextMenu({ x: e.clientX, y: e.clientY });
+    setShowSkins(false);
+    // Fetch skin list.
+    invoke<SkinListItem[]>("get_skins").then(setSkinList).catch(console.error);
   }, []);
 
   // Close context menu on any click.
@@ -494,7 +508,6 @@ export default function MainWindow({ skin }: Props) {
       width: "100vw",
       height: "100vh",
       position: "relative",
-      overflow: "hidden",
     }}>
       <canvas
         ref={canvasRef}
@@ -513,8 +526,8 @@ export default function MainWindow({ skin }: Props) {
         onContextMenu={handleContextMenu}
       />
 
-      {/* Context menu */}
-      {contextMenu && (
+      {/* Context menu — rendered via portal so it can overflow the window */}
+      {contextMenu && createPortal(
         <div
           style={{
             position: "fixed",
@@ -527,59 +540,52 @@ export default function MainWindow({ skin }: Props) {
             fontFamily: "system-ui, sans-serif",
             fontSize: "12px",
             color: "#ccc",
-            minWidth: "160px",
+            minWidth: "180px",
             boxShadow: "2px 2px 8px rgba(0,0,0,0.5)",
           }}
           onMouseDown={(e) => e.stopPropagation()}
         >
-          <div
-            style={{ padding: "6px 12px", cursor: "pointer" }}
-            onMouseEnter={(e) => ((e.target as HTMLElement).style.background = "#333")}
-            onMouseLeave={(e) => ((e.target as HTMLElement).style.background = "transparent")}
-            onMouseDown={(e) => {
-              e.stopPropagation();
-              invoke("toggle_window", { windowId: "Playlist" });
-              setContextMenu(null);
-            }}
-          >
-            Toggle Playlist
-          </div>
-          <div
-            style={{ padding: "6px 12px", cursor: "pointer" }}
-            onMouseEnter={(e) => ((e.target as HTMLElement).style.background = "#333")}
-            onMouseLeave={(e) => ((e.target as HTMLElement).style.background = "transparent")}
-            onMouseDown={(e) => {
-              e.stopPropagation();
-              invoke("toggle_window", { windowId: "Equalizer" });
-              setContextMenu(null);
-            }}
-          >
-            Toggle Equalizer
-          </div>
+          <MenuItem label="Toggle Playlist" onClick={() => { invoke("toggle_window", { windowId: "Playlist" }); setContextMenu(null); }} />
+          <MenuItem label="Toggle Equalizer" onClick={() => { invoke("toggle_window", { windowId: "Equalizer" }); setContextMenu(null); }} />
           <div style={{ height: "1px", background: "#444", margin: "4px 0" }} />
-          <div
-            style={{ padding: "6px 12px", cursor: "pointer" }}
-            onMouseEnter={(e) => ((e.target as HTMLElement).style.background = "#333")}
-            onMouseLeave={(e) => ((e.target as HTMLElement).style.background = "transparent")}
-            onMouseDown={(e) => {
-              e.stopPropagation();
-              import("@tauri-apps/plugin-dialog").then(({ open: openDialog }) => {
-                openDialog({
-                  multiple: true,
-                  filters: [{ name: "Audio", extensions: ["mp3", "flac", "ogg", "wav", "aac", "m4a"] }],
-                }).then((selected) => {
-                  if (selected) {
-                    const paths = Array.isArray(selected) ? selected : [selected];
-                    invoke("playlist_add_files", { paths });
-                  }
-                });
-              });
-              setContextMenu(null);
-            }}
-          >
-            Add Files...
-          </div>
-        </div>
+          <MenuItem label="Add Files..." onClick={() => {
+            import("@tauri-apps/plugin-dialog").then(({ open: openDialog }) => {
+              openDialog({ multiple: true, filters: [{ name: "Audio", extensions: ["mp3", "flac", "ogg", "wav", "aac", "m4a"] }] })
+                .then((selected) => { if (selected) { const paths = Array.isArray(selected) ? selected : [selected]; invoke("playlist_add_files", { paths }); } });
+            });
+            setContextMenu(null);
+          }} />
+          <div style={{ height: "1px", background: "#444", margin: "4px 0" }} />
+          <MenuItem
+            label={showSkins ? "▾ Skins" : "▸ Skins"}
+            onClick={() => setShowSkins(!showSkins)}
+          />
+          {showSkins && (
+            <div style={{ maxHeight: "400px", overflowY: "auto", overflowX: "hidden" }}>
+              {skinList.filter(s => s.skin_type === "Classic").map((s) => (
+                <div
+                  key={s.path}
+                  style={{ padding: "4px 12px 4px 24px", cursor: "pointer", fontSize: "11px" }}
+                  onMouseEnter={(e) => ((e.target as HTMLElement).style.background = "#333")}
+                  onMouseLeave={(e) => ((e.target as HTMLElement).style.background = "transparent")}
+                  onMouseDown={(e) => {
+                    e.stopPropagation();
+                    onSkinChange?.(s.path);
+                    setContextMenu(null);
+                  }}
+                >
+                  {s.name}
+                </div>
+              ))}
+              {skinList.filter(s => s.skin_type === "Classic").length === 0 && (
+                <div style={{ padding: "4px 24px", color: "#666", fontSize: "11px" }}>
+                  No skins found
+                </div>
+              )}
+            </div>
+          )}
+        </div>,
+        document.body
       )}
     </div>
   );
@@ -595,4 +601,20 @@ function drawDigit(
 ) {
   // Each digit is 9px wide, 13px tall, laid out horizontally in numbers.bmp.
   ctx.drawImage(numbersImg, digit * 9, 0, 9, 13, x, y, 9, 13);
+}
+
+function MenuItem({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <div
+      style={{ padding: "6px 12px", cursor: "pointer" }}
+      onMouseEnter={(e) => ((e.target as HTMLElement).style.background = "#333")}
+      onMouseLeave={(e) => ((e.target as HTMLElement).style.background = "transparent")}
+      onMouseDown={(e) => {
+        e.stopPropagation();
+        onClick();
+      }}
+    >
+      {label}
+    </div>
+  );
 }
