@@ -111,6 +111,7 @@ export default function MainWindow({ skin, scale }: Props) {
   });
   const [pressed, setPressed] = useState<string | null>(null);
   const [marqueeOffset, setMarqueeOffset] = useState(0);
+  const [fftData, setFftData] = useState<number[]>([]);
 
   // Build the marquee text from current metadata.
   const meta = status.metadata;
@@ -160,6 +161,12 @@ export default function MainWindow({ skin, scale }: Props) {
         ]);
         setStatus(s);
         setPlaylist(pl);
+        if (s.state === "Playing") {
+          const fft = await invoke<{ magnitudes: number[] }>("get_fft_data");
+          setFftData(fft.magnitudes);
+        } else {
+          setFftData([]);
+        }
       } catch (e) {
         console.error(e);
       }
@@ -211,6 +218,43 @@ export default function MainWindow({ skin, scale }: Props) {
       }
 
       ctx.restore();
+    }
+
+    // 2.7) Draw spectrum analyser in the vis area.
+    // Position: x=24, y=43, 75px wide, 16px tall.
+    // Uses viscolor.txt colours: 0 = background, 2-17 = bar gradient (bottom to top), 23 = peaks.
+    const VIS_X = 24;
+    const VIS_Y = 43;
+    const VIS_W = 75;
+    const VIS_H = 16;
+    const NUM_BARS = 19; // Classic Winamp "wide" bar mode: 19 bars, each 3px wide + 1px gap
+    const BAR_W = 3;
+    const BAR_GAP = 1;
+
+    // Fill vis background.
+    ctx.fillStyle = skin.colors[0] ?? "rgb(0,0,0)";
+    ctx.fillRect(VIS_X, VIS_Y, VIS_W, VIS_H);
+
+    if (fftData.length > 0) {
+      for (let i = 0; i < NUM_BARS; i++) {
+        // Map bar index to FFT bin — use lower bins where music content lives.
+        // Use logarithmic mapping for more musically useful distribution.
+        const binIndex = Math.floor(Math.pow(i / NUM_BARS, 1.5) * 80) + 2;
+        const magnitude = fftData[binIndex] ?? 0;
+
+        // Convert magnitude to bar height (0 to VIS_H pixels).
+        const barHeight = Math.min(Math.round(magnitude * VIS_H * 5), VIS_H);
+
+        const barX = VIS_X + i * (BAR_W + BAR_GAP);
+
+        // Draw bar from bottom up, one pixel row at a time with gradient colours.
+        // Colours 2-17 map to the 16 pixel rows (bottom = green/index 17, top = red/index 2).
+        for (let row = 0; row < barHeight; row++) {
+          const colorIndex = 17 - Math.floor((row / VIS_H) * 15);
+          ctx.fillStyle = skin.colors[colorIndex] ?? "rgb(0,255,0)";
+          ctx.fillRect(barX, VIS_Y + VIS_H - 1 - row, BAR_W, 1);
+        }
+      }
     }
 
     // 3) Draw play/pause/stop indicator.
@@ -319,7 +363,7 @@ export default function MainWindow({ skin, scale }: Props) {
       const thumbX = Math.round(status.volume * (68 - 14));
       ctx.drawImage(volumeSheet, 15, 422, 14, 11, 107 + thumbX, 58, 14, 11);
     }
-  }, [skin, status, playlist, pressed, marqueeOffset, scrollText]);
+  }, [skin, status, playlist, pressed, marqueeOffset, scrollText, fftData]);
 
   // Click handling.
   const handleMouseDown = useCallback(
@@ -337,7 +381,9 @@ export default function MainWindow({ skin, scale }: Props) {
         invoke("previous_track");
       } else if (hit(REGIONS.play)) {
         setPressed("play");
-        invoke("playlist_play_index", { index: 0 }); // TODO: resume or play current
+        if (status.state === "Paused") invoke("resume");
+        else if (status.state === "Stopped" && playlist.track_count > 0)
+          invoke("playlist_play_index", { index: 0 });
       } else if (hit(REGIONS.pause)) {
         setPressed("pause");
         if (status.state === "Playing") invoke("pause");

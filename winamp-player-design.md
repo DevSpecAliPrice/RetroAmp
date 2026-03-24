@@ -190,43 +190,139 @@ The experience of adding skins should be frictionless:
 
 ---
 
+## Dual Skin System: Classic and Modern
+
+RetroAmp supports two fundamentally different skin formats, each with its own rendering engine. The player detects which format a skin uses and switches rendering mode automatically.
+
+### Classic Skins (.wsz) — Winamp 2.x Format
+
+The original BMP-based sprite system, compatible with ~65,000 existing community skins.
+
+| Aspect | Detail |
+|---|---|
+| **Format** | ZIP archive containing BMP sprite sheets + text config files |
+| **Layout** | Fixed pixel dimensions: main window 275×116, EQ 275×116, playlist resizable |
+| **Rendering** | Canvas sprite blitting — each UI element is a pixel region cut from a BMP |
+| **Fonts** | Bitmap font from text.bmp (5×6px fixed-width characters) |
+| **Colours** | viscolor.txt (24 hardcoded vis colours), pledit.txt (playlist colours + font) |
+| **Scripting** | None — layout is static, behaviour is defined by the player |
+| **Windows** | Main, EQ, Playlist (fixed set) |
+| **Scaling** | Integer multiples only (1×, 2×, 3×) to preserve pixel art |
+
+This is the format we implement first and prioritise for completeness. Webamp's skin parser, battle-tested against thousands of skins, is the reference implementation.
+
+### Modern Skins (WasabiXML) — Winamp 3/5 Format
+
+An XML-driven layout engine with PNG/JPG assets, TrueType fonts, and scripted behaviour. Modern skins can define completely custom window layouts with resizable panels, library browsers, video windows, and more.
+
+| Aspect | Detail |
+|---|---|
+| **Format** | ZIP archive (sometimes .wal) containing XML manifests + PNG/JPG/BMP images |
+| **Layout** | Declarative XML with containers, layouts, groups, and relative positioning |
+| **Rendering** | Composited PNG/JPG layers with alpha, z-ordering, and dynamic sizing |
+| **Fonts** | TrueType fonts (any system or embedded font) + bitmap fonts |
+| **Colours** | Gammagroups system with colour presets — full runtime theming |
+| **Scripting** | MAKI (compiled bytecode for a Winamp-specific VM) |
+| **Windows** | Arbitrary: Main, EQ, Playlist, Media Library, Video, Visualiser, Notifier, and any custom panels |
+| **Scaling** | Natively resizable — layouts use relative positioning (`relatw`, `relath`) |
+
+#### WasabiXML Structure
+
+```
+skin/
+  skin.xml                    ← Root manifest, includes other XML files
+  xml/
+    elements.xml              ← Bitmap/font definitions (id → file + crop region)
+    player.xml                ← Main player window layout
+    pledit.xml                ← Playlist editor layout
+    ml.xml                    ← Media library panel
+    color-presets.xml          ← Gamma colour themes
+  images/                     ← PNG/JPG/BMP assets
+  fonts/                      ← Embedded TTF fonts
+  scripts/
+    *.maki                    ← Compiled MAKI bytecode
+```
+
+#### MAKI Scripts — The Compatibility Challenge
+
+MAKI is a compiled scripting language that controls dynamic behaviour: updating text displays, animating sliders, handling interactions beyond simple button actions. Original MAKI source (`.m` files) is rarely distributed with skins — only the compiled `.maki` bytecode.
+
+**RetroAmp's approach:** Replace MAKI with TypeScript/React. Rather than reimplementing the MAKI VM (a substantial reverse-engineering effort with diminishing returns), RetroAmp provides equivalent behaviour through its React rendering layer. Simple scripts (text updates, slider positioning, play/pause icons) are handled natively by the skin renderer. Complex custom scripts won't be compatible, but the vast majority of modern skins use only standard MAKI patterns.
+
+This means RetroAmp's modern skin support is **layout-compatible but not script-compatible** — a skin's visual design, window layout, and image assets all work, but custom scripted interactions may not. This is an acceptable tradeoff: layout is what makes a skin look right, and scripting is what makes exotic interactions work. Most users care about the former.
+
+### Skin Detection and Switching
+
+When a skin is loaded, RetroAmp checks for the presence of `skin.xml`:
+
+- **`skin.xml` present** → Modern skin. Parse the WasabiXML manifest, load PNG/JPG assets, apply the XML layout engine.
+- **`skin.xml` absent, BMP files present** → Classic skin. Parse BMP sprite sheets, apply the fixed canvas renderer.
+
+The user sees no difference in the loading experience — drag a skin file onto the player and it renders correctly regardless of format. The skin browser shows both types mixed together, with a small badge indicating "Classic" or "Modern".
+
+### Why Support Both
+
+Classic skins have the nostalgia and the library (65,000+ on the Winamp Skin Museum). Modern skins have the design flexibility (resizable windows, library panels, custom layouts). Supporting both means RetroAmp is the only player that can load the entire Winamp skin ecosystem — a significant differentiator and a compelling reason for the skinning community to adopt it.
+
+The two rendering engines share no code but share the same Rust backend (audio engine, playlist, window manager). A classic skin and a modern skin call the same Tauri commands — the difference is entirely in how the frontend renders the UI.
+
 ## Architecture
 
 ```
-┌────────────────────────────────────────────────────────────────┐
-│                      Winamp UI (WebView)                       │
-│   Skin renderer · LCD display · Playlist · Drawers             │
-│   Quick tag edit · Ratings · Skin browser                      │
-│                                                                │
-│  ┌──────────────────────────────────────────────────────────┐  │
-│  │   FFT Data (received from Rust via Tauri events)         │  │
-│  │       ↓                        ↓                         │  │
-│  │  Spectrum analyser        Butterchurn (Milkdrop)         │  │
-│  │  (in skin vis area)       (own Tauri window)             │  │
-│  └──────────────────────────────────────────────────────────┘  │
-└───────────────────────────────┬────────────────────────────────┘
-                                │ Tauri commands / events
-┌───────────────────────────────▼────────────────────────────────┐
-│                         Rust Backend                           │
-├──────────────────┬──────────────────┬──────────────────────────┤
-│  Window Manager  │  Library Manager │   Audio Engine           │
-│  Tracks all open │  SQLite index    │   ┌──────────────────┐  │
-│  secondary wins  │  Tag read/write  │   │  Source Router    │  │
-│  Position/snap   │  File watcher    │   │  (AudioSource     │  │
-│  state persist   │  MusicBrainz     │   │   trait)          │  │
-│  Z-order         │  AcoustID        │   ├────┬───────┬──────┤  │
-│                  │                  │   │Local│Spotify│Radio │  │
-│                  │                  │   └──┬─┴───────┴──┬───┘  │
-│                  │                  │      ▼            ▼      │
-│                  │                  │   Symphonia (decode)     │
-│                  │                  │      ▼                   │
-│                  │                  │   EQ (Rust biquads)      │
-│                  │                  │      ▼                   │
-│                  │                  │   FFT (rustfft)──→ UI    │
-│                  │                  │      ▼                   │
-│                  │                  │   CPAL (output)          │
-│                  │                  │   └──────────────────┘  │
-└──────────────────┴──────────────────┴──────────────────────────┘
+┌─ Main Window ──────────┐  ┌─ EQ Window ──────────┐
+│  (own Tauri WebView)    │  │  (own Tauri WebView)  │
+│  Skin renderer · LCD    │  │  EQ sliders · presets  │
+│  Marquee · Vis · Seek   │  │  from eqmain.bmp       │
+└────────────┬────────────┘  └──────────┬─────────────┘
+             │                          │
+┌─ Playlist Window ──────┐  ┌─ Milkdrop Window ────┐
+│  (own Tauri WebView)    │  │  (own Tauri WebView)  │
+│  Track list · pledit.bmp│  │  Butterchurn · WebGL   │
+│  Scrollbar · buttons    │  │  Fullscreen capable    │
+└────────────┬────────────┘  └──────────┬─────────────┘
+             │ Tauri commands / events   │
+┌────────────▼──────────────────────────▼─────────────┐
+│                    Rust Backend                       │
+├──────────┬──────────┬──────────┬────────────────────┤
+│ Window   │ Playlist │  Skin    │   Audio Engine      │
+│ Manager  │ Manager  │  Loader  │   ┌──────────────┐ │
+│ Create/  │ Tracks   │ .wsz +   │   │Source Router │ │
+│ show/    │ Sequence │ WasabiXML│   │(AudioSource  │ │
+│ hide     │ Queue    │ parser   │   │ trait)       │ │
+│ persist  │ Auto-    │          │   ├───┬─────┬────┤ │
+│ state    │ advance  │          │   │Loc│Spot │Rad │ │
+│          │          │          │   └─┬─┴─────┴──┬─┘ │
+│          │          │          │     ▼          ▼    │
+│          │          │          │   Symphonia→EQ→FFT  │
+│          │          │          │     ▼               │
+│          │          │          │   CPAL (output)     │
+└──────────┴──────────┴──────────┴────────────────────┘
+```
+
+### Multi-Window Architecture
+
+RetroAmp uses **separate Tauri windows** for each panel — main player, EQ, playlist, library browser, Milkdrop — matching how original Winamp worked. Each window is an independent Tauri WebView with its own React render tree.
+
+**Implementation via Tauri v2:**
+- Windows are created dynamically from Rust when the user toggles a panel (e.g. clicks the PL button)
+- Each window loads the same React application but routes to the appropriate panel component based on a URL parameter or window label
+- All windows share the Rust backend state (audio engine, playlist, skin data) via Tauri commands
+- State changes are broadcast to all windows via Tauri events (`app.emit()` for global, `app.emit_to()` for targeted)
+- The Rust `WindowManager` tracks which windows are open and persists their geometry to SQLite
+
+**Platform behaviour:**
+- **X11:** Windows can be positioned and snapped programmatically. The window manager implements magnetic snap-to-dock behaviour.
+- **Wayland:** The compositor controls window placement. Snap-to-dock is not possible, but windows can be created, shown, hidden, and their geometry is persisted across sessions for compositors that support restoring window state.
+- **Windows/macOS:** Full programmatic positioning supported.
+
+**Communication pattern:**
+```
+User clicks PL button in Main Window
+  → invoke("toggle_window", { id: "playlist" })
+  → Rust WindowManager creates or shows the playlist Tauri window
+  → Playlist window loads, calls invoke("get_playlist") to get initial state
+  → On playlist changes, Rust emits "playlist-updated" event to all windows
+  → All windows update their UI in response
 ```
 
 ### Design Principles
@@ -353,19 +449,33 @@ The original Milkdrop presets use a proprietary scripting language that Butterch
 
 The Milkdrop window is the most dramatic example of a pattern that runs through the whole application — multiple secondary windows that each have their own position, visibility state, and relationship to the main player. The EQ, playlist, library browser, tag editor, skin browser, and Milkdrop window all follow this pattern. Without a unified approach, each becomes a one-off with its own position persistence and snap logic bolted on separately.
 
-A **Window Manager** in the Rust backend is the right answer. It owns the state of all secondary windows and is the single place where window behaviour is defined:
+### Implementation via Tauri v2 Multi-Window
+
+Each panel is a **separate Tauri window** with its own WebView. The Rust `WindowManager` creates, shows, hides, and destroys these windows in response to user actions (clicking the PL button, the EQ button, etc.). Each window loads the same React application but renders a different panel component based on the window label.
 
 ```
 Window Manager responsibilities:
+  - Create/destroy Tauri windows dynamically (WindowBuilder::new)
   - Track open/closed state of every secondary window
-  - Persist window positions across sessions (SQLite)
-  - Snap behaviour — windows magnetise to each other and to screen edges
+  - Persist window positions across sessions (SQLite or Tauri window-state plugin)
+  - Snap behaviour — windows magnetise to each other and to screen edges (X11 only)
   - Bring-all-to-front when the main player is focused
   - Restore full layout on launch
   - Z-order management for floating windows
+  - Broadcast state changes to all windows via Tauri events
 ```
 
-This mirrors how the original Winamp actually worked — it had a window manager internally that kept the EQ and playlist snapped to the main player as you dragged it around. Getting this right makes the whole app feel coherent rather than like a collection of independent panels. It's also the kind of thing that's much easier to design once upfront than to retrofit later when you have six window types all doing their own thing.
+**Window routing:** When a new Tauri window is created, it receives a label (e.g. `"playlist"`, `"equalizer"`, `"milkdrop"`). The React app reads this label on mount and renders the appropriate panel component. All panels share the same Rust backend state via Tauri commands.
+
+### Platform-Specific Behaviour
+
+**X11 (Linux with X):** Full programmatic window positioning. The window manager can implement magnetic snap-to-dock — when a window is dragged near another window's edge, it snaps to align. This replicates original Winamp's behaviour perfectly.
+
+**Wayland (Linux with Wayland):** The compositor controls window placement. Programmatic `setPosition()` and `setSize()` are silently ignored. Windows can still be created, shown, hidden, and destroyed. Position persistence works to the extent that the compositor restores window placement. Snap-to-dock is not possible — this is a known Wayland limitation that affects all applications, not just RetroAmp.
+
+**Windows/macOS:** Full programmatic positioning. Snap-to-dock works.
+
+The window manager detects the platform and enables/disables snap behaviour accordingly. On Wayland, windows function as independent panels that the user arranges manually. On X11/Windows/macOS, they snap together like original Winamp.
 
 ---
 
@@ -664,4 +774,4 @@ Include a clear statement in the README and About screen that RetroAmp is an ind
 
 ---
 
-*RetroAmp design document. Last updated: 22 March 2026.*
+*RetroAmp design document. Last updated: 24 March 2026.*

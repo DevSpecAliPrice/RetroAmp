@@ -328,8 +328,7 @@ impl PlaylistManager {
     pub fn cycle_repeat(&mut self) {
         self.sequence.repeat = match self.sequence.repeat {
             RepeatMode::Off => RepeatMode::Playlist,
-            RepeatMode::Playlist => RepeatMode::Track,
-            RepeatMode::Track => RepeatMode::Off,
+            _ => RepeatMode::Off,
         };
     }
 

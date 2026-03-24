@@ -28,7 +28,7 @@ interface PlaylistState {
 }
 
 const DEFAULT_SKIN_PATH =
-  "/home/n3o/Software_Projects/RetroAmp/Winamp_Classic_CM.wsz";
+  "/home/n3o/Software_Projects/RetroAmp/skins/Winamp_Classic_CM.wsz";
 
 /** Derive integer scale from the current window width. */
 function scaleFromWidth(width: number): number {
