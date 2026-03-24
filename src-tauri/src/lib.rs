@@ -22,6 +22,9 @@ use window::manager::{WindowId, WindowManager};
 pub fn run() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
+    // Ensure the built-in default skin is present in the user's skins directory.
+    skin::default::ensure_default_skin();
+
     let engine = match AudioEngine::new() {
         Ok(engine) => engine,
         Err(e) => {

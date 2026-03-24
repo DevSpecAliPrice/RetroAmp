@@ -825,6 +825,7 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
       width: "100vw",
       height: "100vh",
       position: "relative",
+      background: "#000",
     }}>
       <canvas
         ref={canvasRef}
@@ -832,7 +833,7 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
         height={canvasH}
         style={{
           width: "100vw",
-          height: "100vh",
+          height: isShade ? "auto" : "100vh",
           imageRendering: "pixelated",
           cursor: "default",
           display: "block",

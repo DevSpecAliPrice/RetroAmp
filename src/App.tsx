@@ -5,7 +5,7 @@ import { loadSkin, type SkinData } from "./skin/parser";
 import MainWindow from "./skin/MainWindow";
 import PlaylistWindow from "./skin/PlaylistWindow";
 
-const DEFAULT_SKIN_NAME = "Winamp_Classic_CM.wsz";
+const DEFAULT_SKIN_NAME = "RetroAmp Default";
 
 function detectPanel(): string {
   const params = new URLSearchParams(window.location.search);

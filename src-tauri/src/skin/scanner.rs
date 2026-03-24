@@ -34,7 +34,12 @@ pub fn scan_all(dirs: &[PathBuf]) -> Vec<SkinInfo> {
             scan_recursive(dir, &mut all);
         }
     }
-    all.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    all.sort_by(|a, b| {
+        let a_default = a.name == super::default::SKIN_NAME;
+        let b_default = b.name == super::default::SKIN_NAME;
+        b_default.cmp(&a_default)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
     all.dedup_by(|a, b| a.name.to_lowercase() == b.name.to_lowercase());
     all
 }

@@ -355,16 +355,12 @@ pub async fn enter_shade(
         wm.scale()
     };
 
-    // Derive shade size from the main window's actual dimensions so we
-    // match whatever the compositor is actually giving us.
-    // shade height = main height * (14 / 116)
-    let (w, h) = app
-        .get_webview_window("main")
-        .and_then(|win| win.inner_size().ok())
-        .map(|s| (s.width as f64, (s.height as f64 * 14.0 / 116.0).round()))
-        .unwrap_or((275.0 * scale as f64, 14.0 * scale as f64));
-
-    eprintln!("[retroamp] shade window size: {w}x{h}");
+    // Request the ideal shade size. Wayland compositors may enforce a minimum
+    // height — that's OK, the canvas uses height:auto to maintain aspect ratio
+    // and any extra space below is black.
+    let w = 275.0 * scale as f64;
+    let h = 14.0 * scale as f64;
+    eprintln!("[retroamp] shade window requested: {w}x{h}");
 
     // Only create if it doesn't already exist.
     if app.get_webview_window("shade").is_none() {
