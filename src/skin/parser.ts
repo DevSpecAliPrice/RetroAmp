@@ -165,6 +165,80 @@ function loadImage(dataUri: string): Promise<HTMLImageElement> {
   });
 }
 
+/**
+ * Apply Winamp-style color key transparency.
+ *
+ * Winamp skins use BMP files which don't support alpha channels, so skin
+ * authors mark transparent pixels with a "magic" mask colour. Two mechanisms
+ * are combined:
+ *
+ *  1. Magenta (#FF00FF) is ALWAYS stripped — it is the de-facto universal
+ *     Winamp mask colour, chosen specifically because no skin artwork uses
+ *     that exact value.
+ *
+ *  2. The pixel at (0,0) of each bitmap is checked as a per-image mask key
+ *     (the standard Winamp convention). We accept it when every RGB channel
+ *     is 0 or 255 (a saturated primary/secondary, excluding black/white)
+ *     AND the colour covers less than 20% of the image — ruling out skins
+ *     that legitimately use that colour as artwork.
+ */
+async function applyColorKeyTransparency(
+  img: HTMLImageElement,
+): Promise<HTMLImageElement> {
+  const canvas = document.createElement("canvas");
+  canvas.width = img.width;
+  canvas.height = img.height;
+  const ctx = canvas.getContext("2d")!;
+  ctx.drawImage(img, 0, 0);
+
+  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const data = imageData.data;
+  const totalPixels = canvas.width * canvas.height;
+
+  // Detect per-bitmap mask colour from (0,0) pixel.
+  // Must be a saturated primary/secondary (each channel 0 or 255, not
+  // black, not white), non-magenta (magenta is always stripped below),
+  // and cover less than 20% of the image (ruling out artwork colours).
+  const mr = data[0], mg = data[1], mb = data[2];
+  const bitmapKeyIsMagenta = mr === 255 && mg === 0 && mb === 255;
+  let hasBitmapKey = false;
+  if (
+    !bitmapKeyIsMagenta &&
+    (mr === 0 || mr === 255) &&
+    (mg === 0 || mg === 255) &&
+    (mb === 0 || mb === 255) &&
+    (mr | mg | mb) !== 0 &&
+    (mr & mg & mb) !== 255
+  ) {
+    let count = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      if (data[i] === mr && data[i + 1] === mg && data[i + 2] === mb) {
+        count++;
+      }
+    }
+    hasBitmapKey = count <= totalPixels * 0.2;
+  }
+
+  // Replace mask pixels with full transparency.
+  // Magenta is always stripped regardless of (0,0) or coverage.
+  let modified = false;
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i], g = data[i + 1], b = data[i + 2];
+    if (
+      (r === 255 && g === 0 && b === 255) ||
+      (hasBitmapKey && r === mr && g === mg && b === mb)
+    ) {
+      data[i + 3] = 0;
+      modified = true;
+    }
+  }
+
+  if (!modified) return img;
+
+  ctx.putImageData(imageData, 0, 0);
+  return loadImage(canvas.toDataURL());
+}
+
 /** Extract individual sprite images from a sprite sheet using canvas. */
 function extractSprites(
   img: HTMLImageElement,
@@ -204,7 +278,8 @@ export async function loadSkin(path: string): Promise<SkinData> {
 
   for (const [key, dataUri] of Object.entries(contents.images)) {
     try {
-      const img = await loadImage(dataUri);
+      const raw = await loadImage(dataUri);
+      const img = await applyColorKeyTransparency(raw);
       sheets[key] = img;
 
       // Extract individual sprites if we have definitions for this sheet.

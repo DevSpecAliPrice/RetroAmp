@@ -7,7 +7,6 @@ interface SkinCatalogEntry {
   name: string;
   path: string;
   is_archive: boolean;
-  skin_type: string;
   has_thumbnail: boolean;
   is_favorite: boolean;
   last_used: number | null;
@@ -186,7 +185,7 @@ export default function SkinBrowser({ playlistStyle: ps }: Props) {
   const lowerFilter = filter.toLowerCase();
   const filteredSkins = useMemo(
     () => skins.filter(
-      (s) => s.skin_type === "Classic" && s.name.toLowerCase().includes(lowerFilter)
+      (s) => s.name.toLowerCase().includes(lowerFilter)
     ),
     [skins, lowerFilter]
   );

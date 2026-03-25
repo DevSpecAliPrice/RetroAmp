@@ -1,18 +1,11 @@
-//! Skin scanner — discovers skins in the skins directories.
+//! Skin scanner — discovers classic Winamp skins in the skins directories.
 //!
-//! Recursively scans for both .wsz archives and extracted directories.
-//! Identifies whether each skin is classic (BMP-based) or modern (XML-based).
+//! Recursively scans for .wsz archives and extracted directories containing
+//! classic BMP-based skins. Modern XML-based skins (.wal) are not supported.
 
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub enum SkinType {
-    Classic,
-    Modern,
-    Unknown,
-}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SkinInfo {
@@ -22,8 +15,6 @@ pub struct SkinInfo {
     pub path: String,
     /// Whether this is an archive (.wsz) or an extracted directory.
     pub is_archive: bool,
-    /// Classic (BMP) or Modern (XML).
-    pub skin_type: SkinType,
 }
 
 /// Scan directories recursively for skins.
@@ -72,18 +63,14 @@ fn scan_recursive(dir: &Path, results: &mut Vec<SkinInfo>) {
                     name: display_name,
                     path: path.to_string_lossy().to_string(),
                     is_archive: true,
-                    skin_type: SkinType::Classic,
                 });
             }
         } else if path.is_dir() {
-            let skin_type = detect_skin_type(&path);
-            if skin_type != SkinType::Unknown {
-                // It's a skin directory — add it.
+            if is_classic_skin(&path) {
                 results.push(SkinInfo {
                     name,
                     path: path.to_string_lossy().to_string(),
                     is_archive: false,
-                    skin_type,
                 });
             } else {
                 // Not a skin — recurse into it to find skins inside.
@@ -93,20 +80,22 @@ fn scan_recursive(dir: &Path, results: &mut Vec<SkinInfo>) {
     }
 }
 
-/// Detect whether a directory contains a classic or modern skin.
-fn detect_skin_type(dir: &Path) -> SkinType {
+/// Check whether a directory contains a classic (BMP-based) skin.
+/// Directories with skin.xml are modern skins and are skipped.
+fn is_classic_skin(dir: &Path) -> bool {
+    // Modern skins have skin.xml — skip them.
     if dir.join("skin.xml").exists() || dir.join("Skin.xml").exists() {
-        return SkinType::Modern;
+        return false;
     }
 
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_lowercase();
             if name == "main.bmp" {
-                return SkinType::Classic;
+                return true;
             }
         }
     }
 
-    SkinType::Unknown
+    false
 }

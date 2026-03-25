@@ -33,7 +33,6 @@ pub struct SkinCatalogEntry {
     pub name: String,
     pub path: String,
     pub is_archive: bool,
-    pub skin_type: String,
     pub has_thumbnail: bool,
     pub is_favorite: bool,
     pub last_used: Option<i64>,
@@ -105,18 +104,16 @@ impl Database {
     /// for existing entries.
     pub fn upsert_skin(&self, skin: &SkinInfo, thumbnail: Option<String>) -> Result<(), String> {
         let now = unix_now();
-        let skin_type = format!("{:?}", skin.skin_type);
 
         self.conn
             .execute(
                 "INSERT INTO skin_catalog (name, path, is_archive, skin_type, thumbnail, discovered_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 VALUES (?1, ?2, ?3, 'Classic', ?4, ?5)
                  ON CONFLICT(path) DO UPDATE SET
                     name = excluded.name,
                     is_archive = excluded.is_archive,
-                    skin_type = excluded.skin_type,
                     thumbnail = COALESCE(excluded.thumbnail, skin_catalog.thumbnail)",
-                params![skin.name, skin.path, skin.is_archive, skin_type, thumbnail, now],
+                params![skin.name, skin.path, skin.is_archive, thumbnail, now],
             )
             .map_err(|e| format!("failed to upsert skin: {e}"))?;
         Ok(())
@@ -127,7 +124,7 @@ impl Database {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, name, path, is_archive, skin_type,
+                "SELECT id, name, path, is_archive,
                         (thumbnail IS NOT NULL) as has_thumb,
                         is_favorite, last_used, use_count
                  FROM skin_catalog
@@ -143,11 +140,10 @@ impl Database {
                     name: row.get(1)?,
                     path: row.get(2)?,
                     is_archive: row.get(3)?,
-                    skin_type: row.get(4)?,
-                    has_thumbnail: row.get(5)?,
-                    is_favorite: row.get(6)?,
-                    last_used: row.get(7)?,
-                    use_count: row.get(8)?,
+                    has_thumbnail: row.get(4)?,
+                    is_favorite: row.get(5)?,
+                    last_used: row.get(6)?,
+                    use_count: row.get(7)?,
                 })
             })
             .map_err(|e| format!("query error: {e}"))?;
@@ -161,7 +157,7 @@ impl Database {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, name, path, is_archive, skin_type,
+                "SELECT id, name, path, is_archive,
                         (thumbnail IS NOT NULL) as has_thumb,
                         is_favorite, last_used, use_count
                  FROM skin_catalog WHERE last_used IS NOT NULL
@@ -176,11 +172,10 @@ impl Database {
                     name: row.get(1)?,
                     path: row.get(2)?,
                     is_archive: row.get(3)?,
-                    skin_type: row.get(4)?,
-                    has_thumbnail: row.get(5)?,
-                    is_favorite: row.get(6)?,
-                    last_used: row.get(7)?,
-                    use_count: row.get(8)?,
+                    has_thumbnail: row.get(4)?,
+                    is_favorite: row.get(5)?,
+                    last_used: row.get(6)?,
+                    use_count: row.get(7)?,
                 })
             })
             .map_err(|e| format!("query error: {e}"))?;
