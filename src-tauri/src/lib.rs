@@ -93,6 +93,7 @@ pub fn run() {
         .manage(playlist_manager)
         .manage(eq_settings)
         .manage(Mutex::new(window_manager))
+        .manage(Mutex::new(commands::SkinCache::new()))
         .manage(Arc::clone(&database))
         .setup(move |app| {
             // Sync the skin catalog in the background so startup isn't blocked.
@@ -245,7 +246,9 @@ pub fn run() {
                 if window.label() == "main" {
                     if let Some(wm) = window.try_state::<Mutex<WindowManager>>() {
                         if let Ok(wm) = wm.lock() {
-                            commands::save_window_layout(window.app_handle(), &wm);
+                            let states = wm.get_states();
+                            drop(wm);
+                            commands::save_window_layout(window.app_handle(), &states);
                         }
                     }
                 }

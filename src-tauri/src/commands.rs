@@ -20,6 +20,28 @@ use crate::skin::loader::SkinContents;
 use crate::skin::scanner::SkinInfo;
 use crate::window::manager::{WindowId, WindowManager, WindowStates};
 
+// -- Skin cache --
+
+/// Caches the most recently loaded skin to avoid redundant ZIP extractions
+/// when multiple windows load the same skin.
+pub struct SkinCache {
+    cached: Option<(String, SkinContents)>,
+}
+
+impl SkinCache {
+    pub fn new() -> Self {
+        Self { cached: None }
+    }
+
+    pub fn get(&self, path: &str) -> Option<&SkinContents> {
+        self.cached.as_ref().filter(|(p, _)| p == path).map(|(_, c)| c)
+    }
+
+    pub fn put(&mut self, path: String, contents: SkinContents) {
+        self.cached = Some((path, contents));
+    }
+}
+
 // -- Engine commands --
 
 #[tauri::command]
@@ -325,11 +347,18 @@ pub fn playlist_clear(
 /// Capture the current window layout (visibility, positions, sizes) and save
 /// to config. Called on toggle, scale change, and app exit. Position reads
 /// are best-effort — on Wayland `outer_position()` may return (0,0).
-pub fn save_window_layout(app: &AppHandle, wm: &WindowManager) {
+///
+/// Accepts a `WindowStates` snapshot so the caller can drop the lock before
+/// calling this (avoiding lock contention with the 50ms poller).
+pub fn save_window_layout(app: &AppHandle, states: &WindowStates) {
     use crate::config::WindowLayoutEntry;
 
     let mut cfg = crate::config::AppConfig::load();
-    cfg.ui.scale = Some(wm.scale());
+    cfg.ui.scale = Some(states.scale);
+
+    let is_visible = |label: &str| -> bool {
+        states.windows.get(label).map_or(false, |w| w.visible)
+    };
 
     let capture = |label: &str, visible: bool, resizable: bool| -> WindowLayoutEntry {
         let mut entry = WindowLayoutEntry {
@@ -355,13 +384,13 @@ pub fn save_window_layout(app: &AppHandle, wm: &WindowManager) {
     };
 
     cfg.ui.main = capture("main", true, false);
-    cfg.ui.equalizer = capture("equalizer", wm.is_visible(WindowId::Equalizer), false);
-    cfg.ui.playlist = capture("playlist", wm.is_visible(WindowId::Playlist), true);
-    if wm.is_visible(WindowId::RadioBrowser) || app.get_webview_window("radiobrowser").is_some() {
-        cfg.ui.radio_browser = Some(capture("radiobrowser", wm.is_visible(WindowId::RadioBrowser), true));
+    cfg.ui.equalizer = capture("equalizer", is_visible("equalizer"), false);
+    cfg.ui.playlist = capture("playlist", is_visible("playlist"), true);
+    if is_visible("radiobrowser") || app.get_webview_window("radiobrowser").is_some() {
+        cfg.ui.radio_browser = Some(capture("radiobrowser", is_visible("radiobrowser"), true));
     }
-    if wm.is_visible(WindowId::Settings) || app.get_webview_window("settings").is_some() {
-        cfg.ui.settings = Some(capture("settings", wm.is_visible(WindowId::Settings), true));
+    if is_visible("settings") || app.get_webview_window("settings").is_some() {
+        cfg.ui.settings = Some(capture("settings", is_visible("settings"), true));
     }
 
     let _ = cfg.save();
@@ -480,10 +509,13 @@ pub async fn toggle_window(
             })?;
     }
 
-    // Persist window layout after every toggle.
-    let wm = window_manager.lock().map_err(|e| e.to_string())?;
-    save_window_layout(&app, &wm);
-    Ok(wm.get_states())
+    // Snapshot the state and release the lock before doing I/O.
+    let states = {
+        let wm = window_manager.lock().map_err(|e| e.to_string())?;
+        wm.get_states()
+    };
+    save_window_layout(&app, &states);
+    Ok(states)
 }
 
 /// Get the current state of all windows.
@@ -501,10 +533,13 @@ pub async fn cycle_scale(
     app: AppHandle,
     window_manager: State<'_, Mutex<WindowManager>>,
 ) -> Result<WindowStates, String> {
-    let mut wm = window_manager.lock().map_err(|e| e.to_string())?;
-    wm.cycle_scale();
-    save_window_layout(&app, &wm);
-    Ok(wm.get_states())
+    let states = {
+        let mut wm = window_manager.lock().map_err(|e| e.to_string())?;
+        wm.cycle_scale();
+        wm.get_states()
+    };
+    save_window_layout(&app, &states);
+    Ok(states)
 }
 
 /// Set a specific scale value.
@@ -514,10 +549,13 @@ pub async fn set_scale(
     window_manager: State<'_, Mutex<WindowManager>>,
     scale: u32,
 ) -> Result<WindowStates, String> {
-    let mut wm = window_manager.lock().map_err(|e| e.to_string())?;
-    wm.set_scale(scale);
-    save_window_layout(&app, &wm);
-    Ok(wm.get_states())
+    let states = {
+        let mut wm = window_manager.lock().map_err(|e| e.to_string())?;
+        wm.set_scale(scale);
+        wm.get_states()
+    };
+    save_window_layout(&app, &states);
+    Ok(states)
 }
 
 // -- Shade mode commands --
@@ -632,9 +670,20 @@ pub async fn open_settings(
 // -- Skin commands --
 
 /// Load a skin from a .wsz archive or extracted directory.
+/// Results are cached so that opening additional windows doesn't re-extract
+/// the same ZIP file.
 #[tauri::command]
-pub fn load_skin(path: String) -> Result<SkinContents, String> {
-    crate::skin::loader::load_skin(&path)
+pub fn load_skin(
+    skin_cache: State<'_, Mutex<SkinCache>>,
+    path: String,
+) -> Result<SkinContents, String> {
+    let mut cache = skin_cache.lock().map_err(|e| e.to_string())?;
+    if let Some(cached) = cache.get(&path) {
+        return Ok(cached.clone());
+    }
+    let contents = crate::skin::loader::load_skin(&path)?;
+    cache.put(path, contents.clone());
+    Ok(contents)
 }
 
 /// Set the active skin path (so all windows can pick it up).

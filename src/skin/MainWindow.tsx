@@ -142,6 +142,9 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
     metadata: null,
     volume: 1.0,
     balance: 0.0,
+    can_seek: false,
+    has_duration: false,
+    is_stream: false,
   });
   const [windowStates, setWindowStates] = useState<Record<string, { visible: boolean }>>({});
   const [playlist, setPlaylist] = useState<PlaylistState>({

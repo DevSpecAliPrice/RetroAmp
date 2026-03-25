@@ -93,11 +93,11 @@ export default function RadioBrowserWindow({ skin, scale }: Props) {
   } | null>(null);
 
   // Currently playing URL (for highlighting)
-  const [playingUrl, setPlayingUrl] = useState<string | null>(null);
+  const [, setPlayingUrl] = useState<string | null>(null);
 
   // Status message (shown briefly for errors/feedback)
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
-  const statusTimer = useRef<ReturnType<typeof setTimeout>>();
+  const statusTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const showStatus = useCallback((msg: string, durationMs = 4000) => {
     setStatusMsg(msg);
     clearTimeout(statusTimer.current);
@@ -201,7 +201,7 @@ export default function RadioBrowserWindow({ skin, scale }: Props) {
   }, []);
 
   // Debounced search for Discover tab
-  const searchTimeoutRef = useRef<ReturnType<typeof setTimeout>>();
+  const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const onDiscoverSearch = useCallback((value: string) => {
     setFilter(value);
     clearTimeout(searchTimeoutRef.current);

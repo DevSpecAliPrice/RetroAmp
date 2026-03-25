@@ -35,17 +35,25 @@ function App() {
   const [skinError, setSkinError] = useState<string | null>(null);
   const [scale, setScale] = useState(2);
   const currentSkinPath = useRef<string>("");
+  const skinLoading = useRef(false);
   const [syncProgress, setSyncProgress] = useState<SyncProgress | null>(null);
 
   // Load skin — used both for initial load and skin switching.
+  // Guarded against concurrent calls: if a load is already in progress for
+  // the same path, subsequent calls are no-ops.
   const doLoadSkin = async (path: string) => {
+    if (skinLoading.current || path === currentSkinPath.current) return;
+    skinLoading.current = true;
+    currentSkinPath.current = path; // optimistic — prevents poller re-fires
     try {
       const newSkin = await loadSkin(path);
       setSkin(newSkin);
-      currentSkinPath.current = path;
     } catch (e) {
       console.error("Failed to load skin:", e);
+      currentSkinPath.current = ""; // revert so a retry can happen
       setSkinError(String(e));
+    } finally {
+      skinLoading.current = false;
     }
   };
 
