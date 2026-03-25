@@ -1,0 +1,291 @@
+/* Settings window — themed by the active skin */
+
+.settings-root {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+  font-family: system-ui, -apple-system, sans-serif;
+  font-size: 13px;
+}
+
+/* Tab bar */
+.settings-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid;
+  flex-shrink: 0;
+}
+
+.settings-tab {
+  padding: 10px 20px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  font-size: 13px;
+  transition: opacity 0.15s, border-color 0.15s;
+  opacity: 0.7;
+}
+
+.settings-tab:hover {
+  opacity: 1;
+}
+
+.settings-tab.active {
+  opacity: 1;
+}
+
+/* Content area */
+.settings-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.settings-placeholder {
+  text-align: center;
+  padding: 40px;
+  opacity: 0.6;
+}
+
+/* Skin browser */
+.skin-browser {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.skin-browser-header {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.skin-search {
+  flex: 1;
+  min-width: 120px;
+  padding: 6px 10px;
+  border: 1px solid;
+  border-radius: 3px;
+  font-size: 13px;
+  outline: none;
+}
+
+.skin-search::placeholder {
+  opacity: 0.5;
+}
+
+.skin-browser-actions {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.view-toggle {
+  width: 28px;
+  height: 28px;
+  border: 1px solid;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.skin-action-btn {
+  padding: 5px 12px;
+  border: 1px solid;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.skin-action-btn:hover,
+.view-toggle:hover {
+  opacity: 0.8;
+}
+
+/* Sections */
+.skin-section {
+  border: 1px solid;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.skin-section-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.skin-section-toggle {
+  font-size: 11px;
+  width: 12px;
+}
+
+.skin-section-title {
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.skin-section-count {
+  font-size: 11px;
+  margin-left: auto;
+  opacity: 0.7;
+}
+
+/* Grid view */
+.skin-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 8px;
+  padding: 8px;
+}
+
+.skin-card {
+  border: 2px solid;
+  border-radius: 4px;
+  overflow: hidden;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.skin-card:hover {
+  opacity: 0.85;
+}
+
+.skin-card.active {
+  box-shadow: 0 0 0 1px currentColor;
+}
+
+.skin-card-thumb {
+  width: 100%;
+  aspect-ratio: 275 / 116;
+  overflow: hidden;
+  background: #000;
+}
+
+.skin-card-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  image-rendering: pixelated;
+  display: block;
+}
+
+.skin-card-no-thumb {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  opacity: 0.4;
+}
+
+.skin-card-footer {
+  display: flex;
+  align-items: center;
+  padding: 4px 6px;
+  gap: 4px;
+}
+
+.skin-card-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
+/* List view */
+.skin-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.skin-list-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: opacity 0.1s;
+}
+
+.skin-list-row:hover {
+  opacity: 0.85;
+}
+
+.skin-list-thumb {
+  width: 44px;
+  height: 18px;
+  object-fit: cover;
+  image-rendering: pixelated;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.skin-list-thumb-placeholder {
+  width: 44px;
+  height: 18px;
+  flex-shrink: 0;
+  background: #111;
+  border-radius: 2px;
+}
+
+.skin-list-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+/* Favorite button */
+.skin-fav-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px;
+  line-height: 1;
+  flex-shrink: 0;
+  opacity: 0.4;
+  transition: opacity 0.15s;
+  color: inherit;
+}
+
+.skin-fav-btn:hover {
+  opacity: 1;
+  color: #ffd700;
+}
+
+.skin-fav-btn.favorited {
+  opacity: 1;
+  color: #ffd700;
+}
+
+/* Empty state */
+.skin-empty {
+  padding: 16px;
+  text-align: center;
+  opacity: 0.5;
+}
+
+/* Load more sentinel */
+.skin-load-more {
+  grid-column: 1 / -1;
+  padding: 12px;
+  text-align: center;
+  opacity: 0.5;
+  font-size: 11px;
+}

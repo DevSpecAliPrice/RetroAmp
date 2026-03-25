@@ -13,6 +13,7 @@ import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { SkinData } from "./parser";
+import ContextMenu, { type MenuEntry } from "./ContextMenu";
 
 // -- Native Winamp dimensions (before scaling) --
 
@@ -97,6 +98,7 @@ export default function EqualizerWindow({ skin }: Props) {
   const [pressed, setPressed] = useState<string | null>(null);
   const dragging = useRef<{ sliderIndex: number } | null>(null);
   const [presetsMenu, setPresetsMenu] = useState<{ x: number; y: number } | null>(null);
+  const [eqContextMenu, setEqContextMenu] = useState<{ x: number; y: number } | null>(null);
 
   // Fetch current EQ settings on mount.
   useEffect(() => {
@@ -307,6 +309,10 @@ export default function EqualizerWindow({ skin }: Props) {
       onMouseDown={handleMouseDown}
       onDoubleClick={handleDoubleClick}
       onMouseUp={() => setPressed(null)}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        setEqContextMenu({ x: e.clientX, y: e.clientY });
+      }}
     >
       {/* 1) Full EQ background */}
       <div style={{
@@ -480,6 +486,27 @@ export default function EqualizerWindow({ skin }: Props) {
           ))}
         </div>,
         document.body,
+      )}
+
+      {eqContextMenu && (
+        <ContextMenu
+          x={eqContextMenu.x}
+          y={eqContextMenu.y}
+          colors={ps}
+          onClose={() => setEqContextMenu(null)}
+          items={[
+            {
+              label: settings.enabled ? "Disable EQ" : "Enable EQ",
+              onClick: () => applySettings({ ...settings, enabled: !settings.enabled }),
+            },
+            {
+              label: "Reset to Flat",
+              onClick: () => applySettings({ ...settings, gains: [0,0,0,0,0,0,0,0,0,0], preamp: 0 }),
+            },
+            "separator",
+            { label: "Preferences...", onClick: () => invoke("open_settings") },
+          ] satisfies MenuEntry[]}
+        />
       )}
     </div>
   );

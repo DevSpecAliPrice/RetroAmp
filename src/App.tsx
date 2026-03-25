@@ -1,10 +1,12 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { loadSkin, type SkinData } from "./skin/parser";
 import MainWindow from "./skin/MainWindow";
 import PlaylistWindow from "./skin/PlaylistWindow";
 import EqualizerWindow from "./skin/EqualizerWindow";
+import SettingsWindow from "./settings/SettingsWindow";
 
 const DEFAULT_SKIN_NAME = "RetroAmp Default";
 
@@ -19,12 +21,20 @@ interface WindowStates {
   active_skin_path: string | null;
 }
 
+interface SyncProgress {
+  current: number;
+  total: number;
+  phase: string;
+  skin_name: string;
+}
+
 function App() {
   const [panel] = useState(detectPanel);
   const [skin, setSkin] = useState<SkinData | null>(null);
   const [skinError, setSkinError] = useState<string | null>(null);
   const [scale, setScale] = useState(2);
   const currentSkinPath = useRef<string>("");
+  const [syncProgress, setSyncProgress] = useState<SyncProgress | null>(null);
 
   // Load skin — used both for initial load and skin switching.
   const doLoadSkin = async (path: string) => {
@@ -71,6 +81,19 @@ function App() {
     })();
   }, []);
 
+  // Listen for catalog sync progress events from the backend.
+  useEffect(() => {
+    const unlisten = listen<SyncProgress>("catalog-sync-progress", (event) => {
+      const p = event.payload;
+      if (p.phase === "done") {
+        setSyncProgress(null);
+      } else {
+        setSyncProgress(p);
+      }
+    });
+    return () => { unlisten.then((fn) => fn()); };
+  }, []);
+
   // Poll the backend for skin/scale changes (so all windows stay in sync).
   useEffect(() => {
     const interval = setInterval(async () => {
@@ -87,6 +110,18 @@ function App() {
       }
     }, 500);
     return () => clearInterval(interval);
+  }, []);
+
+  // Keyboard shortcut: Ctrl+P to open preferences.
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.ctrlKey && e.key === "p") {
+        e.preventDefault();
+        invoke("open_settings");
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
   // Drag-and-drop files onto any window.
@@ -111,6 +146,11 @@ function App() {
     await doLoadSkin(path);
   };
 
+  // Settings window renders with the skin for theming but doesn't block on it.
+  if (panel === "settings") {
+    return <SettingsWindow skin={skin} />;
+  }
+
   if (skinError) {
     return (
       <div style={{ padding: 20, color: "#ff4444", fontFamily: "monospace", background: "#000" }}>
@@ -121,8 +161,44 @@ function App() {
 
   if (!skin) {
     return (
-      <div style={{ padding: 20, color: "#888", fontFamily: "monospace", background: "#000", height: "100vh" }}>
-        Loading skin...
+      <div style={{
+        padding: 20,
+        color: "#888",
+        fontFamily: "system-ui, sans-serif",
+        background: "#000",
+        height: "100vh",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 12,
+      }}>
+        <div style={{ fontSize: 14, color: "#aaa" }}>Loading RetroAmp...</div>
+        {syncProgress && (
+          <div style={{ textAlign: "center", fontSize: 12 }}>
+            <div style={{ marginBottom: 8 }}>
+              {syncProgress.phase === "scanning" && "Discovering skins..."}
+              {syncProgress.phase === "indexing" && `Indexing skins... ${syncProgress.current} / ${syncProgress.total}`}
+              {syncProgress.phase === "thumbnails" && `Generating previews... ${syncProgress.current} / ${syncProgress.total}`}
+            </div>
+            {syncProgress.total > 0 && (
+              <div style={{
+                width: 200,
+                height: 4,
+                background: "#333",
+                borderRadius: 2,
+                overflow: "hidden",
+              }}>
+                <div style={{
+                  width: `${Math.round((syncProgress.current / syncProgress.total) * 100)}%`,
+                  height: "100%",
+                  background: "#6c63ff",
+                  transition: "width 0.3s ease",
+                }} />
+              </div>
+            )}
+          </div>
+        )}
       </div>
     );
   }

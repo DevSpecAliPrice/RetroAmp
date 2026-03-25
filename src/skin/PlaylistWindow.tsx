@@ -13,6 +13,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { SkinData } from "./parser";
+import ContextMenu, { type MenuEntry } from "./ContextMenu";
 
 // -- Interfaces --
 
@@ -58,6 +59,8 @@ export default function PlaylistWindow({ skin }: Props) {
     track_count: 0,
   });
   const trackListRef = useRef<HTMLDivElement>(null);
+
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
 
   const ps = skin.playlistStyle;
   const sp = skin.sprites;
@@ -144,6 +147,10 @@ export default function PlaylistWindow({ skin }: Props) {
       }}
       onMouseDown={handleEdgeMouseDown}
       onMouseMove={handleMouseMove}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        setContextMenu({ x: e.clientX, y: e.clientY });
+      }}
     >
       {/* ── TOP BAR (20*s px) ── */}
       <div
@@ -312,6 +319,22 @@ export default function PlaylistWindow({ skin }: Props) {
           />
         </div>
       </div>
+
+      {contextMenu && (
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          colors={ps}
+          onClose={() => setContextMenu(null)}
+          items={[
+            { label: "Add Files...", onClick: openFiles },
+            { label: "Remove Selected", onClick: () => invoke("playlist_remove_selected") },
+            { label: "Clear Playlist", onClick: () => invoke("playlist_clear") },
+            "separator",
+            { label: "Preferences...", onClick: () => invoke("open_settings") },
+          ] satisfies MenuEntry[]}
+        />
+      )}
     </div>
   );
 }

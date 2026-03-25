@@ -3,6 +3,7 @@
 pub mod audio;
 pub mod commands;
 pub mod config;
+pub mod db;
 pub mod playlist;
 pub mod skin;
 pub mod window;
@@ -11,12 +12,15 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
+
+use serde::Serialize;
 
 use audio::engine::{AudioEngine, EngineEvent};
 use audio::eq::EqSettings;
 use audio::local::LocalFileSource;
 use audio::source::AudioSource;
+use db::Database;
 use playlist::manager::PlaylistManager;
 use window::manager::{WindowId, WindowManager};
 
@@ -38,6 +42,18 @@ pub fn run() {
     let playlist_manager = Arc::new(Mutex::new(PlaylistManager::new()));
     let eq_settings = Arc::new(Mutex::new(EqSettings::default()));
     let window_manager = WindowManager::new();
+
+    let database = match Database::open() {
+        Ok(db) => Arc::new(Mutex::new(db)),
+        Err(e) => {
+            eprintln!("Warning: failed to open database: {e}");
+            // Create an in-memory fallback so the app still works.
+            Arc::new(Mutex::new(
+                Database::open_at(std::path::Path::new(":memory:"))
+                    .expect("in-memory database should never fail"),
+            ))
+        }
+    };
 
     // Spawn the auto-advance listener. When the engine signals that a track
     // has finished, this thread advances the playlist and feeds the next
@@ -63,7 +79,20 @@ pub fn run() {
         .manage(playlist_manager)
         .manage(eq_settings)
         .manage(Mutex::new(window_manager))
+        .manage(Arc::clone(&database))
         .setup(move |app| {
+            // Sync the skin catalog in the background so startup isn't blocked.
+            {
+                let db = Arc::clone(&database);
+                let app_handle = app.handle().clone();
+                thread::Builder::new()
+                    .name("retroamp-catalog-sync".into())
+                    .spawn(move || {
+                        sync_skin_catalog(db, app_handle);
+                    })
+                    .expect("failed to spawn catalog sync thread");
+            }
+
             // Create the main window programmatically (same code path as
             // EQ/playlist windows) so Wayland handles it consistently.
             let w = 275.0 * initial_scale;
@@ -121,6 +150,7 @@ pub fn run() {
                 let window_id = match label {
                     "playlist" => Some(WindowId::Playlist),
                     "equalizer" => Some(WindowId::Equalizer),
+                    "settings" => Some(WindowId::Settings),
                     _ => None,
                 };
                 if let Some(id) = window_id {
@@ -164,6 +194,16 @@ pub fn run() {
             commands::add_skin_dir,
             commands::remove_skin_dir,
             commands::get_extra_skin_dirs,
+            commands::delete_skin,
+            commands::reveal_skin_folder,
+            // Skin catalog (database-backed)
+            commands::get_skin_catalog,
+            commands::get_skin_thumbnails,
+            commands::toggle_skin_favorite,
+            commands::get_recent_skins,
+            commands::refresh_skin_catalog,
+            // Settings
+            commands::open_settings,
             // Windows
             commands::toggle_window,
             commands::get_window_states,
@@ -174,6 +214,124 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running RetroAmp");
+}
+
+/// Progress event emitted during skin catalog sync.
+#[derive(Clone, Serialize)]
+struct CatalogSyncProgress {
+    current: usize,
+    total: usize,
+    phase: &'static str,
+    skin_name: String,
+}
+
+/// Scan the filesystem for skins and sync the results into the SQLite catalog.
+/// Runs in a background thread so it doesn't block startup.
+///
+/// Key design: the DB lock is acquired and released per-skin so that other
+/// commands (like `set_active_skin`) are never blocked for long.
+fn sync_skin_catalog(db: Arc<Mutex<Database>>, app: tauri::AppHandle) {
+    log::info!("starting skin catalog sync");
+
+    let _ = app.emit("catalog-sync-progress", CatalogSyncProgress {
+        current: 0, total: 0, phase: "scanning", skin_name: String::new(),
+    });
+
+    // Gather scan directories (same logic as commands::get_skins).
+    let mut dirs = Vec::new();
+    if let Some(dir) = dirs::config_dir().map(|c| c.join("retroamp").join("skins")) {
+        let _ = std::fs::create_dir_all(&dir);
+        dirs.push(dir);
+    }
+    for dir in config::AppConfig::load().skins.extra_dirs {
+        if dir.is_dir() {
+            dirs.push(dir);
+        }
+    }
+    if cfg!(debug_assertions) {
+        if let Some(dir) = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .map(|p| p.join("skins"))
+        {
+            if dir.is_dir() {
+                dirs.push(dir);
+            }
+        }
+    }
+
+    let skins = skin::scanner::scan_all(&dirs);
+    let total = skins.len();
+    let valid_paths: Vec<String> = skins.iter().map(|s| s.path.clone()).collect();
+
+    // First pass: upsert all skins without thumbnails (fast — just metadata).
+    // This uses brief per-batch locks so other commands aren't blocked.
+    let _ = app.emit("catalog-sync-progress", CatalogSyncProgress {
+        current: 0, total, phase: "indexing", skin_name: String::new(),
+    });
+
+    for (i, chunk) in skins.chunks(50).enumerate() {
+        if let Ok(db) = db.lock() {
+            for skin_info in chunk {
+                let _ = db.upsert_skin(skin_info, None);
+            }
+        }
+        let done = ((i + 1) * 50).min(total);
+        let _ = app.emit("catalog-sync-progress", CatalogSyncProgress {
+            current: done, total, phase: "indexing", skin_name: String::new(),
+        });
+    }
+
+    // Prune skins that no longer exist on disk (brief lock).
+    if let Ok(db) = db.lock() {
+        match db.remove_missing(&valid_paths) {
+            Ok(0) => {}
+            Ok(n) => log::info!("pruned {n} missing skins from catalog"),
+            Err(e) => log::warn!("failed to prune missing skins: {e}"),
+        }
+    }
+
+    // Second pass: generate thumbnails for skins that need them.
+    // Get all existing thumbnails in ONE lock acquisition, then filter in Rust.
+    let has_thumbs = db.lock().ok()
+        .and_then(|d| d.paths_with_thumbnails().ok())
+        .unwrap_or_default();
+
+    let needs_thumbs: Vec<&skin::scanner::SkinInfo> = skins.iter()
+        .filter(|s| !has_thumbs.contains(&s.path))
+        .collect();
+
+    let thumb_total = needs_thumbs.len();
+    if thumb_total > 0 {
+        log::info!("generating thumbnails for {thumb_total} skins");
+    }
+
+    for (i, skin_info) in needs_thumbs.iter().enumerate() {
+        // Extract thumbnail WITHOUT holding the lock.
+        let thumbnail = skin::thumbnail::extract_thumbnail(&skin_info.path);
+
+        // Brief lock to write the result.
+        if let Some(thumb) = thumbnail {
+            if let Ok(db) = db.lock() {
+                let _ = db.upsert_skin(skin_info, Some(thumb));
+            }
+        }
+
+        // Emit progress every 10 skins to avoid event spam.
+        if i % 10 == 0 || i == thumb_total - 1 {
+            let _ = app.emit("catalog-sync-progress", CatalogSyncProgress {
+                current: i + 1,
+                total: thumb_total,
+                phase: "thumbnails",
+                skin_name: skin_info.name.clone(),
+            });
+        }
+    }
+
+    let _ = app.emit("catalog-sync-progress", CatalogSyncProgress {
+        current: total, total, phase: "done", skin_name: String::new(),
+    });
+
+    log::info!("skin catalog sync complete: {total} skins, {thumb_total} thumbnails generated");
 }
 
 /// Polls the engine for TrackFinished events and advances the playlist.

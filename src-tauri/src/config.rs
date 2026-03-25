@@ -1,33 +1,62 @@
-//! Lightweight app configuration persisted as JSON in the platform config dir.
+//! Lightweight app configuration persisted as TOML in the platform config dir.
 //!
 //! Config file location:
-//! - Linux:   `~/.config/retroamp/config.json`
-//! - macOS:   `~/Library/Application Support/retroamp/config.json`
-//! - Windows: `C:\Users\<user>\AppData\Roaming\retroamp\config.json`
+//! - Linux:   `~/.config/retroamp/config.toml`
+//! - macOS:   `~/Library/Application Support/retroamp/config.toml`
+//! - Windows: `C:\Users\<user>\AppData\Roaming\retroamp\config.toml`
+//!
+//! On first load, if a legacy `config.json` exists it is automatically
+//! migrated to TOML and the JSON file is renamed to `config.json.bak`.
 
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// Top-level application configuration.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct AppConfig {
+    #[serde(default)]
+    pub skins: SkinConfig,
+
+    #[serde(default)]
+    pub playback: PlaybackConfig,
+
+    #[serde(default)]
+    pub ui: UiConfig,
+}
+
+/// Skin-related preferences.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct SkinConfig {
     /// Additional directories to scan for skins (beyond the built-in skins dir).
     #[serde(default)]
-    pub extra_skin_dirs: Vec<PathBuf>,
+    pub extra_dirs: Vec<PathBuf>,
 
     /// Last-used skin path, restored on next launch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_skin_path: Option<String>,
 }
 
+/// Playback-related preferences (future use).
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct PlaybackConfig {}
+
+/// UI-related preferences (future use).
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct UiConfig {}
+
 impl AppConfig {
     /// Load config from disk, returning defaults if the file doesn't exist yet.
+    /// Automatically migrates from legacy JSON if needed.
     pub fn load() -> Self {
+        // Migrate legacy JSON config if the TOML file doesn't exist yet.
+        migrate_from_json();
+
         let Some(path) = config_path() else {
             return Self::default();
         };
         match std::fs::read_to_string(&path) {
-            Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
+            Ok(text) => toml::from_str(&text).unwrap_or_default(),
             Err(_) => Self::default(),
         }
     }
@@ -39,30 +68,80 @@ impl AppConfig {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("failed to create config directory: {e}"))?;
         }
-        let json = serde_json::to_string_pretty(self)
+        let text = toml::to_string_pretty(self)
             .map_err(|e| format!("failed to serialize config: {e}"))?;
-        std::fs::write(&path, json)
+        std::fs::write(&path, text)
             .map_err(|e| format!("failed to write config: {e}"))?;
         Ok(())
     }
 
     /// Add a skin directory if it isn't already present.
     pub fn add_skin_dir(&mut self, dir: PathBuf) -> bool {
-        if self.extra_skin_dirs.contains(&dir) {
+        if self.skins.extra_dirs.contains(&dir) {
             return false;
         }
-        self.extra_skin_dirs.push(dir);
+        self.skins.extra_dirs.push(dir);
         true
     }
 
     /// Remove a skin directory. Returns true if it was present.
     pub fn remove_skin_dir(&mut self, dir: &PathBuf) -> bool {
-        let len = self.extra_skin_dirs.len();
-        self.extra_skin_dirs.retain(|d| d != dir);
-        self.extra_skin_dirs.len() != len
+        let len = self.skins.extra_dirs.len();
+        self.skins.extra_dirs.retain(|d| d != dir);
+        self.skins.extra_dirs.len() != len
     }
 }
 
 fn config_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|c| c.join("retroamp").join("config.toml"))
+}
+
+fn legacy_json_path() -> Option<PathBuf> {
     dirs::config_dir().map(|c| c.join("retroamp").join("config.json"))
+}
+
+/// One-time migration: if `config.json` exists but `config.toml` does not,
+/// read the JSON, convert to the new TOML structure, and rename the JSON
+/// file to `.json.bak`.
+fn migrate_from_json() {
+    let Some(toml_path) = config_path() else { return };
+    let Some(json_path) = legacy_json_path() else { return };
+
+    // Only migrate if TOML is absent and JSON is present.
+    if toml_path.exists() || !json_path.exists() {
+        return;
+    }
+
+    log::info!("migrating config from JSON to TOML");
+
+    // The legacy JSON struct matches the old flat layout.
+    #[derive(Deserialize)]
+    struct LegacyConfig {
+        #[serde(default)]
+        extra_skin_dirs: Vec<PathBuf>,
+        #[serde(default)]
+        last_skin_path: Option<String>,
+    }
+
+    let Ok(json_text) = std::fs::read_to_string(&json_path) else { return };
+    let Ok(legacy) = serde_json::from_str::<LegacyConfig>(&json_text) else { return };
+
+    let new_config = AppConfig {
+        skins: SkinConfig {
+            extra_dirs: legacy.extra_skin_dirs,
+            last_skin_path: legacy.last_skin_path,
+        },
+        ..Default::default()
+    };
+
+    if let Err(e) = new_config.save() {
+        log::error!("failed to save migrated config: {e}");
+        return;
+    }
+
+    // Rename the old JSON file so it's not re-migrated.
+    let backup = json_path.with_extension("json.bak");
+    if let Err(e) = std::fs::rename(&json_path, &backup) {
+        log::warn!("could not rename legacy config.json to .bak: {e}");
+    }
 }

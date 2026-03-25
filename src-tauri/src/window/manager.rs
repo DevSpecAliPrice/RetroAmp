@@ -13,6 +13,7 @@ pub enum WindowId {
     Main,
     Equalizer,
     Playlist,
+    Settings,
 }
 
 impl WindowId {
@@ -22,6 +23,7 @@ impl WindowId {
             WindowId::Main => "main",
             WindowId::Equalizer => "equalizer",
             WindowId::Playlist => "playlist",
+            WindowId::Settings => "settings",
         }
     }
 
@@ -31,29 +33,35 @@ impl WindowId {
             WindowId::Main => "/",
             WindowId::Equalizer => "/?window=equalizer",
             WindowId::Playlist => "/?window=playlist",
+            WindowId::Settings => "/?window=settings",
         }
     }
 
     /// Default width in native Winamp pixels (before scaling).
+    /// Settings uses logical pixels directly (not Winamp-scaled).
     pub fn native_width(&self) -> u32 {
-        275
+        match self {
+            WindowId::Settings => 700,
+            _ => 275,
+        }
     }
 
     /// Default height in native Winamp pixels (before scaling).
+    /// Settings uses logical pixels directly (not Winamp-scaled).
     pub fn native_height(&self) -> u32 {
         match self {
             WindowId::Main => 116,
             WindowId::Equalizer => 116,
-            WindowId::Playlist => 232, // 116 * 2 — a reasonable default
+            WindowId::Playlist => 232,
+            WindowId::Settings => 500,
         }
     }
 
     /// Whether this window should be resizable.
     pub fn resizable(&self) -> bool {
         match self {
-            WindowId::Main => false,
-            WindowId::Equalizer => false,
-            WindowId::Playlist => true,
+            WindowId::Main | WindowId::Equalizer => false,
+            WindowId::Playlist | WindowId::Settings => true,
         }
     }
 }

@@ -119,10 +119,9 @@ const SHADE_REGIONS = {
 const SHADE_TEXT_X = 24;
 const SHADE_TEXT_Y = 4;
 const SHADE_TEXT_W = 100;
-interface SkinListItem {
+interface RecentSkin {
   name: string;
   path: string;
-  skin_type: "Classic" | "Modern" | "Unknown";
 }
 
 export default function MainWindow({ skin, isShade = false, onSkinChange }: Props) {
@@ -823,23 +822,19 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
     [isShade, canvasH],
   );
 
-  // Right-click context menu for settings.
+  // Right-click context menu.
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
-  const [skinList, setSkinList] = useState<SkinListItem[]>([]);
-  const [extraDirs, setExtraDirs] = useState<string[]>([]);
+  const [recentSkins, setRecentSkins] = useState<RecentSkin[]>([]);
   const [showSkins, setShowSkins] = useState(false);
-
-  const refreshSkinList = useCallback(() => {
-    invoke<SkinListItem[]>("get_skins").then(setSkinList).catch(console.error);
-    invoke<string[]>("get_extra_skin_dirs").then(setExtraDirs).catch(console.error);
-  }, []);
 
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     setContextMenu({ x: e.clientX, y: e.clientY });
     setShowSkins(false);
-    refreshSkinList();
-  }, [refreshSkinList]);
+    invoke<RecentSkin[]>("get_recent_skins", { limit: 5 })
+      .then(setRecentSkins)
+      .catch(console.error);
+  }, []);
 
   // Close context menu on any click.
   useEffect(() => {
@@ -929,13 +924,13 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
           }} />
           <div style={{ height: "1px", background: ps.selectedbg, margin: "4px 0" }} />
           <MenuItem
-            label={showSkins ? "▾ Skins" : "▸ Skins"}
+            label={showSkins ? "\u25be Skins" : "\u25b8 Skins"}
             hoverBg={ps.selectedbg}
             onClick={() => setShowSkins(!showSkins)}
           />
           {showSkins && (
-            <div style={{ maxHeight: "400px", overflowY: "auto", overflowX: "hidden" }}>
-              {skinList.filter(s => s.skin_type === "Classic").map((s) => (
+            <div style={{ maxHeight: "300px", overflowY: "auto", overflowX: "hidden" }}>
+              {recentSkins.map((s) => (
                 <div
                   key={s.path}
                   style={{ padding: "4px 12px 4px 24px", cursor: "pointer", fontSize: "11px" }}
@@ -950,9 +945,9 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
                   {s.name}
                 </div>
               ))}
-              {skinList.filter(s => s.skin_type === "Classic").length === 0 && (
+              {recentSkins.length === 0 && (
                 <div style={{ padding: "4px 24px", color: ps.current, fontSize: "11px" }}>
-                  No skins found
+                  No recent skins
                 </div>
               )}
               <div style={{ height: "1px", background: ps.selectedbg, margin: "4px 0" }} />
@@ -962,52 +957,16 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
                 onMouseLeave={(e) => ((e.target as HTMLElement).style.background = "transparent")}
                 onMouseDown={(e) => {
                   e.stopPropagation();
-                  import("@tauri-apps/plugin-dialog").then(({ open: openDialog }) => {
-                    openDialog({ directory: true, title: "Add Skin Folder" }).then((selected) => {
-                      if (selected && typeof selected === "string") {
-                        invoke<string[]>("add_skin_dir", { path: selected }).then((dirs) => {
-                          setExtraDirs(dirs);
-                          refreshSkinList();
-                        });
-                      }
-                    });
-                  });
+                  invoke("open_settings");
                   setContextMenu(null);
                 }}
               >
-                Add Skin Folder...
+                Browse All...
               </div>
-              {extraDirs.map((dir) => (
-                <div
-                  key={dir}
-                  style={{
-                    padding: "4px 12px 4px 24px",
-                    cursor: "pointer",
-                    fontSize: "10px",
-                    color: ps.current,
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                  }}
-                  onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = ps.selectedbg)}
-                  onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "transparent")}
-                  onMouseDown={(e) => {
-                    e.stopPropagation();
-                    invoke<string[]>("remove_skin_dir", { path: dir }).then((dirs) => {
-                      setExtraDirs(dirs);
-                      refreshSkinList();
-                    });
-                    setContextMenu(null);
-                  }}
-                >
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginRight: "8px" }}>
-                    {dir.split(/[\\/]/).pop()}
-                  </span>
-                  <span style={{ color: ps.current, flexShrink: 0 }}>✕</span>
-                </div>
-              ))}
             </div>
           )}
+          <div style={{ height: "1px", background: ps.selectedbg, margin: "4px 0" }} />
+          <MenuItem label="Preferences..." hoverBg={ps.selectedbg} onClick={() => { invoke("open_settings"); setContextMenu(null); }} />
         </div>,
         document.body
       )}

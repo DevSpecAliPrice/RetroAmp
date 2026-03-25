@@ -13,6 +13,7 @@ use crate::audio::eq::EqSettings;
 use crate::audio::fft::FftData;
 use crate::audio::local::LocalFileSource;
 use crate::audio::source::AudioSource;
+use crate::db::{Database, SkinCatalogEntry};
 use crate::playlist::manager::{PlaylistManager, PlaylistState};
 use crate::skin::loader::SkinContents;
 use crate::skin::scanner::SkinInfo;
@@ -426,6 +427,39 @@ pub async fn exit_shade(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+// -- Settings command --
+
+/// Open the settings/preferences window (or focus it if already open).
+#[tauri::command]
+pub async fn open_settings(
+    app: AppHandle,
+    window_manager: State<'_, Mutex<WindowManager>>,
+) -> Result<(), String> {
+    // Mark visible in the WindowManager so toggle_window works correctly.
+    if let Ok(mut wm) = window_manager.lock() {
+        wm.set_visible(WindowId::Settings, true);
+    }
+
+    // If already open, just focus it.
+    if let Some(existing) = app.get_webview_window("settings") {
+        existing.show().map_err(|e| e.to_string())?;
+        existing.set_focus().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App("/?window=settings".into()))
+        .title("RetroAmp Preferences")
+        .inner_size(700.0, 500.0)
+        .min_inner_size(500.0, 400.0)
+        .decorations(false)
+        .resizable(true)
+        .visible(true)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
 // -- Skin commands --
 
 /// Load a skin from a .wsz archive or extracted directory.
@@ -439,6 +473,7 @@ pub fn load_skin(path: String) -> Result<SkinContents, String> {
 #[tauri::command]
 pub fn set_active_skin(
     window_manager: State<'_, Mutex<WindowManager>>,
+    database: State<'_, Arc<Mutex<Database>>>,
     path: String,
 ) -> Result<(), String> {
     let mut wm = window_manager.lock().map_err(|e| e.to_string())?;
@@ -446,8 +481,14 @@ pub fn set_active_skin(
 
     // Persist to config (best-effort — don't fail the command if this errors).
     let mut cfg = crate::config::AppConfig::load();
-    cfg.last_skin_path = Some(path);
+    cfg.skins.last_skin_path = Some(path.clone());
     let _ = cfg.save();
+
+    // Record usage in the database (best-effort, non-blocking).
+    // Use try_lock so we never block skin loading if the catalog sync is running.
+    if let Ok(db) = database.try_lock() {
+        let _ = db.record_skin_use(&path);
+    }
 
     Ok(())
 }
@@ -456,7 +497,7 @@ pub fn set_active_skin(
 #[tauri::command]
 pub fn get_last_skin_path() -> Option<String> {
     let cfg = crate::config::AppConfig::load();
-    cfg.last_skin_path.filter(|p| std::path::Path::new(p).exists())
+    cfg.skins.last_skin_path.filter(|p| std::path::Path::new(p).exists())
 }
 
 /// Return the platform-appropriate skins directory, creating it if needed.
@@ -485,7 +526,7 @@ pub fn get_skins() -> Vec<SkinInfo> {
     }
 
     // User-configured extra skin directories.
-    for dir in crate::config::AppConfig::load().extra_skin_dirs {
+    for dir in crate::config::AppConfig::load().skins.extra_dirs {
         if dir.is_dir() {
             dirs.push(dir);
         }
@@ -512,7 +553,7 @@ pub fn add_skin_dir(path: String) -> Result<Vec<String>, String> {
     let mut cfg = crate::config::AppConfig::load();
     cfg.add_skin_dir(path.into());
     cfg.save()?;
-    Ok(cfg.extra_skin_dirs.iter().map(|p| p.to_string_lossy().into_owned()).collect())
+    Ok(cfg.skins.extra_dirs.iter().map(|p| p.to_string_lossy().into_owned()).collect())
 }
 
 /// Remove a directory from the skin scan list.
@@ -521,17 +562,161 @@ pub fn remove_skin_dir(path: String) -> Result<Vec<String>, String> {
     let mut cfg = crate::config::AppConfig::load();
     cfg.remove_skin_dir(&path.into());
     cfg.save()?;
-    Ok(cfg.extra_skin_dirs.iter().map(|p| p.to_string_lossy().into_owned()).collect())
+    Ok(cfg.skins.extra_dirs.iter().map(|p| p.to_string_lossy().into_owned()).collect())
 }
 
 /// Get the list of extra skin directories.
 #[tauri::command]
 pub fn get_extra_skin_dirs() -> Vec<String> {
     crate::config::AppConfig::load()
-        .extra_skin_dirs
+        .skins
+        .extra_dirs
         .iter()
         .map(|p| p.to_string_lossy().into_owned())
         .collect()
+}
+
+/// Delete a skin file from disk and remove it from the catalog.
+#[tauri::command]
+pub fn delete_skin(
+    database: State<'_, Arc<Mutex<Database>>>,
+    path: String,
+) -> Result<(), String> {
+    let p = std::path::Path::new(&path);
+
+    if p.is_file() {
+        std::fs::remove_file(p)
+            .map_err(|e| format!("failed to delete skin file: {e}"))?;
+    } else if p.is_dir() {
+        std::fs::remove_dir_all(p)
+            .map_err(|e| format!("failed to delete skin directory: {e}"))?;
+    } else {
+        return Err("skin path does not exist".to_string());
+    }
+
+    // Remove from the database catalog.
+    if let Ok(db) = database.lock() {
+        let _ = db.remove_by_path(&path);
+    }
+
+    log::info!("deleted skin: {path}");
+    Ok(())
+}
+
+/// Reveal a skin's location in the system file manager.
+#[tauri::command]
+pub async fn reveal_skin_folder(_app: AppHandle, path: String) -> Result<(), String> {
+    let p = std::path::Path::new(&path);
+    let folder = if p.is_file() {
+        p.parent().map(|p| p.to_string_lossy().into_owned())
+    } else {
+        Some(path.clone())
+    };
+
+    if let Some(folder) = folder {
+        // Use xdg-open on Linux, open on macOS, explorer on Windows.
+        #[cfg(target_os = "linux")]
+        {
+            let _ = std::process::Command::new("xdg-open").arg(&folder).spawn();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("open").arg(&folder).spawn();
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let _ = std::process::Command::new("explorer").arg(&folder).spawn();
+        }
+    }
+
+    Ok(())
+}
+
+// -- Skin catalog commands (database-backed) --
+
+/// Get the skin catalog — metadata only, no thumbnail blobs.
+/// Thumbnails are loaded lazily via `get_skin_thumbnails`.
+#[tauri::command]
+pub fn get_skin_catalog(
+    database: State<'_, Arc<Mutex<Database>>>,
+) -> Result<Vec<SkinCatalogEntry>, String> {
+    let db = database.lock().map_err(|e| e.to_string())?;
+    db.get_all_skins()
+}
+
+/// Get thumbnails for a batch of skins by path.
+/// Returns a list of { path, thumbnail } pairs.
+#[tauri::command]
+pub fn get_skin_thumbnails(
+    database: State<'_, Arc<Mutex<Database>>>,
+    paths: Vec<String>,
+) -> Result<Vec<(String, String)>, String> {
+    let db = database.lock().map_err(|e| e.to_string())?;
+    db.get_thumbnails_batch(&paths)
+}
+
+/// Toggle a skin's favorite status. Returns the new value.
+#[tauri::command]
+pub fn toggle_skin_favorite(
+    database: State<'_, Arc<Mutex<Database>>>,
+    path: String,
+) -> Result<bool, String> {
+    let db = database.lock().map_err(|e| e.to_string())?;
+    db.toggle_favorite(&path)
+}
+
+/// Get the N most recently used skins — metadata only.
+#[tauri::command]
+pub fn get_recent_skins(
+    database: State<'_, Arc<Mutex<Database>>>,
+    limit: Option<usize>,
+) -> Result<Vec<SkinCatalogEntry>, String> {
+    let db = database.lock().map_err(|e| e.to_string())?;
+    db.get_recently_used(limit.unwrap_or(10))
+}
+
+/// Re-scan the filesystem and sync the catalog (metadata only — thumbnails
+/// are generated in the background).
+#[tauri::command]
+pub fn refresh_skin_catalog(
+    database: State<'_, Arc<Mutex<Database>>>,
+) -> Result<Vec<SkinCatalogEntry>, String> {
+    let db = database.lock().map_err(|e| e.to_string())?;
+
+    // Gather scan directories.
+    let mut dirs = Vec::new();
+    if let Some(dir) = skins_dir() {
+        let _ = std::fs::create_dir_all(&dir);
+        dirs.push(dir);
+    }
+    for dir in crate::config::AppConfig::load().skins.extra_dirs {
+        if dir.is_dir() {
+            dirs.push(dir);
+        }
+    }
+    if cfg!(debug_assertions) {
+        let project_skins = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .map(|p| p.join("skins"));
+        if let Some(dir) = project_skins {
+            if dir.is_dir() {
+                dirs.push(dir);
+            }
+        }
+    }
+
+    let skins = crate::skin::scanner::scan_all(&dirs);
+    let valid_paths: Vec<String> = skins.iter().map(|s| s.path.clone()).collect();
+
+    // Only upsert metadata — no thumbnail extraction here.
+    for skin in &skins {
+        if let Err(e) = db.upsert_skin(skin, None) {
+            log::warn!("failed to upsert skin {}: {e}", skin.name);
+        }
+    }
+
+    let _ = db.remove_missing(&valid_paths);
+    db.get_all_skins()
 }
 
 fn skins_dir() -> Option<std::path::PathBuf> {
