@@ -23,6 +23,7 @@ interface PlaylistEntry {
   duration: string;
   is_current: boolean;
   is_selected: boolean;
+  is_stream: boolean;
 }
 
 interface PlaylistState {
@@ -165,11 +166,18 @@ export default function PlaylistWindow({ skin }: Props) {
   const openFiles = useCallback(async () => {
     const selected = await open({
       multiple: true,
-      filters: [{ name: "Audio", extensions: ["mp3", "flac", "ogg", "wav", "aac", "m4a", "alac"] }],
+      filters: [{ name: "Audio", extensions: ["mp3", "flac", "ogg", "wav", "aac", "m4a", "alac", "m3u", "m3u8", "pls"] }],
     });
     if (selected) {
       const paths = Array.isArray(selected) ? selected : [selected];
       await invoke("playlist_add_files", { paths });
+    }
+  }, []);
+
+  const addUrl = useCallback(() => {
+    const url = window.prompt("Enter stream URL:");
+    if (url && url.trim()) {
+      invoke("play_url", { url: url.trim() });
     }
   }, []);
 
@@ -436,6 +444,7 @@ export default function PlaylistWindow({ skin }: Props) {
           onClose={() => setContextMenu(null)}
           items={[
             { label: "Add Files...", onClick: openFiles },
+            { label: "Add URL...", onClick: addUrl },
             { label: "Remove Selected", onClick: () => invoke("playlist_remove_selected") },
             { label: "Clear Playlist", onClick: () => invoke("playlist_clear") },
             "separator",

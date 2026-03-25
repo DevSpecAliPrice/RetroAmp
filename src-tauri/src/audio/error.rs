@@ -27,4 +27,13 @@ pub enum AudioError {
 
     #[error("source is in an error state")]
     SourceError,
+
+    #[error("network error: {0}")]
+    Network(String),
+
+    #[error("stream ended unexpectedly")]
+    StreamEnded,
+
+    #[error("stream connection failed: {0}")]
+    ConnectionFailed(String),
 }

@@ -18,7 +18,6 @@ use serde::Serialize;
 
 use audio::engine::{AudioEngine, EngineEvent};
 use audio::eq::EqSettings;
-use audio::local::LocalFileSource;
 use audio::source::AudioSource;
 use db::Database;
 use playlist::manager::PlaylistManager;
@@ -294,6 +293,8 @@ pub fn run() {
             commands::cycle_repeat,
             commands::playlist_remove_selected,
             commands::playlist_clear,
+            commands::play_url,
+            commands::playlist_add_url,
             // Skin
             commands::load_skin,
             commands::get_skins,
@@ -458,7 +459,7 @@ fn auto_advance_loop(engine: Arc<AudioEngine>, playlist: Arc<Mutex<PlaylistManag
                         let path = track.path.clone();
                         drop(pl); // Release lock before engine call.
 
-                        match LocalFileSource::open(&path) {
+                        match commands::create_source(&path) {
                             Ok(source) => {
                                 // Update metadata if not already loaded.
                                 if let Ok(meta) = source.metadata() {
@@ -469,7 +470,7 @@ fn auto_advance_loop(engine: Arc<AudioEngine>, playlist: Arc<Mutex<PlaylistManag
                                         }
                                     }
                                 }
-                                engine.play(Box::new(source));
+                                engine.play(source);
                                 log::info!("auto-advance: playing {path}");
                             }
                             Err(e) => {

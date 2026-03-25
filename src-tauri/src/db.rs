@@ -94,7 +94,23 @@ impl Database {
                     name    TEXT NOT NULL UNIQUE,
                     gains   TEXT NOT NULL,
                     preamp  REAL NOT NULL DEFAULT 0.0
-                );",
+                );
+
+                CREATE TABLE IF NOT EXISTS radio_stations (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name        TEXT NOT NULL,
+                    url         TEXT NOT NULL UNIQUE,
+                    genre       TEXT,
+                    bitrate     INTEGER,
+                    codec       TEXT,
+                    country     TEXT,
+                    is_favorite INTEGER NOT NULL DEFAULT 0,
+                    last_played INTEGER,
+                    play_count  INTEGER NOT NULL DEFAULT 0,
+                    added_at    INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_radio_url ON radio_stations(url);
+                CREATE INDEX IF NOT EXISTS idx_radio_favorite ON radio_stations(is_favorite);",
             )
             .map_err(|e| format!("failed to initialize database schema: {e}"))?;
         Ok(())
@@ -362,6 +378,68 @@ impl Database {
             .execute("DELETE FROM eq_presets WHERE name = ?1", params![name])
             .map_err(|e| format!("failed to delete EQ preset: {e}"))?;
         Ok(())
+    }
+
+    // -- Radio station methods --
+
+    /// Save a radio station. If a station with the same URL exists, update it.
+    pub fn save_station(
+        &self,
+        name: &str,
+        url: &str,
+        genre: Option<&str>,
+        bitrate: Option<u32>,
+        codec: Option<&str>,
+        country: Option<&str>,
+    ) -> Result<(), String> {
+        let now = unix_now();
+        self.conn
+            .execute(
+                "INSERT INTO radio_stations (name, url, genre, bitrate, codec, country, added_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(url) DO UPDATE SET
+                    name = excluded.name,
+                    genre = COALESCE(excluded.genre, radio_stations.genre),
+                    bitrate = COALESCE(excluded.bitrate, radio_stations.bitrate),
+                    codec = COALESCE(excluded.codec, radio_stations.codec),
+                    country = COALESCE(excluded.country, radio_stations.country)",
+                params![name, url, genre, bitrate, codec, country, now],
+            )
+            .map_err(|e| format!("failed to save station: {e}"))?;
+        Ok(())
+    }
+
+    /// Record that a station was just played.
+    pub fn record_station_play(&self, url: &str) -> Result<(), String> {
+        let now = unix_now();
+        self.conn
+            .execute(
+                "UPDATE radio_stations SET last_played = ?1, play_count = play_count + 1 WHERE url = ?2",
+                params![now, url],
+            )
+            .map_err(|e| format!("failed to record station play: {e}"))?;
+        Ok(())
+    }
+
+    /// Toggle a station's favorite status.
+    pub fn toggle_station_favorite(&self, url: &str) -> Result<bool, String> {
+        self.conn
+            .execute(
+                "UPDATE radio_stations SET is_favorite = NOT is_favorite WHERE url = ?1",
+                params![url],
+            )
+            .map_err(|e| format!("failed to toggle station favorite: {e}"))?;
+
+        let new_val: bool = self
+            .conn
+            .query_row(
+                "SELECT is_favorite FROM radio_stations WHERE url = ?1",
+                params![url],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("query error: {e}"))?;
+
+        Ok(new_val)
     }
 
     /// Get the set of all paths that already have thumbnails cached.

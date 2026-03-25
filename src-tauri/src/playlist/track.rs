@@ -32,15 +32,19 @@ pub struct Track {
     pub bitrate: Option<u32>,
     /// Whether metadata has been loaded from tags.
     pub metadata_loaded: bool,
+    /// Whether this track is a stream (URL-based) rather than a local file.
+    pub is_stream: bool,
 }
 
 impl Track {
-    /// Create a new track from a file path. Metadata is not loaded yet —
+    /// Create a new track from a file path or URL. Metadata is not loaded yet —
     /// call `load_metadata` or let the playlist manager handle it.
     pub fn from_path(id: TrackId, path: impl Into<String>) -> Self {
+        let path = path.into();
+        let is_stream = path.starts_with("http://") || path.starts_with("https://");
         Self {
             id,
-            path: path.into(),
+            path,
             title: None,
             artist: None,
             album: None,
@@ -52,15 +56,17 @@ impl Track {
             channels: None,
             bitrate: None,
             metadata_loaded: false,
+            is_stream,
         }
     }
 
     /// The display name for the classic Winamp single-column playlist.
-    /// Format: "Artist - Title", falling back to the filename.
+    /// Format: "Artist - Title", falling back to the filename or hostname.
     pub fn display_name(&self) -> String {
         match (&self.artist, &self.title) {
             (Some(artist), Some(title)) => format!("{artist} - {title}"),
             (None, Some(title)) => title.clone(),
+            _ if self.is_stream => self.hostname().unwrap_or_else(|| self.path.clone()),
             _ => self.filename(),
         }
     }
@@ -72,6 +78,14 @@ impl Track {
             .and_then(|s| s.to_str())
             .unwrap_or("???")
             .to_string()
+    }
+
+    /// Extract the hostname from a URL for display purposes.
+    fn hostname(&self) -> Option<String> {
+        // Simple extraction: find "://" then take until next "/" or end.
+        let after_scheme = self.path.find("://").map(|i| &self.path[i + 3..])?;
+        let host = after_scheme.split('/').next()?;
+        Some(host.to_string())
     }
 
     /// Duration formatted as "M:SS" for the playlist display.

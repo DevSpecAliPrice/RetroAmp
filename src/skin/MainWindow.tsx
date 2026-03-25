@@ -43,6 +43,9 @@ interface EngineStatus {
   } | null;
   volume: number;
   balance: number;
+  can_seek: boolean;
+  has_duration: boolean;
+  is_stream: boolean;
 }
 
 interface PlaylistState {
@@ -918,9 +921,16 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
           <div style={{ height: "1px", background: ps.selectedbg, margin: "4px 0" }} />
           <MenuItem label="Add Files..." hoverBg={ps.selectedbg} onClick={() => {
             import("@tauri-apps/plugin-dialog").then(({ open: openDialog }) => {
-              openDialog({ multiple: true, filters: [{ name: "Audio", extensions: ["mp3", "flac", "ogg", "wav", "aac", "m4a"] }] })
+              openDialog({ multiple: true, filters: [{ name: "Audio", extensions: ["mp3", "flac", "ogg", "wav", "aac", "m4a", "m3u", "m3u8", "pls"] }] })
                 .then((selected) => { if (selected) { const paths = Array.isArray(selected) ? selected : [selected]; invoke("playlist_add_files", { paths }); } });
             });
+            setContextMenu(null);
+          }} />
+          <MenuItem label="Open URL..." hoverBg={ps.selectedbg} onClick={() => {
+            const url = window.prompt("Enter stream URL:");
+            if (url && url.trim()) {
+              invoke("play_url", { url: url.trim() });
+            }
             setContextMenu(null);
           }} />
           <div style={{ height: "1px", background: ps.selectedbg, margin: "4px 0" }} />

@@ -36,6 +36,7 @@ pub struct PlaylistEntry {
     pub duration: String,
     pub is_current: bool,
     pub is_selected: bool,
+    pub is_stream: bool,
 }
 
 /// The playlist manager.
@@ -179,6 +180,14 @@ impl PlaylistManager {
             track.sample_rate = Some(meta.sample_rate);
             track.channels = Some(meta.channels);
             track.metadata_loaded = true;
+        }
+    }
+
+    /// Set a display-friendly name for a track (used for radio streams where
+    /// the URL isn't meaningful as a display name).
+    pub fn update_display_name(&mut self, id: TrackId, name: &str) {
+        if let Some(track) = self.tracks.iter_mut().find(|t| t.id == id) {
+            track.title = Some(name.to_string());
         }
     }
 
@@ -362,6 +371,7 @@ impl PlaylistManager {
                 duration: track.duration_display(),
                 is_current: self.current_index == Some(i),
                 is_selected: self.selected.contains(&track.id),
+                is_stream: track.is_stream,
             })
             .collect();
 

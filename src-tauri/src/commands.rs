@@ -12,6 +12,7 @@ use crate::audio::engine::{AudioEngine, EngineStatus};
 use crate::audio::eq::EqSettings;
 use crate::audio::fft::FftData;
 use crate::audio::local::LocalFileSource;
+use crate::audio::radio::RadioSource;
 use crate::audio::source::AudioSource;
 use crate::db::{Database, EqPresetEntry, SkinCatalogEntry};
 use crate::playlist::manager::{PlaylistManager, PlaylistState};
@@ -130,17 +131,41 @@ pub fn playlist_add_files(
     playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
     paths: Vec<String>,
 ) -> Result<PlaylistState, String> {
+    use crate::audio::playlist_parser;
+
     let mut pl = playlist.lock().map_err(|e| e.to_string())?;
     let was_empty = pl.track_count() == 0;
-    let ids = pl.add_tracks(paths);
 
-    // Load metadata for each added track by probing the file.
+    let mut ids = Vec::new();
+
+    for path in &paths {
+        if playlist_parser::is_playlist_path(path) {
+            // Parse M3U/PLS file and add extracted URLs.
+            if let Ok(content) = std::fs::read_to_string(path) {
+                let entries = playlist_parser::parse_playlist(&content);
+                for entry in entries {
+                    let id = pl.add_track(&entry.url);
+                    if let Some(title) = entry.title {
+                        pl.update_display_name(id, &title);
+                    }
+                    ids.push(id);
+                }
+            }
+        } else {
+            let id = pl.add_track(path);
+            ids.push(id);
+        }
+    }
+
+    // Load metadata for local files (skip streams — they load metadata on play).
     for &id in &ids {
         if let Some(track) = pl.get_track(id) {
-            let path = track.path.clone();
-            if let Ok(source) = LocalFileSource::open(&path) {
-                if let Ok(meta) = source.metadata() {
-                    pl.update_metadata(id, &meta);
+            if !track.is_stream {
+                let path = track.path.clone();
+                if let Ok(source) = LocalFileSource::open(&path) {
+                    if let Ok(meta) = source.metadata() {
+                        pl.update_metadata(id, &meta);
+                    }
                 }
             }
         }
@@ -150,7 +175,9 @@ pub fn playlist_add_files(
     if was_empty && !ids.is_empty() {
         if let Some(track) = pl.play_index(0) {
             let path = track.path.clone();
+            drop(pl);
             play_path(&engine, &path)?;
+            return Ok(playlist.lock().map_err(|e| e.to_string())?.state());
         }
     }
 
@@ -833,7 +860,72 @@ fn skins_dir() -> Option<std::path::PathBuf> {
 // -- Internal helpers --
 
 fn play_path(engine: &AudioEngine, path: &str) -> Result<(), String> {
-    let source = LocalFileSource::open(path).map_err(|e| e.to_string())?;
+    let source = create_source(path)?;
+    engine.play(source);
+    Ok(())
+}
+
+/// Create an AudioSource from a path — dispatches to RadioSource for URLs,
+/// LocalFileSource for local files.
+pub fn create_source(path: &str) -> Result<Box<dyn AudioSource>, String> {
+    if is_url(path) {
+        RadioSource::connect(path)
+            .map(|s| Box::new(s) as Box<dyn AudioSource>)
+            .map_err(|e| e.to_string())
+    } else {
+        LocalFileSource::open(path)
+            .map(|s| Box::new(s) as Box<dyn AudioSource>)
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// Check if a string looks like an HTTP URL.
+pub fn is_url(s: &str) -> bool {
+    s.starts_with("http://") || s.starts_with("https://")
+}
+
+/// Play a radio stream URL.
+#[tauri::command]
+pub fn play_url(
+    engine: State<'_, Arc<AudioEngine>>,
+    playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
+    url: String,
+    name: Option<String>,
+) -> Result<(), String> {
+    let mut pl = playlist.lock().map_err(|e| e.to_string())?;
+    let id = pl.add_track(&url);
+
+    if let Some(name) = &name {
+        pl.update_display_name(id, name);
+    }
+
+    pl.play_track(id);
+    drop(pl);
+
+    let source = RadioSource::connect(&url).map_err(|e| e.to_string())?;
+
+    // Update playlist metadata with stream info.
+    if let Ok(meta) = source.metadata() {
+        if let Ok(mut pl) = playlist.lock() {
+            pl.update_metadata(id, &meta);
+        }
+    }
+
     engine.play(Box::new(source));
     Ok(())
+}
+
+/// Add a radio stream URL to the playlist without playing it.
+#[tauri::command]
+pub fn playlist_add_url(
+    playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
+    url: String,
+    name: Option<String>,
+) -> Result<PlaylistState, String> {
+    let mut pl = playlist.lock().map_err(|e| e.to_string())?;
+    let id = pl.add_track(&url);
+    if let Some(name) = name {
+        pl.update_display_name(id, &name);
+    }
+    Ok(pl.state())
 }

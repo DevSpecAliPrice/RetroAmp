@@ -50,6 +50,12 @@ pub struct EngineStatus {
     pub metadata: Option<TrackMetadata>,
     pub volume: f32,
     pub balance: f32,
+    /// Whether the current source supports seeking.
+    pub can_seek: bool,
+    /// Whether the current source has a known duration.
+    pub has_duration: bool,
+    /// Whether the current source is an internet stream.
+    pub is_stream: bool,
 }
 
 /// Events emitted by the audio engine.
@@ -85,6 +91,9 @@ impl AudioEngine {
             metadata: None,
             volume: 1.0,
             balance: 0.0,
+            can_seek: false,
+            has_duration: false,
+            is_stream: false,
         }));
 
         let fft_data = Arc::new(Mutex::new(FftData {
@@ -427,6 +436,10 @@ fn update_status(
         s.volume = volume;
         s.balance = balance;
         if let Some(src) = source {
+            let caps = src.capabilities();
+            s.can_seek = caps.can_seek;
+            s.has_duration = caps.has_duration;
+            s.is_stream = caps.has_dynamic_metadata;
             s.position = src.position().map(|d| d.as_secs_f64());
             if let Ok(meta) = src.metadata() {
                 s.duration = meta.duration.map(|d| d.as_secs_f64());
@@ -436,6 +449,9 @@ fn update_status(
             s.position = None;
             s.duration = None;
             s.metadata = None;
+            s.can_seek = false;
+            s.has_duration = false;
+            s.is_stream = false;
         }
     }
 }
