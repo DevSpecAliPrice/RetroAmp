@@ -46,8 +46,9 @@ const RESIZE_EDGE = 5;
 // -- Component --
 
 export default function PlaylistWindow({ skin }: Props) {
-  // Derive scale from window width so we always match the actual window dimensions.
-  const s = Math.max(1, Math.round(window.innerWidth / 275));
+  // Derive scale once at mount from the initial window width (which matches
+  // the main window). Stays fixed during resize so text doesn't jump.
+  const [s] = useState(() => Math.max(1, Math.round(window.innerWidth / 275)));
   const [playlist, setPlaylist] = useState<PlaylistState>({
     tracks: [],
     current_index: null,
