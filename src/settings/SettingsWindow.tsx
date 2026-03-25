@@ -9,13 +9,13 @@ type Tab = "skins" | "general";
 
 interface Props {
   skin: SkinData | null;
+  scale: number;
 }
 
-export default function SettingsWindow({ skin }: Props) {
+export default function SettingsWindow({ skin, scale }: Props) {
   const [activeTab, setActiveTab] = useState<Tab>("skins");
 
-  // Derive scale from window width — same approach as playlist.
-  const [s] = useState(() => Math.max(1, Math.round(window.innerWidth / 275)));
+  const [s] = useState(() => scale || Math.max(1, Math.round(window.innerWidth / 275)));
 
   const ps = skin?.playlistStyle ?? {
     normal: "#00ff00",
@@ -65,9 +65,11 @@ export default function SettingsWindow({ skin }: Props) {
         }}
       >
         <div style={{ width: 25 * s, height: 20 * s, flexShrink: 0, ...bg("PL_TOP_LEFT_SELECTED") }} />
-        <div style={{ flex: 1, ...bgTile("PL_TOP_TILE_SELECTED", "repeat-x") }} />
-        <div style={{ width: 100 * s, flexShrink: 0, ...bg("PL_TITLE_BAR_SELECTED") }} />
-        <div style={{ flex: 1, ...bgTile("PL_TOP_TILE_SELECTED", "repeat-x") }} />
+        <div style={{ flex: 1, ...bgTile("PL_TOP_TILE_SELECTED", "repeat-x"), display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <span style={{ color: ps.normal, fontSize: Math.round(8 * s), fontFamily: `"${ps.font}", Arial, sans-serif`, userSelect: "none" }}>
+            PREFERENCES
+          </span>
+        </div>
         <div style={{
           width: 25 * s, height: 20 * s, flexShrink: 0, position: "relative",
           ...bg("PL_TOP_RIGHT_SELECTED"),
@@ -131,9 +133,7 @@ export default function SettingsWindow({ skin }: Props) {
         minHeight: 38 * s,
         flexShrink: 0,
       }}>
-        <div style={{ width: 125 * s, flexShrink: 0, ...bg("PL_BOTTOM_LEFT") }} />
         <div style={{ flex: 1, ...bgTile("PL_BOTTOM_TILE", "repeat-x") }} />
-        <div style={{ width: 150 * s, flexShrink: 0, ...bg("PL_BOTTOM_RIGHT") }} />
       </div>
     </div>
   );

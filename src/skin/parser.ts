@@ -291,6 +291,9 @@ export async function loadSkin(path: string): Promise<SkinData> {
     } catch (e) {
       console.warn(`Failed to load skin image: ${key}`, e);
     }
+    // Yield to the event loop between images so the UI stays responsive
+    // even when processing skins with unusually large bitmaps.
+    await new Promise((resolve) => setTimeout(resolve, 0));
   }
 
   // Apply fallbacks for missing sprite sheets.

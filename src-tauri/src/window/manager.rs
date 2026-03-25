@@ -14,6 +14,7 @@ pub enum WindowId {
     Equalizer,
     Playlist,
     Settings,
+    RadioBrowser,
 }
 
 impl WindowId {
@@ -24,6 +25,7 @@ impl WindowId {
             WindowId::Equalizer => "equalizer",
             WindowId::Playlist => "playlist",
             WindowId::Settings => "settings",
+            WindowId::RadioBrowser => "radiobrowser",
         }
     }
 
@@ -34,6 +36,7 @@ impl WindowId {
             WindowId::Equalizer => "/?window=equalizer",
             WindowId::Playlist => "/?window=playlist",
             WindowId::Settings => "/?window=settings",
+            WindowId::RadioBrowser => "/?window=radiobrowser",
         }
     }
 
@@ -54,6 +57,7 @@ impl WindowId {
             WindowId::Equalizer => 116,
             WindowId::Playlist => 232,
             WindowId::Settings => 500,
+            WindowId::RadioBrowser => 300,
         }
     }
 
@@ -61,7 +65,7 @@ impl WindowId {
     pub fn resizable(&self) -> bool {
         match self {
             WindowId::Main | WindowId::Equalizer => false,
-            WindowId::Playlist | WindowId::Settings => true,
+            WindowId::Playlist | WindowId::Settings | WindowId::RadioBrowser => true,
         }
     }
 }
@@ -96,6 +100,7 @@ impl WindowManager {
         states.insert(WindowId::Main, true);
         states.insert(WindowId::Equalizer, false);
         states.insert(WindowId::Playlist, false);
+        states.insert(WindowId::RadioBrowser, false);
 
         // Determine scale from screen height.
         let scale = Self::detect_scale();

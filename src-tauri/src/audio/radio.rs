@@ -37,6 +37,7 @@ pub struct RadioSource {
     station_name: Option<String>,
     genre: Option<String>,
     bitrate: Option<u32>,
+    #[allow(dead_code)]
     url: String,
 
     /// Shared ICY metadata — updated by reader thread, read here.
@@ -68,15 +69,52 @@ impl RadioSource {
     /// 3. Probes the stream with Symphonia to detect the format.
     /// 4. Creates a decoder.
     pub fn connect(url: &str) -> Result<Self, AudioError> {
+        Self::connect_with_name(url, None)
+    }
+
+    /// Connect with an explicit station name (used when the UI knows the name
+    /// before the stream provides ICY headers).
+    pub fn connect_with_name(url: &str, display_name: Option<&str>) -> Result<Self, AudioError> {
         let mut reader = StreamReader::connect(url)?;
 
         let consumer = reader
             .take_consumer()
             .ok_or_else(|| AudioError::Network("consumer already taken".into()))?;
 
-        let stream_info = reader.stream_info.clone();
+        let mut stream_info = reader.stream_info.clone();
+        // Override station name if caller provided one.
+        if let Some(name) = display_name {
+            stream_info.station_name = Some(name.to_string());
+        }
         let icy_metadata = Arc::clone(&reader.icy_metadata);
         let connected = Arc::clone(&reader.connected);
+
+        // Wait for the ring buffer to accumulate some data before probing.
+        // Symphonia's probe needs real audio bytes; if it gets 0 it sees EOF.
+        {
+            use ringbuf::traits::Observer;
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                if consumer.occupied_len() >= 16384 {
+                    break; // 16KB buffered — enough for probing.
+                }
+                if std::time::Instant::now() > deadline {
+                    if consumer.occupied_len() > 0 {
+                        break; // Some data arrived — try with what we have.
+                    }
+                    return Err(AudioError::ConnectionFailed(
+                        "timed out waiting for stream data".into(),
+                    ));
+                }
+                if !connected.load(std::sync::atomic::Ordering::Relaxed) && consumer.occupied_len() == 0 {
+                    return Err(AudioError::ConnectionFailed(
+                        "stream disconnected before any data received".into(),
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            log::info!("[radio] pre-buffered {} bytes", consumer.occupied_len());
+        }
 
         // Wrap the consumer as a MediaSource → MediaSourceStream.
         let buf_reader = StreamBufReader::new(consumer);

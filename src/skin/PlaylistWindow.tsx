@@ -47,10 +47,10 @@ const RESIZE_EDGE = 5;
 
 // -- Component --
 
-export default function PlaylistWindow({ skin }: Props) {
-  // Derive scale once at mount from the initial window width (which matches
-  // the main window). Stays fixed during resize so text doesn't jump.
-  const [s] = useState(() => Math.max(1, Math.round(window.innerWidth / 275)));
+export default function PlaylistWindow({ skin, scale }: Props) {
+  // Use the backend-authoritative scale passed from App.tsx, with a fallback
+  // from window width. Stays fixed during resize so text doesn't jump.
+  const [s] = useState(() => scale || Math.max(1, Math.round(window.innerWidth / 275)));
   const [playlist, setPlaylist] = useState<PlaylistState>({
     tracks: [],
     current_index: null,
@@ -174,13 +174,6 @@ export default function PlaylistWindow({ skin }: Props) {
     }
   }, []);
 
-  const addUrl = useCallback(() => {
-    const url = window.prompt("Enter stream URL:");
-    if (url && url.trim()) {
-      invoke("play_url", { url: url.trim() });
-    }
-  }, []);
-
   const playIndex = useCallback(async (index: number) => {
     await invoke("playlist_play_index", { index });
   }, []);
@@ -228,6 +221,7 @@ export default function PlaylistWindow({ skin }: Props) {
         flexDirection: "column",
         height: "100vh",
         overflow: "hidden",
+        userSelect: "none",
         imageRendering: "pixelated" as any,
       }}
       onMouseDown={handleEdgeMouseDown}
@@ -284,6 +278,7 @@ export default function PlaylistWindow({ skin }: Props) {
             overflowY: "auto",
             overflowX: "hidden",
             background: ps.normalbg,
+            userSelect: "none",
             fontFamily: `"${ps.font}", Arial, sans-serif`,
             fontSize: Math.round(9 * s),
             color: ps.normal,
@@ -444,7 +439,7 @@ export default function PlaylistWindow({ skin }: Props) {
           onClose={() => setContextMenu(null)}
           items={[
             { label: "Add Files...", onClick: openFiles },
-            { label: "Add URL...", onClick: addUrl },
+            { label: "Radio Browser...", onClick: () => invoke("toggle_window", { windowId: "RadioBrowser" }) },
             { label: "Remove Selected", onClick: () => invoke("playlist_remove_selected") },
             { label: "Clear Playlist", onClick: () => invoke("playlist_clear") },
             "separator",

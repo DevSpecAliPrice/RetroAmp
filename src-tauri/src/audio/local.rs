@@ -21,6 +21,7 @@ use crate::audio::error::AudioError;
 use crate::audio::source::{AudioBuffer, AudioSource, SourceCapabilities, SourceState, TrackMetadata};
 
 pub struct LocalFileSource {
+    #[allow(dead_code)]
     path: PathBuf,
     format: Box<dyn FormatReader>,
     decoder: Box<dyn symphonia::core::codecs::Decoder>,

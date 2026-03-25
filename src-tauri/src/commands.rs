@@ -357,6 +357,12 @@ pub fn save_window_layout(app: &AppHandle, wm: &WindowManager) {
     cfg.ui.main = capture("main", true, false);
     cfg.ui.equalizer = capture("equalizer", wm.is_visible(WindowId::Equalizer), false);
     cfg.ui.playlist = capture("playlist", wm.is_visible(WindowId::Playlist), true);
+    if wm.is_visible(WindowId::RadioBrowser) || app.get_webview_window("radiobrowser").is_some() {
+        cfg.ui.radio_browser = Some(capture("radiobrowser", wm.is_visible(WindowId::RadioBrowser), true));
+    }
+    if wm.is_visible(WindowId::Settings) || app.get_webview_window("settings").is_some() {
+        cfg.ui.settings = Some(capture("settings", wm.is_visible(WindowId::Settings), true));
+    }
 
     let _ = cfg.save();
 }
@@ -401,6 +407,8 @@ pub async fn toggle_window(
             match window_id {
                 WindowId::Equalizer => cfg.ui.equalizer,
                 WindowId::Playlist => cfg.ui.playlist,
+                WindowId::RadioBrowser => cfg.ui.radio_browser.unwrap_or_default(),
+                WindowId::Settings => cfg.ui.settings.unwrap_or_default(),
                 _ => Default::default(),
             }
         };
@@ -423,7 +431,12 @@ pub async fn toggle_window(
 
         // Use saved size for resizable windows, otherwise derive from main.
         // Playlist needs ~15% extra width so its graphics aren't clipped.
-        let default_w = if window_id == WindowId::Playlist { main_w * 1.15 } else { main_w };
+        let default_w = match window_id {
+            WindowId::Playlist => main_w * 1.15,
+            WindowId::RadioBrowser => main_w * 1.5,
+            WindowId::Settings => 700.0,
+            _ => main_w,
+        };
         let w = if resizable { saved.width.unwrap_or(default_w) } else { main_w };
         let h = if resizable {
             saved.height.unwrap_or(main_h * 2.0)
@@ -581,14 +594,36 @@ pub async fn open_settings(
         return Ok(());
     }
 
-    WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App("/?window=settings".into()))
+    // Load saved layout for position/size.
+    let saved = {
+        let cfg = crate::config::AppConfig::load();
+        cfg.ui.settings.unwrap_or_default()
+    };
+
+    let w = saved.width.unwrap_or(700.0);
+    let h = saved.height.unwrap_or(500.0);
+
+    let mut builder = WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App("/?window=settings".into()))
         .title("RetroAmp Preferences")
-        .inner_size(700.0, 500.0)
+        .inner_size(w, h)
         .min_inner_size(500.0, 400.0)
         .decorations(false)
         .resizable(true)
         .visible(true)
-        .build()
+        .skip_taskbar(true);
+
+    // Apply saved position.
+    if let (Some(x), Some(y)) = (saved.x, saved.y) {
+        builder = builder.position(x as f64, y as f64);
+    }
+
+    // Set the main window as parent so closing main closes everything.
+    if let Some(main_win) = app.get_webview_window("main") {
+        builder = builder.parent(&main_win)
+            .map_err(|e| format!("failed to set parent window: {e}"))?;
+    }
+
+    builder.build()
         .map_err(|e| e.to_string())?;
 
     Ok(())
@@ -902,7 +937,8 @@ pub fn play_url(
     pl.play_track(id);
     drop(pl);
 
-    let source = RadioSource::connect(&url).map_err(|e| e.to_string())?;
+    let source = RadioSource::connect_with_name(&url, name.as_deref())
+        .map_err(|e| e.to_string())?;
 
     // Update playlist metadata with stream info.
     if let Ok(meta) = source.metadata() {
@@ -928,4 +964,124 @@ pub fn playlist_add_url(
         pl.update_display_name(id, &name);
     }
     Ok(pl.state())
+}
+
+// -- Radio browser commands --
+
+#[tauri::command]
+pub fn get_radio_stations(
+    database: State<'_, Arc<Mutex<Database>>>,
+    include_hidden: Option<bool>,
+) -> Result<Vec<crate::db::RadioStation>, String> {
+    let db = database.lock().map_err(|e| e.to_string())?;
+    db.get_all_stations(include_hidden.unwrap_or(false))
+}
+
+#[tauri::command]
+pub fn get_favorite_stations(
+    database: State<'_, Arc<Mutex<Database>>>,
+) -> Result<Vec<crate::db::RadioStation>, String> {
+    let db = database.lock().map_err(|e| e.to_string())?;
+    db.get_favorite_stations()
+}
+
+#[tauri::command]
+pub fn search_radio_stations_local(
+    database: State<'_, Arc<Mutex<Database>>>,
+    query: String,
+) -> Result<Vec<crate::db::RadioStation>, String> {
+    let db = database.lock().map_err(|e| e.to_string())?;
+    db.search_stations(&query)
+}
+
+#[tauri::command]
+pub fn toggle_station_favorite(
+    database: State<'_, Arc<Mutex<Database>>>,
+    url: String,
+) -> Result<bool, String> {
+    let db = database.lock().map_err(|e| e.to_string())?;
+    db.toggle_station_favorite(&url)
+}
+
+#[tauri::command]
+pub fn hide_radio_station(
+    database: State<'_, Arc<Mutex<Database>>>,
+    url: String,
+) -> Result<(), String> {
+    let db = database.lock().map_err(|e| e.to_string())?;
+    db.hide_station(&url)
+}
+
+#[tauri::command]
+pub fn unhide_radio_station(
+    database: State<'_, Arc<Mutex<Database>>>,
+    url: String,
+) -> Result<(), String> {
+    let db = database.lock().map_err(|e| e.to_string())?;
+    db.unhide_station(&url)
+}
+
+#[tauri::command]
+pub fn delete_radio_station(
+    database: State<'_, Arc<Mutex<Database>>>,
+    url: String,
+) -> Result<(), String> {
+    let db = database.lock().map_err(|e| e.to_string())?;
+    db.delete_station(&url)
+}
+
+#[tauri::command]
+pub fn save_radio_station(
+    database: State<'_, Arc<Mutex<Database>>>,
+    name: String,
+    url: String,
+    genre: Option<String>,
+    bitrate: Option<u32>,
+    codec: Option<String>,
+    country: Option<String>,
+) -> Result<(), String> {
+    let db = database.lock().map_err(|e| e.to_string())?;
+    db.save_station(
+        &name,
+        &url,
+        genre.as_deref(),
+        bitrate,
+        codec.as_deref(),
+        country.as_deref(),
+    )
+}
+
+#[tauri::command]
+pub async fn radio_browser_search(
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<crate::radio_browser::ApiStation>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::radio_browser::search(&query, limit.unwrap_or(50))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn radio_browser_top(
+    limit: Option<usize>,
+) -> Result<Vec<crate::radio_browser::ApiStation>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::radio_browser::top_stations(limit.unwrap_or(100))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn radio_browser_by_tag(
+    tag: String,
+    limit: Option<usize>,
+) -> Result<Vec<crate::radio_browser::ApiStation>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::radio_browser::by_tag(&tag, limit.unwrap_or(50))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }

@@ -93,7 +93,7 @@ fn parse_pls(content: &str) -> Vec<PlaylistEntry> {
         let lower = line.to_lowercase();
 
         if let Some(rest) = lower.strip_prefix("file") {
-            if let Some((num_str, value)) = rest.split_once('=') {
+            if let Some((num_str, _value)) = rest.split_once('=') {
                 if let Ok(num) = num_str.parse::<usize>() {
                     // Use the original line to preserve URL casing.
                     let value = &line[line.find('=').unwrap() + 1..];

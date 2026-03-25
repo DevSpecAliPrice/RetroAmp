@@ -7,6 +7,7 @@ import MainWindow from "./skin/MainWindow";
 import PlaylistWindow from "./skin/PlaylistWindow";
 import EqualizerWindow from "./skin/EqualizerWindow";
 import SettingsWindow from "./settings/SettingsWindow";
+import RadioBrowserWindow from "./skin/RadioBrowserWindow";
 
 const DEFAULT_SKIN_NAME = "RetroAmp Default";
 
@@ -53,6 +54,7 @@ function App() {
   useEffect(() => {
     (async () => {
       const ws = await invoke<WindowStates>("get_window_states");
+      setScale(ws.scale);
       if (ws.active_skin_path) {
         // A skin is already active — load it (covers secondary windows
         // and also restarts where the main window re-opens).
@@ -148,7 +150,7 @@ function App() {
 
   // Settings window renders with the skin for theming but doesn't block on it.
   if (panel === "settings") {
-    return <SettingsWindow skin={skin} />;
+    return <SettingsWindow skin={skin} scale={scale} />;
   }
 
   if (skinError) {
@@ -208,6 +210,8 @@ function App() {
       return <PlaylistWindow skin={skin} scale={scale} />;
     case "equalizer":
       return <EqualizerWindow skin={skin} scale={scale} />;
+    case "radiobrowser":
+      return <RadioBrowserWindow skin={skin} scale={scale} />;
     case "shade":
       return <MainWindow skin={skin} scale={scale} isShade />;
     default:

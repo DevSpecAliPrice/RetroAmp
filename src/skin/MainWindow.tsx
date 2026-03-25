@@ -926,11 +926,8 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
             });
             setContextMenu(null);
           }} />
-          <MenuItem label="Open URL..." hoverBg={ps.selectedbg} onClick={() => {
-            const url = window.prompt("Enter stream URL:");
-            if (url && url.trim()) {
-              invoke("play_url", { url: url.trim() });
-            }
+          <MenuItem label="Radio Browser..." hoverBg={ps.selectedbg} onClick={() => {
+            invoke("toggle_window", { windowId: "RadioBrowser" });
             setContextMenu(null);
           }} />
           <div style={{ height: "1px", background: ps.selectedbg, margin: "4px 0" }} />

@@ -26,6 +26,23 @@ pub struct EqPresetEntry {
     pub preamp: f32,
 }
 
+/// A radio station from the database.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RadioStation {
+    pub id: i64,
+    pub name: String,
+    pub url: String,
+    pub genre: Option<String>,
+    pub bitrate: Option<u32>,
+    pub codec: Option<String>,
+    pub country: Option<String>,
+    pub is_favorite: bool,
+    pub is_hidden: bool,
+    pub source: String,
+    pub last_played: Option<i64>,
+    pub play_count: i64,
+}
+
 /// A row from the skin_catalog table — metadata only, no thumbnail blob.
 #[derive(Debug, Clone, Serialize)]
 pub struct SkinCatalogEntry {
@@ -66,6 +83,7 @@ impl Database {
 
         let db = Self { conn };
         db.init_schema()?;
+        db.migrate_schema();
         Ok(db)
     }
 
@@ -105,6 +123,8 @@ impl Database {
                     codec       TEXT,
                     country     TEXT,
                     is_favorite INTEGER NOT NULL DEFAULT 0,
+                    is_hidden   INTEGER NOT NULL DEFAULT 0,
+                    source      TEXT NOT NULL DEFAULT 'user',
                     last_played INTEGER,
                     play_count  INTEGER NOT NULL DEFAULT 0,
                     added_at    INTEGER NOT NULL
@@ -114,6 +134,18 @@ impl Database {
             )
             .map_err(|e| format!("failed to initialize database schema: {e}"))?;
         Ok(())
+    }
+
+    /// Migrate existing databases to add new columns (safe to call repeatedly).
+    fn migrate_schema(&self) {
+        // Add is_hidden and source columns to radio_stations if missing.
+        // These are no-ops on fresh databases that already have them.
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE radio_stations ADD COLUMN is_hidden INTEGER NOT NULL DEFAULT 0;",
+        );
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE radio_stations ADD COLUMN source TEXT NOT NULL DEFAULT 'user';",
+        );
     }
 
     /// Insert or update a skin in the catalog. Preserves favorite/usage data
@@ -392,21 +424,7 @@ impl Database {
         codec: Option<&str>,
         country: Option<&str>,
     ) -> Result<(), String> {
-        let now = unix_now();
-        self.conn
-            .execute(
-                "INSERT INTO radio_stations (name, url, genre, bitrate, codec, country, added_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                 ON CONFLICT(url) DO UPDATE SET
-                    name = excluded.name,
-                    genre = COALESCE(excluded.genre, radio_stations.genre),
-                    bitrate = COALESCE(excluded.bitrate, radio_stations.bitrate),
-                    codec = COALESCE(excluded.codec, radio_stations.codec),
-                    country = COALESCE(excluded.country, radio_stations.country)",
-                params![name, url, genre, bitrate, codec, country, now],
-            )
-            .map_err(|e| format!("failed to save station: {e}"))?;
-        Ok(())
+        self.save_station_with_source(name, url, genre, bitrate, codec, country, "user")
     }
 
     /// Record that a station was just played.
@@ -442,6 +460,174 @@ impl Database {
         Ok(new_val)
     }
 
+    /// Get all radio stations, optionally including hidden ones.
+    pub fn get_all_stations(&self, include_hidden: bool) -> Result<Vec<RadioStation>, String> {
+        let sql = if include_hidden {
+            "SELECT id, name, url, genre, bitrate, codec, country,
+                    is_favorite, is_hidden, COALESCE(source, 'user'), last_played, play_count
+             FROM radio_stations
+             ORDER BY is_favorite DESC, play_count DESC, name COLLATE NOCASE"
+        } else {
+            "SELECT id, name, url, genre, bitrate, codec, country,
+                    is_favorite, is_hidden, COALESCE(source, 'user'), last_played, play_count
+             FROM radio_stations WHERE is_hidden = 0
+             ORDER BY is_favorite DESC, play_count DESC, name COLLATE NOCASE"
+        };
+        self.query_stations(sql, [])
+    }
+
+    /// Get only favorite stations (non-hidden).
+    pub fn get_favorite_stations(&self) -> Result<Vec<RadioStation>, String> {
+        self.query_stations(
+            "SELECT id, name, url, genre, bitrate, codec, country,
+                    is_favorite, is_hidden, COALESCE(source, 'user'), last_played, play_count
+             FROM radio_stations WHERE is_favorite = 1 AND is_hidden = 0
+             ORDER BY play_count DESC, name COLLATE NOCASE",
+            [],
+        )
+    }
+
+    /// Search stations by name, genre, or country.
+    pub fn search_stations(&self, query: &str) -> Result<Vec<RadioStation>, String> {
+        let pattern = format!("%{query}%");
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, name, url, genre, bitrate, codec, country,
+                        is_favorite, is_hidden, COALESCE(source, 'user'), last_played, play_count
+                 FROM radio_stations
+                 WHERE is_hidden = 0 AND (
+                     name LIKE ?1 OR genre LIKE ?1 OR country LIKE ?1
+                 )
+                 ORDER BY is_favorite DESC, play_count DESC, name COLLATE NOCASE",
+            )
+            .map_err(|e| format!("query error: {e}"))?;
+
+        let rows = stmt
+            .query_map(params![pattern], Self::map_station_row)
+            .map_err(|e| format!("query error: {e}"))?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("row error: {e}"))
+    }
+
+    /// Hide a station (soft delete — can be unhidden).
+    pub fn hide_station(&self, url: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE radio_stations SET is_hidden = 1 WHERE url = ?1",
+                params![url],
+            )
+            .map_err(|e| format!("failed to hide station: {e}"))?;
+        Ok(())
+    }
+
+    /// Unhide a previously hidden station.
+    pub fn unhide_station(&self, url: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE radio_stations SET is_hidden = 0 WHERE url = ?1",
+                params![url],
+            )
+            .map_err(|e| format!("failed to unhide station: {e}"))?;
+        Ok(())
+    }
+
+    /// Hard-delete a station from the database.
+    pub fn delete_station(&self, url: &str) -> Result<(), String> {
+        self.conn
+            .execute("DELETE FROM radio_stations WHERE url = ?1", params![url])
+            .map_err(|e| format!("failed to delete station: {e}"))?;
+        Ok(())
+    }
+
+    /// Save a station with a specific source tag ("default", "user", "api").
+    pub fn save_station_with_source(
+        &self,
+        name: &str,
+        url: &str,
+        genre: Option<&str>,
+        bitrate: Option<u32>,
+        codec: Option<&str>,
+        country: Option<&str>,
+        source: &str,
+    ) -> Result<(), String> {
+        let now = unix_now();
+        self.conn
+            .execute(
+                "INSERT INTO radio_stations (name, url, genre, bitrate, codec, country, source, added_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(url) DO UPDATE SET
+                    name = excluded.name,
+                    genre = COALESCE(excluded.genre, radio_stations.genre),
+                    bitrate = COALESCE(excluded.bitrate, radio_stations.bitrate),
+                    codec = COALESCE(excluded.codec, radio_stations.codec),
+                    country = COALESCE(excluded.country, radio_stations.country)",
+                params![name, url, genre, bitrate, codec, country, source, now],
+            )
+            .map_err(|e| format!("failed to save station: {e}"))?;
+        Ok(())
+    }
+
+    /// Seed default stations from the embedded JSON. Uses INSERT OR IGNORE
+    /// so re-seeding is safe (won't overwrite user modifications).
+    pub fn seed_default_stations(&self) -> Result<usize, String> {
+        let json = include_str!("default_stations.json");
+        let stations: Vec<DefaultStation> = serde_json::from_str(json)
+            .map_err(|e| format!("failed to parse default stations: {e}"))?;
+
+        let now = unix_now();
+        let mut count = 0;
+
+        for s in &stations {
+            let inserted = self
+                .conn
+                .execute(
+                    "INSERT OR IGNORE INTO radio_stations
+                        (name, url, genre, bitrate, codec, country, source, added_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'default', ?7)",
+                    params![s.name, s.url, s.genre, s.bitrate, s.codec, s.country, now],
+                )
+                .map_err(|e| format!("failed to seed station: {e}"))?;
+            count += inserted;
+        }
+
+        Ok(count)
+    }
+
+    /// Helper: map a row to a RadioStation.
+    fn map_station_row(row: &rusqlite::Row) -> rusqlite::Result<RadioStation> {
+        Ok(RadioStation {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            url: row.get(2)?,
+            genre: row.get(3)?,
+            bitrate: row.get(4)?,
+            codec: row.get(5)?,
+            country: row.get(6)?,
+            is_favorite: row.get(7)?,
+            is_hidden: row.get(8)?,
+            source: row.get(9)?,
+            last_played: row.get(10)?,
+            play_count: row.get(11)?,
+        })
+    }
+
+    /// Helper: run a station query with no parameters.
+    fn query_stations<P: rusqlite::Params>(&self, sql: &str, params: P) -> Result<Vec<RadioStation>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(sql)
+            .map_err(|e| format!("query error: {e}"))?;
+
+        let rows = stmt
+            .query_map(params, Self::map_station_row)
+            .map_err(|e| format!("query error: {e}"))?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("row error: {e}"))
+    }
+
     /// Get the set of all paths that already have thumbnails cached.
     /// Used by the catalog sync to avoid per-skin lock acquisitions.
     pub fn paths_with_thumbnails(&self) -> Result<HashSet<String>, String> {
@@ -461,6 +647,17 @@ impl Database {
 
 fn db_path() -> Option<PathBuf> {
     dirs::config_dir().map(|c| c.join("retroamp").join("retroamp.db"))
+}
+
+/// A station entry from the bundled default_stations.json.
+#[derive(Debug, Deserialize)]
+struct DefaultStation {
+    name: String,
+    url: String,
+    genre: Option<String>,
+    bitrate: Option<u32>,
+    codec: Option<String>,
+    country: Option<String>,
 }
 
 fn unix_now() -> i64 {

@@ -5,6 +5,7 @@ pub mod commands;
 pub mod config;
 pub mod db;
 pub mod playlist;
+pub mod radio_browser;
 pub mod skin;
 pub mod window;
 
@@ -18,7 +19,6 @@ use serde::Serialize;
 
 use audio::engine::{AudioEngine, EngineEvent};
 use audio::eq::EqSettings;
-use audio::source::AudioSource;
 use db::Database;
 use playlist::manager::PlaylistManager;
 use window::manager::{WindowId, WindowManager};
@@ -107,6 +107,23 @@ pub fn run() {
                     .expect("failed to spawn catalog sync thread");
             }
 
+            // Seed default radio stations (best-effort, non-blocking).
+            {
+                let db = Arc::clone(&database);
+                thread::Builder::new()
+                    .name("retroamp-radio-seed".into())
+                    .spawn(move || {
+                        if let Ok(db) = db.lock() {
+                            match db.seed_default_stations() {
+                                Ok(n) if n > 0 => log::info!("seeded {n} default radio stations"),
+                                Ok(_) => {}
+                                Err(e) => log::warn!("failed to seed radio stations: {e}"),
+                            }
+                        }
+                    })
+                    .ok();
+            }
+
             // Create the main window programmatically (same code path as
             // EQ/playlist windows) so Wayland handles it consistently.
             let w = 275.0 * initial_scale;
@@ -143,9 +160,12 @@ pub fn run() {
             }
 
             // Restore previously-open panel windows.
+            let default_layout = config::WindowLayoutEntry::default();
+            let radio_layout = saved_ui.radio_browser.as_ref().unwrap_or(&default_layout);
             let panels_to_restore: Vec<(WindowId, &config::WindowLayoutEntry)> = [
                 (WindowId::Equalizer, &saved_ui.equalizer),
                 (WindowId::Playlist, &saved_ui.playlist),
+                (WindowId::RadioBrowser, radio_layout),
             ]
             .into_iter()
             .filter(|(_, entry)| entry.visible == Some(true))
@@ -256,6 +276,7 @@ pub fn run() {
                     "playlist" => Some(WindowId::Playlist),
                     "equalizer" => Some(WindowId::Equalizer),
                     "settings" => Some(WindowId::Settings),
+                    "radiobrowser" => Some(WindowId::RadioBrowser),
                     _ => None,
                 };
                 if let Some(id) = window_id {
@@ -295,6 +316,18 @@ pub fn run() {
             commands::playlist_clear,
             commands::play_url,
             commands::playlist_add_url,
+            // Radio browser
+            commands::get_radio_stations,
+            commands::get_favorite_stations,
+            commands::search_radio_stations_local,
+            commands::toggle_station_favorite,
+            commands::hide_radio_station,
+            commands::unhide_radio_station,
+            commands::delete_radio_station,
+            commands::save_radio_station,
+            commands::radio_browser_search,
+            commands::radio_browser_top,
+            commands::radio_browser_by_tag,
             // Skin
             commands::load_skin,
             commands::get_skins,

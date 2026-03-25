@@ -87,6 +87,12 @@ pub struct UiConfig {
 
     #[serde(default)]
     pub playlist: WindowLayoutEntry,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radio_browser: Option<WindowLayoutEntry>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<WindowLayoutEntry>,
 }
 
 /// Saved layout for a single window.

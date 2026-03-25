@@ -65,6 +65,7 @@ impl StreamReader {
             .config()
             .timeout_connect(Some(Duration::from_secs(15)))
             .timeout_recv_response(Some(Duration::from_secs(15)))
+            .timeout_recv_body(None)
             .build()
             .call()
             .map_err(|e| AudioError::ConnectionFailed(format!("{e}")))?;
@@ -296,6 +297,7 @@ fn make_stream_request(
         .config()
         .timeout_connect(Some(Duration::from_secs(15)))
         .timeout_recv_response(Some(Duration::from_secs(15)))
+        .timeout_recv_body(None)
         .build()
         .call()
         .map_err(|e| AudioError::ConnectionFailed(format!("{e}")))?;
@@ -361,11 +363,12 @@ impl Read for StreamBufReader {
             return Ok(n);
         }
 
-        // Buffer empty — brief spin-wait (max ~5ms) to avoid busy-looping
-        // while keeping the audio thread responsive.
-        for _ in 0..50 {
+        // Buffer empty — spin-wait up to ~200ms. This is long enough for
+        // network jitter but short enough to keep the audio thread responsive
+        // (a ~200ms stall produces a brief silence gap, not a hang).
+        for _ in 0..100 {
             drop(consumer);
-            thread::sleep(Duration::from_micros(100));
+            thread::sleep(Duration::from_millis(2));
             consumer = self.consumer.lock().unwrap();
             let n = consumer.pop_slice(buf);
             if n > 0 {

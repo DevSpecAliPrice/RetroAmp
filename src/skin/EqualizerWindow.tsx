@@ -90,8 +90,8 @@ function fractionToDb(f: number): number {
 
 // -- Component --
 
-export default function EqualizerWindow({ skin }: Props) {
-  const s = Math.max(1, Math.round(window.innerWidth / 275));
+export default function EqualizerWindow({ skin, scale }: Props) {
+  const s = scale || Math.max(1, Math.round(window.innerWidth / 275));
   const ps = skin.playlistStyle;
   const sp = skin.sprites;
 
