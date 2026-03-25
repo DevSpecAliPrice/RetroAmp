@@ -395,7 +395,9 @@ pub async fn toggle_window(
             });
 
         // Use saved size for resizable windows, otherwise derive from main.
-        let w = if resizable { saved.width.unwrap_or(main_w) } else { main_w };
+        // Playlist needs ~15% extra width so its graphics aren't clipped.
+        let default_w = if window_id == WindowId::Playlist { main_w * 1.15 } else { main_w };
+        let w = if resizable { saved.width.unwrap_or(default_w) } else { main_w };
         let h = if resizable {
             saved.height.unwrap_or(main_h * 2.0)
         } else {

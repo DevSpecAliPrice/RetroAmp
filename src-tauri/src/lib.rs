@@ -172,7 +172,8 @@ pub fn run() {
                     })
                     .unwrap_or((w, h));
 
-                let win_w = if resizable { entry.width.unwrap_or(main_w) } else { main_w };
+                let default_w = if id == WindowId::Playlist { main_w * 1.15 } else { main_w };
+                let win_w = if resizable { entry.width.unwrap_or(default_w) } else { main_w };
                 let win_h = if resizable {
                     entry.height.unwrap_or(main_h * 2.0)
                 } else {

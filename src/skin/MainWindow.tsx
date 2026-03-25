@@ -130,6 +130,7 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
   // giving crisp integer-scaled pixels with no gaps.
   const s = Math.max(1, Math.round(window.innerWidth / W));
   console.log(`[MainWindow] window.innerWidth=${window.innerWidth} window.innerHeight=${window.innerHeight} → scale=${s} → skin=${W*s}x${(isShade?14:116)*s}`);
+
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [status, setStatus] = useState<EngineStatus>({
     state: "Stopped",

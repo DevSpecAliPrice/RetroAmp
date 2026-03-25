@@ -13,9 +13,12 @@
 export const CHAR_WIDTH = 5;
 export const CHAR_HEIGHT = 6;
 
-/** Marquee display area in the main window. */
+/** Marquee display area in the main window.
+ * Y=27 is the consensus position across 80+ classic skins — most skins
+ * have their text inset starting at y=26..28, so y=27 sits inside the
+ * inset for virtually all of them. */
 export const MARQUEE_X = 111;
-export const MARQUEE_Y = 24;
+export const MARQUEE_Y = 27;
 export const MARQUEE_WIDTH = 154;
 export const MARQUEE_HEIGHT = 6;
 

@@ -190,82 +190,6 @@ The experience of adding skins should be frictionless:
 
 ---
 
-## Dual Skin System: Classic and Modern
-
-RetroAmp supports two fundamentally different skin formats, each with its own rendering engine. The player detects which format a skin uses and switches rendering mode automatically.
-
-### Classic Skins (.wsz) — Winamp 2.x Format
-
-The original BMP-based sprite system, compatible with ~65,000 existing community skins.
-
-| Aspect | Detail |
-|---|---|
-| **Format** | ZIP archive containing BMP sprite sheets + text config files |
-| **Layout** | Fixed pixel dimensions: main window 275×116, EQ 275×116, playlist resizable |
-| **Rendering** | Canvas sprite blitting — each UI element is a pixel region cut from a BMP |
-| **Fonts** | Bitmap font from text.bmp (5×6px fixed-width characters) |
-| **Colours** | viscolor.txt (24 hardcoded vis colours), pledit.txt (playlist colours + font) |
-| **Scripting** | None — layout is static, behaviour is defined by the player |
-| **Windows** | Main, EQ, Playlist (fixed set) |
-| **Scaling** | Integer multiples only (1×, 2×, 3×) to preserve pixel art |
-
-This is the format we implement first and prioritise for completeness. Webamp's skin parser, battle-tested against thousands of skins, is the reference implementation.
-
-### Modern Skins (WasabiXML) — Winamp 3/5 Format
-
-An XML-driven layout engine with PNG/JPG assets, TrueType fonts, and scripted behaviour. Modern skins can define completely custom window layouts with resizable panels, library browsers, video windows, and more.
-
-| Aspect | Detail |
-|---|---|
-| **Format** | ZIP archive (sometimes .wal) containing XML manifests + PNG/JPG/BMP images |
-| **Layout** | Declarative XML with containers, layouts, groups, and relative positioning |
-| **Rendering** | Composited PNG/JPG layers with alpha, z-ordering, and dynamic sizing |
-| **Fonts** | TrueType fonts (any system or embedded font) + bitmap fonts |
-| **Colours** | Gammagroups system with colour presets — full runtime theming |
-| **Scripting** | MAKI (compiled bytecode for a Winamp-specific VM) |
-| **Windows** | Arbitrary: Main, EQ, Playlist, Media Library, Video, Visualiser, Notifier, and any custom panels |
-| **Scaling** | Natively resizable — layouts use relative positioning (`relatw`, `relath`) |
-
-#### WasabiXML Structure
-
-```
-skin/
-  skin.xml                    ← Root manifest, includes other XML files
-  xml/
-    elements.xml              ← Bitmap/font definitions (id → file + crop region)
-    player.xml                ← Main player window layout
-    pledit.xml                ← Playlist editor layout
-    ml.xml                    ← Media library panel
-    color-presets.xml          ← Gamma colour themes
-  images/                     ← PNG/JPG/BMP assets
-  fonts/                      ← Embedded TTF fonts
-  scripts/
-    *.maki                    ← Compiled MAKI bytecode
-```
-
-#### MAKI Scripts — The Compatibility Challenge
-
-MAKI is a compiled scripting language that controls dynamic behaviour: updating text displays, animating sliders, handling interactions beyond simple button actions. Original MAKI source (`.m` files) is rarely distributed with skins — only the compiled `.maki` bytecode.
-
-**RetroAmp's approach:** Replace MAKI with TypeScript/React. Rather than reimplementing the MAKI VM (a substantial reverse-engineering effort with diminishing returns), RetroAmp provides equivalent behaviour through its React rendering layer. Simple scripts (text updates, slider positioning, play/pause icons) are handled natively by the skin renderer. Complex custom scripts won't be compatible, but the vast majority of modern skins use only standard MAKI patterns.
-
-This means RetroAmp's modern skin support is **layout-compatible but not script-compatible** — a skin's visual design, window layout, and image assets all work, but custom scripted interactions may not. This is an acceptable tradeoff: layout is what makes a skin look right, and scripting is what makes exotic interactions work. Most users care about the former.
-
-### Skin Detection and Switching
-
-When a skin is loaded, RetroAmp checks for the presence of `skin.xml`:
-
-- **`skin.xml` present** → Modern skin. Parse the WasabiXML manifest, load PNG/JPG assets, apply the XML layout engine.
-- **`skin.xml` absent, BMP files present** → Classic skin. Parse BMP sprite sheets, apply the fixed canvas renderer.
-
-The user sees no difference in the loading experience — drag a skin file onto the player and it renders correctly regardless of format. The skin browser shows both types mixed together, with a small badge indicating "Classic" or "Modern".
-
-### Why Support Both
-
-Classic skins have the nostalgia and the library (65,000+ on the Winamp Skin Museum). Modern skins have the design flexibility (resizable windows, library panels, custom layouts). Supporting both means RetroAmp is the only player that can load the entire Winamp skin ecosystem — a significant differentiator and a compelling reason for the skinning community to adopt it.
-
-The two rendering engines share no code but share the same Rust backend (audio engine, playlist, window manager). A classic skin and a modern skin call the same Tauri commands — the difference is entirely in how the frontend renders the UI.
-
 ## Architecture
 
 ```
@@ -286,8 +210,8 @@ The two rendering engines share no code but share the same Rust backend (audio e
 ├──────────┬──────────┬──────────┬────────────────────┤
 │ Window   │ Playlist │  Skin    │   Audio Engine      │
 │ Manager  │ Manager  │  Loader  │   ┌──────────────┐ │
-│ Create/  │ Tracks   │ .wsz +   │   │Source Router │ │
-│ show/    │ Sequence │ WasabiXML│   │(AudioSource  │ │
+│ Create/  │ Tracks   │ .wsz     │   │Source Router │ │
+│ show/    │ Sequence │ parser   │   │(AudioSource  │ │
 │ hide     │ Queue    │ parser   │   │ trait)       │ │
 │ persist  │ Auto-    │          │   ├───┬─────┬────┤ │
 │ state    │ advance  │          │   │Loc│Spot │Rad │ │
@@ -774,4 +698,4 @@ Include a clear statement in the README and About screen that RetroAmp is an ind
 
 ---
 
-*RetroAmp design document. Last updated: 24 March 2026.*
+*RetroAmp design document. Last updated: 25 March 2026.*

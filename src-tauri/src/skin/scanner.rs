@@ -81,13 +81,7 @@ fn scan_recursive(dir: &Path, results: &mut Vec<SkinInfo>) {
 }
 
 /// Check whether a directory contains a classic (BMP-based) skin.
-/// Directories with skin.xml are modern skins and are skipped.
 fn is_classic_skin(dir: &Path) -> bool {
-    // Modern skins have skin.xml — skip them.
-    if dir.join("skin.xml").exists() || dir.join("Skin.xml").exists() {
-        return false;
-    }
-
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_lowercase();
