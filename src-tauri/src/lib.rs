@@ -40,8 +40,23 @@ pub fn run() {
 
     let engine = Arc::new(engine);
     let playlist_manager = Arc::new(Mutex::new(PlaylistManager::new()));
-    let eq_settings = Arc::new(Mutex::new(EqSettings::default()));
-    let window_manager = WindowManager::new();
+    // Load persisted EQ settings from config, falling back to defaults.
+    let saved_eq = {
+        let cfg = config::AppConfig::load();
+        EqSettings {
+            gains: cfg.eq.gains,
+            enabled: cfg.eq.enabled,
+            preamp: cfg.eq.preamp,
+        }
+    };
+    engine.set_eq(saved_eq.clone());
+    let eq_settings = Arc::new(Mutex::new(saved_eq));
+    // Load saved UI layout. Apply saved scale if present.
+    let saved_ui = config::AppConfig::load().ui;
+    let mut window_manager = WindowManager::new();
+    if let Some(scale) = saved_ui.scale {
+        window_manager.set_scale(scale);
+    }
 
     let database = match Database::open() {
         Ok(db) => Arc::new(Mutex::new(db)),
@@ -113,8 +128,13 @@ pub fn run() {
             .visible(true)
             .build()?;
 
-            // Report what the compositor actually gave us.
+            // Apply saved main window position (X11/Windows/macOS; no-op on Wayland).
             if let Some(win) = app.get_webview_window("main") {
+                if let (Some(x), Some(y)) = (saved_ui.main.x, saved_ui.main.y) {
+                    let _ = win.set_position(tauri::Position::Physical(
+                        tauri::PhysicalPosition::new(x, y),
+                    ));
+                }
                 let actual = win.inner_size().unwrap_or_default();
                 let sf = win.scale_factor().unwrap_or(1.0);
                 eprintln!(
@@ -123,9 +143,94 @@ pub fn run() {
                 );
             }
 
+            // Restore previously-open panel windows.
+            let panels_to_restore: Vec<(WindowId, &config::WindowLayoutEntry)> = [
+                (WindowId::Equalizer, &saved_ui.equalizer),
+                (WindowId::Playlist, &saved_ui.playlist),
+            ]
+            .into_iter()
+            .filter(|(_, entry)| entry.visible == Some(true))
+            .collect();
+
+            for (id, entry) in panels_to_restore {
+                let label = id.label();
+                let url = id.url_path();
+                let resizable = id.resizable();
+
+                // Mark visible in the window manager.
+                if let Ok(mut wm) = app.state::<std::sync::Mutex<WindowManager>>().lock() {
+                    wm.set_visible(id, true);
+                }
+
+                // Derive default size from main window.
+                let (main_w, main_h) = app
+                    .get_webview_window("main")
+                    .and_then(|win| {
+                        let size = win.inner_size().ok()?;
+                        let sf = win.scale_factor().ok().unwrap_or(1.0);
+                        Some((size.width as f64 / sf, size.height as f64 / sf))
+                    })
+                    .unwrap_or((w, h));
+
+                let win_w = if resizable { entry.width.unwrap_or(main_w) } else { main_w };
+                let win_h = if resizable {
+                    entry.height.unwrap_or(main_h * 2.0)
+                } else {
+                    main_h
+                };
+
+                let mut builder = tauri::WebviewWindowBuilder::new(
+                    app,
+                    label,
+                    tauri::WebviewUrl::App(url.into()),
+                )
+                .title(format!("RetroAmp — {label}"))
+                .inner_size(win_w, win_h)
+                .decorations(false)
+                .resizable(true)
+                .visible(true)
+                .skip_taskbar(true);
+
+                if !resizable {
+                    builder = builder
+                        .min_inner_size(win_w, win_h)
+                        .max_inner_size(win_w, win_h);
+                }
+
+                if let (Some(x), Some(y)) = (entry.x, entry.y) {
+                    builder = builder.position(x as f64, y as f64);
+                }
+
+                // parent() takes ownership and may fail — handle both paths.
+                let build_result = if let Some(main_win) = app.get_webview_window("main") {
+                    match builder.parent(&main_win) {
+                        Ok(b) => b.build(),
+                        Err(_) => { continue; }
+                    }
+                } else {
+                    builder.build()
+                };
+
+                match build_result {
+                    Ok(_) => eprintln!("[retroamp] restored window: {label} ({win_w}x{win_h})"),
+                    Err(e) => eprintln!("[retroamp] failed to restore {label}: {e}"),
+                }
+            }
+
             Ok(())
         })
         .on_window_event(|window, event| {
+            // Save window layout before the main window closes.
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                if window.label() == "main" {
+                    if let Some(wm) = window.try_state::<Mutex<WindowManager>>() {
+                        if let Ok(wm) = wm.lock() {
+                            commands::save_window_layout(window.app_handle(), &wm);
+                        }
+                    }
+                }
+            }
+
             if let tauri::WindowEvent::Destroyed = event {
                 let label = window.label();
 
@@ -172,6 +277,9 @@ pub fn run() {
             commands::seek,
             commands::get_eq,
             commands::set_eq,
+            commands::save_eq_preset,
+            commands::get_eq_presets,
+            commands::delete_eq_preset,
             commands::set_volume,
             commands::set_balance,
             // Playlist

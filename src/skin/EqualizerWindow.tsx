@@ -66,6 +66,13 @@ interface EqSettings {
   preamp: number;
 }
 
+interface EqPresetEntry {
+  id: number;
+  name: string;
+  gains: number[];
+  preamp: number;
+}
+
 interface Props {
   skin: SkinData;
   scale: number;
@@ -99,15 +106,42 @@ export default function EqualizerWindow({ skin }: Props) {
   const dragging = useRef<{ sliderIndex: number } | null>(null);
   const [presetsMenu, setPresetsMenu] = useState<{ x: number; y: number } | null>(null);
   const [eqContextMenu, setEqContextMenu] = useState<{ x: number; y: number } | null>(null);
+  const [customPresets, setCustomPresets] = useState<EqPresetEntry[]>([]);
+  const [saveDialog, setSaveDialog] = useState(false);
+  const [presetName, setPresetName] = useState("");
+  const saveInputRef = useRef<HTMLInputElement>(null);
 
-  // Fetch current EQ settings on mount.
+  // Fetch current EQ settings and custom presets on mount.
   useEffect(() => {
     invoke<EqSettings>("get_eq").then(setSettings).catch(console.error);
+    invoke<EqPresetEntry[]>("get_eq_presets").then(setCustomPresets).catch(console.error);
   }, []);
 
   const applySettings = useCallback((newSettings: EqSettings) => {
     setSettings(newSettings);
     invoke("set_eq", { settings: newSettings });
+  }, []);
+
+  const savePreset = useCallback((name: string) => {
+    if (!name.trim()) return;
+    invoke<EqPresetEntry>("save_eq_preset", {
+      name: name.trim(),
+      gains: settings.gains,
+      preamp: settings.preamp,
+    }).then((entry) => {
+      setCustomPresets((prev) => {
+        const filtered = prev.filter((p) => p.name !== entry.name);
+        return [...filtered, entry].sort((a, b) =>
+          a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
+        );
+      });
+    }).catch(console.error);
+  }, [settings]);
+
+  const deletePreset = useCallback((name: string) => {
+    invoke("delete_eq_preset", { name }).then(() => {
+      setCustomPresets((prev) => prev.filter((p) => p.name !== name));
+    }).catch(console.error);
   }, []);
 
   // -- EQ graph rendering (small canvas) --
@@ -465,6 +499,16 @@ export default function EqualizerWindow({ skin }: Props) {
           onMouseDown={(e) => e.stopPropagation()}
         >
           <PresetItem
+            label="Save Preset..."
+            hoverBg={ps.selectedbg}
+            onClick={() => {
+              setPresetsMenu(null);
+              setPresetName("");
+              setSaveDialog(true);
+              setTimeout(() => saveInputRef.current?.focus(), 50);
+            }}
+          />
+          <PresetItem
             label="Reset (Flat)"
             hoverBg={ps.selectedbg}
             onClick={() => {
@@ -484,6 +528,47 @@ export default function EqualizerWindow({ skin }: Props) {
               }}
             />
           ))}
+          {customPresets.length > 0 && (
+            <>
+              <div style={{ height: 1, background: ps.selectedbg, margin: "4px 0" }} />
+              <div style={{ padding: "2px 12px", opacity: 0.6, fontSize: 10, userSelect: "none" }}>
+                Custom Presets
+              </div>
+              {customPresets.map((p) => (
+                <div
+                  key={p.id}
+                  style={{ display: "flex", alignItems: "center", padding: "0 4px 0 0" }}
+                >
+                  <PresetItem
+                    label={p.name}
+                    hoverBg={ps.selectedbg}
+                    onClick={() => {
+                      applySettings({ ...settings, gains: [...p.gains], preamp: p.preamp });
+                      setPresetsMenu(null);
+                    }}
+                    style={{ flex: 1 }}
+                  />
+                  <div
+                    title="Delete preset"
+                    style={{
+                      cursor: "pointer",
+                      padding: "2px 6px",
+                      opacity: 0.5,
+                      fontSize: 10,
+                    }}
+                    onMouseEnter={(e) => ((e.target as HTMLElement).style.opacity = "1")}
+                    onMouseLeave={(e) => ((e.target as HTMLElement).style.opacity = "0.5")}
+                    onMouseDown={(e) => {
+                      e.stopPropagation();
+                      deletePreset(p.name);
+                    }}
+                  >
+                    ✕
+                  </div>
+                </div>
+              ))}
+            </>
+          )}
         </div>,
         document.body,
       )}
@@ -508,14 +593,98 @@ export default function EqualizerWindow({ skin }: Props) {
           ] satisfies MenuEntry[]}
         />
       )}
+
+      {/* Save preset dialog */}
+      {saveDialog && createPortal(
+        <div
+          style={{
+            position: "fixed", inset: 0, zIndex: 2000,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            background: "rgba(0,0,0,0.5)",
+          }}
+          onMouseDown={() => setSaveDialog(false)}
+        >
+          <div
+            style={{
+              background: ps.normalbg,
+              border: `1px solid ${ps.selectedbg}`,
+              padding: 16,
+              fontFamily: `"${ps.font}", system-ui, sans-serif`,
+              fontSize: 13,
+              color: ps.normal,
+              minWidth: 260,
+              boxShadow: "2px 2px 12px rgba(0,0,0,0.6)",
+            }}
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div style={{ marginBottom: 8, fontWeight: "bold" }}>Save Preset</div>
+            <input
+              ref={saveInputRef}
+              type="text"
+              placeholder="Preset name..."
+              value={presetName}
+              onChange={(e) => setPresetName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && presetName.trim()) {
+                  savePreset(presetName);
+                  setSaveDialog(false);
+                } else if (e.key === "Escape") {
+                  setSaveDialog(false);
+                }
+              }}
+              style={{
+                width: "100%",
+                padding: "6px 8px",
+                border: `1px solid ${ps.selectedbg}`,
+                background: ps.selectedbg,
+                color: ps.normal,
+                fontFamily: "inherit",
+                fontSize: "inherit",
+                outline: "none",
+                boxSizing: "border-box",
+              }}
+            />
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
+              <button
+                style={{
+                  background: ps.selectedbg, color: ps.normal,
+                  border: `1px solid ${ps.normal}40`, padding: "4px 16px",
+                  cursor: "pointer", fontFamily: "inherit", fontSize: "inherit",
+                }}
+                onClick={() => setSaveDialog(false)}
+              >
+                Cancel
+              </button>
+              <button
+                style={{
+                  background: ps.selectedbg, color: ps.normal,
+                  border: `1px solid ${ps.normal}40`, padding: "4px 16px",
+                  cursor: "pointer", fontFamily: "inherit", fontSize: "inherit",
+                  opacity: presetName.trim() ? 1 : 0.4,
+                }}
+                disabled={!presetName.trim()}
+                onClick={() => {
+                  savePreset(presetName);
+                  setSaveDialog(false);
+                }}
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
     </div>
   );
 }
 
-function PresetItem({ label, onClick, hoverBg }: { label: string; onClick: () => void; hoverBg: string }) {
+function PresetItem({ label, onClick, hoverBg, style }: {
+  label: string; onClick: () => void; hoverBg: string; style?: React.CSSProperties;
+}) {
   return (
     <div
-      style={{ padding: "5px 12px", cursor: "pointer" }}
+      style={{ padding: "5px 12px", cursor: "pointer", ...style }}
       onMouseEnter={(e) => ((e.target as HTMLElement).style.background = hoverBg)}
       onMouseLeave={(e) => ((e.target as HTMLElement).style.background = "transparent")}
       onMouseDown={(e) => {

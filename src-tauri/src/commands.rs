@@ -13,7 +13,7 @@ use crate::audio::eq::EqSettings;
 use crate::audio::fft::FftData;
 use crate::audio::local::LocalFileSource;
 use crate::audio::source::AudioSource;
-use crate::db::{Database, SkinCatalogEntry};
+use crate::db::{Database, EqPresetEntry, SkinCatalogEntry};
 use crate::playlist::manager::{PlaylistManager, PlaylistState};
 use crate::skin::loader::SkinContents;
 use crate::skin::scanner::SkinInfo;
@@ -67,8 +67,47 @@ pub fn set_eq(
 ) {
     engine.set_eq(settings.clone());
     if let Ok(mut s) = eq_settings.lock() {
-        *s = settings;
+        *s = settings.clone();
     }
+
+    // Persist to config (best-effort).
+    let mut cfg = crate::config::AppConfig::load();
+    cfg.eq = crate::config::EqConfig {
+        gains: settings.gains,
+        enabled: settings.enabled,
+        preamp: settings.preamp,
+    };
+    let _ = cfg.save();
+}
+
+// -- EQ preset commands --
+
+#[tauri::command]
+pub fn save_eq_preset(
+    database: State<'_, Arc<Mutex<Database>>>,
+    name: String,
+    gains: [f32; 10],
+    preamp: f32,
+) -> Result<EqPresetEntry, String> {
+    let db = database.lock().map_err(|e| e.to_string())?;
+    db.save_eq_preset(&name, &gains, preamp)
+}
+
+#[tauri::command]
+pub fn get_eq_presets(
+    database: State<'_, Arc<Mutex<Database>>>,
+) -> Result<Vec<EqPresetEntry>, String> {
+    let db = database.lock().map_err(|e| e.to_string())?;
+    db.get_eq_presets()
+}
+
+#[tauri::command]
+pub fn delete_eq_preset(
+    database: State<'_, Arc<Mutex<Database>>>,
+    name: String,
+) -> Result<(), String> {
+    let db = database.lock().map_err(|e| e.to_string())?;
+    db.delete_eq_preset(&name)
 }
 
 #[tauri::command]
@@ -254,6 +293,47 @@ pub fn playlist_clear(
     })
 }
 
+// -- Window layout persistence --
+
+/// Capture the current window layout (visibility, positions, sizes) and save
+/// to config. Called on toggle, scale change, and app exit. Position reads
+/// are best-effort — on Wayland `outer_position()` may return (0,0).
+pub fn save_window_layout(app: &AppHandle, wm: &WindowManager) {
+    use crate::config::WindowLayoutEntry;
+
+    let mut cfg = crate::config::AppConfig::load();
+    cfg.ui.scale = Some(wm.scale());
+
+    let capture = |label: &str, visible: bool, resizable: bool| -> WindowLayoutEntry {
+        let mut entry = WindowLayoutEntry {
+            visible: Some(visible),
+            ..Default::default()
+        };
+        if let Some(win) = app.get_webview_window(label) {
+            // Position (logical). On Wayland this may silently return (0,0).
+            if let Ok(pos) = win.outer_position() {
+                entry.x = Some(pos.x);
+                entry.y = Some(pos.y);
+            }
+            // Size (logical, from physical / scale_factor).
+            if resizable {
+                if let Ok(size) = win.inner_size() {
+                    let sf = win.scale_factor().unwrap_or(1.0);
+                    entry.width = Some(size.width as f64 / sf);
+                    entry.height = Some(size.height as f64 / sf);
+                }
+            }
+        }
+        entry
+    };
+
+    cfg.ui.main = capture("main", true, false);
+    cfg.ui.equalizer = capture("equalizer", wm.is_visible(WindowId::Equalizer), false);
+    cfg.ui.playlist = capture("playlist", wm.is_visible(WindowId::Playlist), true);
+
+    let _ = cfg.save();
+}
+
 // -- Window commands --
 
 /// Toggle a panel window (playlist, equalizer). Creates the window if it
@@ -288,6 +368,16 @@ pub async fn toggle_window(
             existing.hide().map_err(|e| e.to_string())?;
         }
     } else if should_show {
+        // Check for saved layout for this window.
+        let saved = {
+            let cfg = crate::config::AppConfig::load();
+            match window_id {
+                WindowId::Equalizer => cfg.ui.equalizer,
+                WindowId::Playlist => cfg.ui.playlist,
+                _ => Default::default(),
+            }
+        };
+
         // Derive panel size from the main window's actual logical dimensions
         // so all panels share exactly the same width. We convert the main
         // window's physical inner_size back to logical using its scale_factor.
@@ -304,9 +394,13 @@ pub async fn toggle_window(
                 (width as f64 * s, height as f64 * s)
             });
 
-        let w = main_w;
-        // EQ: same height as main. Playlist: 2x the main height.
-        let h = if resizable { main_h * 2.0 } else { main_h };
+        // Use saved size for resizable windows, otherwise derive from main.
+        let w = if resizable { saved.width.unwrap_or(main_w) } else { main_w };
+        let h = if resizable {
+            saved.height.unwrap_or(main_h * 2.0)
+        } else {
+            main_h
+        };
 
         eprintln!("[retroamp] creating window: label={label} size={w}x{h} (main={main_w}x{main_h})");
 
@@ -326,6 +420,11 @@ pub async fn toggle_window(
             builder = builder.min_inner_size(w, h).max_inner_size(w, h);
         }
 
+        // Apply saved position (works on X11/Windows/macOS, ignored on Wayland).
+        if let (Some(x), Some(y)) = (saved.x, saved.y) {
+            builder = builder.position(x as f64, y as f64);
+        }
+
         // Set the main window as parent so closing main closes everything.
         if let Some(main_win) = app.get_webview_window("main") {
             builder = builder.parent(&main_win)
@@ -339,7 +438,9 @@ pub async fn toggle_window(
             })?;
     }
 
+    // Persist window layout after every toggle.
     let wm = window_manager.lock().map_err(|e| e.to_string())?;
+    save_window_layout(&app, &wm);
     Ok(wm.get_states())
 }
 
@@ -355,21 +456,25 @@ pub fn get_window_states(
 /// Cycle the global UI scale (1x → 2x → 3x → 1x).
 #[tauri::command]
 pub async fn cycle_scale(
+    app: AppHandle,
     window_manager: State<'_, Mutex<WindowManager>>,
 ) -> Result<WindowStates, String> {
     let mut wm = window_manager.lock().map_err(|e| e.to_string())?;
     wm.cycle_scale();
+    save_window_layout(&app, &wm);
     Ok(wm.get_states())
 }
 
 /// Set a specific scale value.
 #[tauri::command]
 pub async fn set_scale(
+    app: AppHandle,
     window_manager: State<'_, Mutex<WindowManager>>,
     scale: u32,
 ) -> Result<WindowStates, String> {
     let mut wm = window_manager.lock().map_err(|e| e.to_string())?;
     wm.set_scale(scale);
+    save_window_layout(&app, &wm);
     Ok(wm.get_states())
 }
 

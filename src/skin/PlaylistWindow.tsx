@@ -59,11 +59,88 @@ export default function PlaylistWindow({ skin }: Props) {
     track_count: 0,
   });
   const trackListRef = useRef<HTMLDivElement>(null);
+  const scrollTrackRef = useRef<HTMLDivElement>(null);
+  const [scrollRatio, setScrollRatio] = useState(0); // 0..1
+  const [scrollNeeded, setScrollNeeded] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const dragStartRef = useRef<{ startY: number; startRatio: number } | null>(null);
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
 
   const ps = skin.playlistStyle;
   const sp = skin.sprites;
+
+  // Scroll handle height: native 18px, scaled. Track area height computed on the fly.
+  const HANDLE_HEIGHT = 18 * s;
+  const HANDLE_WIDTH = 8 * s;
+
+  // Keep scroll ratio in sync when the track list scrolls (wheel, auto-scroll, etc.)
+  const syncScrollRatio = useCallback(() => {
+    const el = trackListRef.current;
+    if (!el) return;
+    const maxScroll = el.scrollHeight - el.clientHeight;
+    setScrollNeeded(maxScroll > 0);
+    if (maxScroll <= 0) { setScrollRatio(0); return; }
+    setScrollRatio(el.scrollTop / maxScroll);
+  }, []);
+
+  // Sync on every poll update and mount.
+  useEffect(() => {
+    syncScrollRatio();
+  }, [playlist.tracks.length, syncScrollRatio]);
+
+  // Scroll handle drag handlers.
+  useEffect(() => {
+    if (!dragging) return;
+    const onMouseMove = (e: MouseEvent) => {
+      const ref = dragStartRef.current;
+      const track = scrollTrackRef.current;
+      const list = trackListRef.current;
+      if (!ref || !track || !list) return;
+      const trackHeight = track.clientHeight;
+      const usable = trackHeight - HANDLE_HEIGHT;
+      if (usable <= 0) return;
+      const dy = e.clientY - ref.startY;
+      const newRatio = Math.max(0, Math.min(1, ref.startRatio + dy / usable));
+      setScrollRatio(newRatio);
+      list.scrollTop = newRatio * (list.scrollHeight - list.clientHeight);
+    };
+    const onMouseUp = () => setDragging(false);
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+    return () => {
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+    };
+  }, [dragging, HANDLE_HEIGHT]);
+
+  /** Start dragging the scroll handle. */
+  const onHandleMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragStartRef.current = { startY: e.clientY, startRatio: scrollRatio };
+    setDragging(true);
+  }, [scrollRatio]);
+
+  /** Click on the scroll track (above/below handle) → page scroll. */
+  const onTrackClick = useCallback((e: React.MouseEvent) => {
+    const track = scrollTrackRef.current;
+    const list = trackListRef.current;
+    if (!track || !list) return;
+    const rect = track.getBoundingClientRect();
+    const clickY = e.clientY - rect.top;
+    const trackHeight = track.clientHeight;
+    const usable = trackHeight - HANDLE_HEIGHT;
+    if (usable <= 0) return;
+    const handleTop = scrollRatio * usable;
+    const pageAmount = list.clientHeight;
+    if (clickY < handleTop) {
+      list.scrollTop = Math.max(0, list.scrollTop - pageAmount);
+    } else if (clickY > handleTop + HANDLE_HEIGHT) {
+      list.scrollTop = Math.min(list.scrollHeight - list.clientHeight, list.scrollTop + pageAmount);
+    }
+    syncScrollRatio();
+  }, [scrollRatio, HANDLE_HEIGHT, syncScrollRatio]);
 
   // Poll playlist state.
   useEffect(() => {
@@ -193,6 +270,7 @@ export default function PlaylistWindow({ skin }: Props) {
         {/* Track list area */}
         <div
           ref={trackListRef}
+          onScroll={syncScrollRatio}
           style={{
             flex: 1,
             overflowY: "auto",
@@ -251,7 +329,37 @@ export default function PlaylistWindow({ skin }: Props) {
           )}
         </div>
 
-        <div style={{ width: 20 * s, flexShrink: 0, ...bgTile("PL_RIGHT_TILE", "repeat-y") }} />
+        {/* Right edge with scrollbar */}
+        <div
+          ref={scrollTrackRef}
+          onClick={onTrackClick}
+          style={{
+            width: 20 * s,
+            flexShrink: 0,
+            position: "relative",
+            ...bgTile("PL_RIGHT_TILE", "repeat-y"),
+          }}
+        >
+          {scrollNeeded && (
+            <div
+              onMouseDown={onHandleMouseDown}
+              style={{
+                position: "absolute",
+                left: (20 * s - HANDLE_WIDTH) / 2,
+                top: scrollRatio * ((scrollTrackRef.current?.clientHeight ?? 0) - HANDLE_HEIGHT),
+                width: HANDLE_WIDTH,
+                height: HANDLE_HEIGHT,
+                backgroundImage: sp[dragging ? "PL_SCROLL_HANDLE_SELECTED" : "PL_SCROLL_HANDLE"]
+                  ? `url(${sp[dragging ? "PL_SCROLL_HANDLE_SELECTED" : "PL_SCROLL_HANDLE"]})`
+                  : "none",
+                backgroundSize: "100% 100%",
+                backgroundRepeat: "no-repeat",
+                imageRendering: "pixelated" as any,
+                cursor: "pointer",
+              }}
+            />
+          )}
+        </div>
       </div>
 
       {/* ── BOTTOM BAR (38*s px) ── */}

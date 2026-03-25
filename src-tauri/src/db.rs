@@ -13,7 +13,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{params, Connection};
 use serde::Serialize;
 
+use serde::Deserialize;
+
 use crate::skin::scanner::SkinInfo;
+
+/// A custom EQ preset stored in the database.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EqPresetEntry {
+    pub id: i64,
+    pub name: String,
+    pub gains: [f32; 10],
+    pub preamp: f32,
+}
 
 /// A row from the skin_catalog table — metadata only, no thumbnail blob.
 #[derive(Debug, Clone, Serialize)]
@@ -77,7 +88,14 @@ impl Database {
 
                 CREATE INDEX IF NOT EXISTS idx_skin_path ON skin_catalog(path);
                 CREATE INDEX IF NOT EXISTS idx_skin_favorite ON skin_catalog(is_favorite);
-                CREATE INDEX IF NOT EXISTS idx_skin_last_used ON skin_catalog(last_used);",
+                CREATE INDEX IF NOT EXISTS idx_skin_last_used ON skin_catalog(last_used);
+
+                CREATE TABLE IF NOT EXISTS eq_presets (
+                    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name    TEXT NOT NULL UNIQUE,
+                    gains   TEXT NOT NULL,
+                    preamp  REAL NOT NULL DEFAULT 0.0
+                );",
             )
             .map_err(|e| format!("failed to initialize database schema: {e}"))?;
         Ok(())
@@ -112,7 +130,9 @@ impl Database {
                 "SELECT id, name, path, is_archive, skin_type,
                         (thumbnail IS NOT NULL) as has_thumb,
                         is_favorite, last_used, use_count
-                 FROM skin_catalog ORDER BY name COLLATE NOCASE",
+                 FROM skin_catalog
+                 ORDER BY CASE WHEN name = 'RetroAmp Default' THEN 0 ELSE 1 END,
+                          name COLLATE NOCASE",
             )
             .map_err(|e| format!("query error: {e}"))?;
 
@@ -286,6 +306,66 @@ impl Database {
         self.conn
             .execute("DELETE FROM skin_catalog WHERE path = ?1", params![path])
             .map_err(|e| format!("delete error: {e}"))?;
+        Ok(())
+    }
+
+    // -- EQ preset methods --
+
+    /// Save a custom EQ preset. If a preset with the same name exists, it is
+    /// updated in place; otherwise a new row is inserted.
+    pub fn save_eq_preset(&self, name: &str, gains: &[f32; 10], preamp: f32) -> Result<EqPresetEntry, String> {
+        let gains_json = serde_json::to_string(gains)
+            .map_err(|e| format!("failed to serialize gains: {e}"))?;
+
+        self.conn
+            .execute(
+                "INSERT INTO eq_presets (name, gains, preamp)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(name) DO UPDATE SET gains = excluded.gains, preamp = excluded.preamp",
+                params![name, gains_json, preamp],
+            )
+            .map_err(|e| format!("failed to save EQ preset: {e}"))?;
+
+        // Return the saved entry.
+        let id = self.conn.last_insert_rowid();
+        Ok(EqPresetEntry {
+            id,
+            name: name.to_string(),
+            gains: *gains,
+            preamp,
+        })
+    }
+
+    /// Get all custom EQ presets, ordered by name.
+    pub fn get_eq_presets(&self) -> Result<Vec<EqPresetEntry>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, name, gains, preamp FROM eq_presets ORDER BY name COLLATE NOCASE")
+            .map_err(|e| format!("query error: {e}"))?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                let gains_json: String = row.get(2)?;
+                let gains: [f32; 10] = serde_json::from_str(&gains_json)
+                    .unwrap_or([0.0; 10]);
+                Ok(EqPresetEntry {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    gains,
+                    preamp: row.get(3)?,
+                })
+            })
+            .map_err(|e| format!("query error: {e}"))?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("row error: {e}"))
+    }
+
+    /// Delete a custom EQ preset by name.
+    pub fn delete_eq_preset(&self, name: &str) -> Result<(), String> {
+        self.conn
+            .execute("DELETE FROM eq_presets WHERE name = ?1", params![name])
+            .map_err(|e| format!("failed to delete EQ preset: {e}"))?;
         Ok(())
     }
 

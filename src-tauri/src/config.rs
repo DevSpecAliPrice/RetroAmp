@@ -19,6 +19,9 @@ pub struct AppConfig {
     pub skins: SkinConfig,
 
     #[serde(default)]
+    pub eq: EqConfig,
+
+    #[serde(default)]
     pub playback: PlaybackConfig,
 
     #[serde(default)]
@@ -37,13 +40,74 @@ pub struct SkinConfig {
     pub last_skin_path: Option<String>,
 }
 
+/// Equalizer settings persisted across restarts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EqConfig {
+    /// Per-band gains in dB (10 bands). Defaults to all zeros.
+    #[serde(default)]
+    pub gains: [f32; 10],
+    /// Whether the EQ is enabled.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Preamp gain in dB.
+    #[serde(default)]
+    pub preamp: f32,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for EqConfig {
+    fn default() -> Self {
+        Self {
+            gains: [0.0; 10],
+            enabled: true,
+            preamp: 0.0,
+        }
+    }
+}
+
 /// Playback-related preferences (future use).
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct PlaybackConfig {}
 
-/// UI-related preferences (future use).
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct UiConfig {}
+/// UI layout persisted across restarts — window visibility, positions, sizes.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct UiConfig {
+    /// Saved UI scale (1, 2, 3). If absent, auto-detected from screen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<u32>,
+
+    #[serde(default)]
+    pub main: WindowLayoutEntry,
+
+    #[serde(default)]
+    pub equalizer: WindowLayoutEntry,
+
+    #[serde(default)]
+    pub playlist: WindowLayoutEntry,
+}
+
+/// Saved layout for a single window.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct WindowLayoutEntry {
+    /// Whether this window was open when the app last closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible: Option<bool>,
+    /// Outer X position (logical pixels). Ignored on Wayland.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x: Option<i32>,
+    /// Outer Y position (logical pixels). Ignored on Wayland.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub y: Option<i32>,
+    /// Inner width (logical pixels) — only meaningful for resizable windows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<f64>,
+    /// Inner height (logical pixels) — only meaningful for resizable windows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<f64>,
+}
 
 impl AppConfig {
     /// Load config from disk, returning defaults if the file doesn't exist yet.

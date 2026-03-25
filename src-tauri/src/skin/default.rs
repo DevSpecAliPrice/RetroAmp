@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 
 pub const SKIN_NAME: &str = "RetroAmp Default";
 
+/// Bump this when the embedded skin assets change, so cached copies get refreshed.
+const SKIN_VERSION: &str = "2";
+
 /// Files embedded at compile time from `assets/default-skin/`.
 const FILES: &[(&str, &[u8])] = &[
     ("main.bmp", include_bytes!("../../../assets/default-skin/main.bmp")),
@@ -19,6 +22,8 @@ const FILES: &[(&str, &[u8])] = &[
     ("shufrep.bmp", include_bytes!("../../../assets/default-skin/shufrep.bmp")),
     ("monoster.bmp", include_bytes!("../../../assets/default-skin/monoster.bmp")),
     ("text.bmp", include_bytes!("../../../assets/default-skin/text.bmp")),
+    ("eqmain.bmp", include_bytes!("../../../assets/default-skin/eqmain.bmp")),
+    ("pledit.bmp", include_bytes!("../../../assets/default-skin/pledit.bmp")),
     ("viscolor.txt", include_bytes!("../../../assets/default-skin/viscolor.txt")),
     ("pledit.txt", include_bytes!("../../../assets/default-skin/pledit.txt")),
 ];
@@ -28,21 +33,28 @@ pub fn default_skin_dir() -> Option<PathBuf> {
     dirs::config_dir().map(|c| c.join("retroamp").join("skins").join(SKIN_NAME))
 }
 
-/// Ensure the default skin exists on disk. Writes it if missing.
-/// Called once at startup — cheap no-op if the directory already exists.
+/// Ensure the default skin exists on disk and is up-to-date.
+/// Called once at startup — cheap no-op if already current.
 pub fn ensure_default_skin() {
     let Some(dir) = default_skin_dir() else {
         return;
     };
 
-    // If the directory already has a main.bmp, assume it's intact.
-    if dir.join("main.bmp").exists() {
+    let version_file = dir.join(".skin_version");
+
+    // Check if the cached version matches the embedded version.
+    let cached_version = std::fs::read_to_string(&version_file).unwrap_or_default();
+    if cached_version.trim() == SKIN_VERSION && dir.join("main.bmp").exists() {
         return;
     }
 
     if let Err(e) = write_default_skin(&dir) {
         log::warn!("failed to bootstrap default skin: {e}");
+        return;
     }
+
+    // Write the version marker so we don't rewrite next time.
+    let _ = std::fs::write(&version_file, SKIN_VERSION);
 }
 
 fn write_default_skin(dir: &Path) -> Result<(), String> {
