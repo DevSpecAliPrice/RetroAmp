@@ -20,12 +20,16 @@ import { showContextMenu, type NativeMenuEntry } from "../nativeMenu";
 /** X positions for each slider (preamp + 10 bands) in native px. */
 const SLIDER_X = [21, 78, 96, 114, 132, 150, 168, 186, 204, 222, 240];
 const SLIDER_Y = 38;
-const FRAME_W = 15;
-const FRAME_H = 65;
+/** Visible frame content dimensions (excluding 1px separator lines). */
+const FRAME_W = 14;
+const FRAME_H = 64;
+/** Stride between frames in sprite sheet (content + 1px separator). */
+const FRAME_STRIDE_X = 15;
+const FRAME_STRIDE_Y = 65;
 const FRAME_COLS = 14;
 const THUMB_W = 11;
 const THUMB_H = 11;
-const SLIDER_TRAVEL = FRAME_H - THUMB_H; // 54px native thumb travel
+const SLIDER_TRAVEL = FRAME_H - THUMB_H - 1; // 52px native thumb travel (1px top margin)
 
 const GRAPH_X = 86;
 const GRAPH_Y = 17;
@@ -359,12 +363,13 @@ export default function EqualizerWindow({ skin, scale }: Props) {
     const row = Math.floor(frameIndex / FRAME_COLS);
     const sheetUri = sp["EQ_SLIDER_BACKGROUND"];
     if (!sheetUri) return {};
-    // The sprite sheet is 209x129 native. Each frame is 15x65.
-    // CSS background-position offsets into the scaled sheet.
+    // The sprite sheet is 209x129 native. Frames are 14x64 content with 1px
+    // separator lines between them (stride 15x65). Position by stride so
+    // each frame aligns correctly; the container clips to 14x64 content.
     return {
       backgroundImage: `url(${sheetUri})`,
       backgroundSize: `${209 * s}px ${129 * s}px`,
-      backgroundPosition: `${-col * FRAME_W * s}px ${-row * FRAME_H * s}px`,
+      backgroundPosition: `${-col * FRAME_STRIDE_X * s}px ${-row * FRAME_STRIDE_Y * s}px`,
       backgroundRepeat: "no-repeat" as const,
     };
   };
@@ -504,6 +509,7 @@ export default function EqualizerWindow({ skin, scale }: Props) {
             top: SLIDER_Y * s,
             width: FRAME_W * s,
             height: FRAME_H * s,
+            overflow: "hidden",
           }}>
             {/* Slider background frame */}
             <div style={{
@@ -514,7 +520,7 @@ export default function EqualizerWindow({ skin, scale }: Props) {
             {/* Thumb */}
             <div style={{
               position: "absolute",
-              left: 2 * s,
+              left: 1 * s,
               top: thumbY * s,
               width: THUMB_W * s,
               height: THUMB_H * s,

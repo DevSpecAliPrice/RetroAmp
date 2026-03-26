@@ -173,7 +173,8 @@ export const EQMAIN: Sprite[] = [
   { name: "EQ_AUTO_BUTTON_DEPRESSED", x: 154, y: 119, width: 32, height: 12 },
   { name: "EQ_AUTO_BUTTON_SELECTED", x: 95, y: 119, width: 32, height: 12 },
   { name: "EQ_AUTO_BUTTON_SELECTED_DEPRESSED", x: 213, y: 119, width: 32, height: 12 },
-  // Slider sprite sheet (28 frames: 14 columns × 2 rows, each 15×65)
+  // Slider sprite sheet (28 frames: 14 columns × 2 rows, each 14×64 content
+  // with 1px separator lines — stride 15×65, total 209×129)
   { name: "EQ_SLIDER_BACKGROUND", x: 13, y: 164, width: 209, height: 129 },
   // Slider thumb
   { name: "EQ_SLIDER_THUMB", x: 0, y: 164, width: 11, height: 11 },
