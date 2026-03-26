@@ -34,6 +34,8 @@ pub struct Track {
     pub metadata_loaded: bool,
     /// Whether this track is a stream (URL-based) rather than a local file.
     pub is_stream: bool,
+    /// For radio streams, the station name to display in the playlist.
+    pub station_name: Option<String>,
 }
 
 impl Track {
@@ -57,12 +59,17 @@ impl Track {
             bitrate: None,
             metadata_loaded: false,
             is_stream,
+            station_name: None,
         }
     }
 
     /// The display name for the classic Winamp single-column playlist.
-    /// Format: "Artist - Title", falling back to the filename or hostname.
+    /// For radio streams, always shows the station name.
+    /// For local files: "Artist - Title", falling back to the filename.
     pub fn display_name(&self) -> String {
+        if let Some(name) = &self.station_name {
+            return name.clone();
+        }
         match (&self.artist, &self.title) {
             (Some(artist), Some(title)) => format!("{artist} - {title}"),
             (None, Some(title)) => title.clone(),

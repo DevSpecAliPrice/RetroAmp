@@ -5,7 +5,61 @@ import type { SkinData } from "../skin/parser";
 import SkinBrowser from "./SkinBrowser";
 import "./settings.css";
 
-type Tab = "skins" | "general";
+type Tab = "skins" | "shortcuts" | "general";
+
+const SHORTCUTS: { section: string; bindings: [string, string][] }[] = [
+  {
+    section: "Transport",
+    bindings: [
+      ["Z", "Previous track"],
+      ["X", "Play"],
+      ["C", "Pause / Resume"],
+      ["V", "Stop"],
+      ["B", "Next track"],
+    ],
+  },
+  {
+    section: "Playback",
+    bindings: [
+      ["R", "Cycle repeat mode"],
+      ["S", "Toggle shuffle"],
+      ["\u2190 / \u2192", "Seek \u00b15 seconds"],
+      ["\u2191 / \u2193", "Volume \u00b12%"],
+    ],
+  },
+  {
+    section: "Application",
+    bindings: [
+      ["L", "Open files"],
+      ["Ctrl+P", "Preferences"],
+    ],
+  },
+];
+
+function ShortcutsTab({ colors }: { colors: { normal: string; current: string; normalbg: string; selectedbg: string } }) {
+  return (
+    <div className="shortcuts-tab">
+      {SHORTCUTS.map((group) => (
+        <div key={group.section} className="shortcuts-group">
+          <div className="shortcuts-group-title" style={{ color: colors.current }}>
+            {group.section}
+          </div>
+          {group.bindings.map(([key, action]) => (
+            <div key={key} className="shortcuts-row">
+              <kbd className="shortcuts-key" style={{ background: colors.selectedbg, color: colors.current }}>
+                {key}
+              </kbd>
+              <span className="shortcuts-action" style={{ color: colors.normal }}>{action}</span>
+            </div>
+          ))}
+        </div>
+      ))}
+      <div className="shortcuts-note" style={{ color: colors.normal }}>
+        Shortcuts are disabled while typing in text fields.
+      </div>
+    </div>
+  );
+}
 
 interface Props {
   skin: SkinData | null;
@@ -103,6 +157,16 @@ export default function SettingsWindow({ skin, scale }: Props) {
               Skins
             </button>
             <button
+              className={`settings-tab ${activeTab === "shortcuts" ? "active" : ""}`}
+              style={{
+                color: activeTab === "shortcuts" ? ps.current : ps.normal,
+                borderBottomColor: activeTab === "shortcuts" ? ps.current : "transparent",
+              }}
+              onClick={() => setActiveTab("shortcuts")}
+            >
+              Shortcuts
+            </button>
+            <button
               className={`settings-tab ${activeTab === "general" ? "active" : ""}`}
               style={{
                 color: activeTab === "general" ? ps.current : ps.normal,
@@ -115,6 +179,7 @@ export default function SettingsWindow({ skin, scale }: Props) {
           </div>
           <div className="settings-content" style={{ color: ps.normal }}>
             {activeTab === "skins" && <SkinBrowser playlistStyle={ps} />}
+            {activeTab === "shortcuts" && <ShortcutsTab colors={ps} />}
             {activeTab === "general" && (
               <div className="settings-placeholder" style={{ color: ps.normal }}>
                 General settings coming soon.

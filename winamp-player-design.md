@@ -274,7 +274,7 @@ Components are grouped by the phase in which they are built. Phase 1 is the foun
 | Source abstraction trait (`AudioSource`) | Medium | Common interface — local files implement first; radio, Spotify slot in later |
 | Rust EQ (biquad filters) | Medium | 10-band EQ in the audio pipeline, not WebView |
 | Rust FFT → WebView bridge | Medium | `rustfft` computes spectrum data, pushed to frontend via Tauri events |
-| Gapless playback | Medium | Pre-decode next track; must be in the engine from the start |
+| Gapless playback | Medium | **Deferred — final polish.** Current sequential playback has a ~60-550ms gap between tracks (auto-advance poll + file open/decode). Acceptable for most listening; only audible on continuous albums (live recordings, DJ mixes). True gapless requires pre-decoding the next track while the current one plays, swapping sources at the sample level, handling sample rate mismatches at boundaries, and resolving shuffle-mode peek limitations. `PlaylistManager::peek_next()` exists but is unused — it was scaffolded for this. Touches the audio thread's single-source invariant, so must be done carefully to avoid introducing glitches. |
 | Skin parser + sprite renderer | High | Forked from Webamp; extracted as standalone modules |
 | Skin colour derivation | Low–Medium | Sample known pixels → CSS custom properties |
 | Skin extension spec (gen_colours.ini) | Low | Parser reads optional extension files from `.wsz` |

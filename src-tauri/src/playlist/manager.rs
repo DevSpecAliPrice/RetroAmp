@@ -183,11 +183,11 @@ impl PlaylistManager {
         }
     }
 
-    /// Set a display-friendly name for a track (used for radio streams where
-    /// the URL isn't meaningful as a display name).
+    /// Set the station name for a radio stream track. This name is always
+    /// used for display in the playlist, regardless of ICY metadata updates.
     pub fn update_display_name(&mut self, id: TrackId, name: &str) {
         if let Some(track) = self.tracks.iter_mut().find(|t| t.id == id) {
-            track.title = Some(name.to_string());
+            track.station_name = Some(name.to_string());
         }
     }
 

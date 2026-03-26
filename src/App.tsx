@@ -122,12 +122,107 @@ function App() {
     return () => clearInterval(interval);
   }, []);
 
-  // Keyboard shortcut: Ctrl+P to open preferences.
+  // Keyboard shortcuts — Winamp-classic bindings.
   useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.ctrlKey && e.key === "p") {
-        e.preventDefault();
-        invoke("open_settings");
+    const handleKeyDown = async (e: KeyboardEvent) => {
+      // Don't intercept when typing in an input or textarea.
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+
+      // Ctrl shortcuts
+      if (e.ctrlKey) {
+        if (e.key === "p") {
+          e.preventDefault();
+          invoke("open_settings");
+        }
+        return;
+      }
+      // Don't intercept Alt/Meta combos beyond what we handle.
+      if (e.altKey || e.metaKey) return;
+
+      switch (e.key) {
+        // Transport
+        case "z":
+          e.preventDefault();
+          invoke("previous_track");
+          break;
+        case "x":
+          e.preventDefault();
+          invoke("resume");
+          break;
+        case "c": {
+          e.preventDefault();
+          const st = await invoke<{ state: string }>("get_status");
+          if (st.state === "Playing") invoke("pause");
+          else invoke("resume");
+          break;
+        }
+        case "v":
+          e.preventDefault();
+          invoke("stop");
+          break;
+        case "b":
+          e.preventDefault();
+          invoke("next_track");
+          break;
+
+        // Open files
+        case "l": {
+          e.preventDefault();
+          const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
+          const selected = await openDialog({
+            multiple: true,
+            filters: [{ name: "Audio", extensions: ["mp3", "flac", "ogg", "wav", "aac", "m4a", "m3u", "m3u8", "pls"] }],
+          });
+          if (selected) {
+            const paths = Array.isArray(selected) ? selected : [selected];
+            invoke("playlist_add_files", { paths });
+          }
+          break;
+        }
+
+        // Modes
+        case "r":
+          e.preventDefault();
+          invoke("cycle_repeat");
+          break;
+        case "s":
+          e.preventDefault();
+          invoke("toggle_shuffle");
+          break;
+
+        // Volume: Up/Down arrows ±2%
+        case "ArrowUp": {
+          e.preventDefault();
+          const st = await invoke<{ volume: number }>("get_status");
+          invoke("set_volume", { volume: Math.min(1.0, st.volume + 0.02) });
+          break;
+        }
+        case "ArrowDown": {
+          e.preventDefault();
+          const st = await invoke<{ volume: number }>("get_status");
+          invoke("set_volume", { volume: Math.max(0.0, st.volume - 0.02) });
+          break;
+        }
+
+        // Seek: Left/Right arrows ±5s
+        case "ArrowLeft": {
+          e.preventDefault();
+          const st = await invoke<{ position: number | null; can_seek: boolean }>("get_status");
+          if (st.can_seek && st.position != null) {
+            invoke("seek", { positionSecs: Math.max(0, st.position - 5) });
+          }
+          break;
+        }
+        case "ArrowRight": {
+          e.preventDefault();
+          const st = await invoke<{ position: number | null; duration: number | null; can_seek: boolean }>("get_status");
+          if (st.can_seek && st.position != null) {
+            const max = st.duration ?? Infinity;
+            invoke("seek", { positionSecs: Math.min(max, st.position + 5) });
+          }
+          break;
+        }
       }
     };
     window.addEventListener("keydown", handleKeyDown);
