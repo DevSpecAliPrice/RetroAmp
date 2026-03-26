@@ -6,6 +6,7 @@ pub mod config;
 pub mod db;
 pub mod media_controls;
 pub mod playlist;
+pub mod tray;
 pub mod radio_browser;
 pub mod skin;
 pub mod window;
@@ -271,6 +272,12 @@ pub fn run() {
                     Ok(_) => eprintln!("[retroamp] restored window: {label} ({win_w}x{win_h})"),
                     Err(e) => eprintln!("[retroamp] failed to restore {label}: {e}"),
                 }
+            }
+
+            // Set up system tray (non-fatal).
+            match tray::setup(app.handle()) {
+                Ok(()) => log::info!("system tray initialized"),
+                Err(e) => log::warn!("failed to set up system tray: {e}"),
             }
 
             Ok(())
