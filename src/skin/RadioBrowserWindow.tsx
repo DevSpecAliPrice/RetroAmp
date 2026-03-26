@@ -9,7 +9,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { SkinData } from "./parser";
-import ContextMenu, { type MenuEntry } from "./ContextMenu";
+import { showContextMenu, type NativeMenuEntry } from "../nativeMenu";
 
 // -- Interfaces --
 
@@ -85,12 +85,6 @@ export default function RadioBrowserWindow({ skin, scale }: Props) {
   const [dragging, setDragging] = useState(false);
   const dragStartRef = useRef<{ startY: number; startRatio: number } | null>(null);
 
-  // Context menu
-  const [contextMenu, setContextMenu] = useState<{
-    x: number; y: number;
-    station?: RadioStation;
-    apiStation?: ApiStation;
-  } | null>(null);
 
   // Currently playing URL (for highlighting)
   const [, setPlayingUrl] = useState<string | null>(null);
@@ -386,35 +380,46 @@ export default function RadioBrowserWindow({ skin, scale }: Props) {
     backgroundSize: dir === "repeat-y" ? "100% auto" : "auto 100%",
   });
 
-  // -- Context menu builder --
+  // -- Native context menu helpers --
 
-  const buildContextMenu = (station?: RadioStation, apiStation?: ApiStation): MenuEntry[] => {
-    if (apiStation) {
-      return [
-        { label: "Play", onClick: () => playStation(apiStation.url_resolved || apiStation.url, apiStation.name) },
-        { label: "Save to Library", onClick: () => saveApiStation(apiStation) },
-        "separator",
-        { label: "Copy URL", onClick: () => navigator.clipboard.writeText(apiStation.url_resolved || apiStation.url) },
-      ];
+  const openStationContextMenu = useCallback(async (station: RadioStation, mx: number, my: number) => {
+    const items: NativeMenuEntry[] = [
+      { type: "item", id: "play", label: "Play" },
+      { type: "item", id: "add_playlist", label: "Add to Playlist" },
+      { type: "separator" },
+      { type: "item", id: "toggle_fav", label: station.is_favorite ? "Unfavorite" : "Favorite" },
+      { type: "item", id: "toggle_hide", label: station.is_hidden ? "Unhide" : "Hide" },
+      { type: "separator" },
+      { type: "item", id: "copy_url", label: "Copy URL" },
+    ];
+    if (station.source !== "default") {
+      items.push({ type: "separator" });
+      items.push({ type: "item", id: "delete", label: "Delete" });
     }
-    if (station) {
-      return [
-        { label: "Play", onClick: () => playStation(station.url, station.name) },
-        { label: "Add to Playlist", onClick: () => invoke("playlist_add_url", { url: station.url, name: station.name }) },
-        "separator",
-        { label: station.is_favorite ? "Unfavorite" : "Favorite", onClick: () => toggleFavorite(station.url) },
-        ...(station.is_hidden
-          ? [{ label: "Unhide", onClick: () => unhideStation(station.url) } as MenuEntry]
-          : [{ label: "Hide", onClick: () => hideStation(station.url) } as MenuEntry]),
-        "separator",
-        { label: "Copy URL", onClick: () => navigator.clipboard.writeText(station.url) },
-        ...(station.source !== "default"
-          ? ["separator" as MenuEntry, { label: "Delete", onClick: () => deleteStation(station.url) } as MenuEntry]
-          : []),
-      ];
-    }
-    return [];
-  };
+
+    const sel = await showContextMenu(items, mx, my);
+    if (!sel) return;
+    if (sel === "play") playStation(station.url, station.name);
+    else if (sel === "add_playlist") invoke("playlist_add_url", { url: station.url, name: station.name });
+    else if (sel === "toggle_fav") toggleFavorite(station.url);
+    else if (sel === "toggle_hide") station.is_hidden ? unhideStation(station.url) : hideStation(station.url);
+    else if (sel === "copy_url") navigator.clipboard.writeText(station.url);
+    else if (sel === "delete") deleteStation(station.url);
+  }, [playStation, toggleFavorite, unhideStation, hideStation, deleteStation]);
+
+  const openApiStationContextMenu = useCallback(async (apiStation: ApiStation, mx: number, my: number) => {
+    const sel = await showContextMenu([
+      { type: "item", id: "play", label: "Play" },
+      { type: "item", id: "save", label: "Save to Library" },
+      { type: "separator" },
+      { type: "item", id: "copy_url", label: "Copy URL" },
+    ], mx, my);
+    if (!sel) return;
+    const url = apiStation.url_resolved || apiStation.url;
+    if (sel === "play") playStation(url, apiStation.name);
+    else if (sel === "save") saveApiStation(apiStation);
+    else if (sel === "copy_url") navigator.clipboard.writeText(url);
+  }, [playStation, saveApiStation]);
 
   // -- Render station row --
 
@@ -424,7 +429,7 @@ export default function RadioBrowserWindow({ skin, scale }: Props) {
       onDoubleClick={() => playStation(station.url, station.name)}
       onContextMenu={(e) => {
         e.preventDefault(); e.stopPropagation();
-        setContextMenu({ x: e.clientX, y: e.clientY, station });
+        openStationContextMenu(station, e.clientX, e.clientY);
       }}
       style={{
         display: "flex", alignItems: "center", gap: 4 * s,
@@ -475,7 +480,7 @@ export default function RadioBrowserWindow({ skin, scale }: Props) {
       onDoubleClick={() => playStation(station.url_resolved || station.url, station.name)}
       onContextMenu={(e) => {
         e.preventDefault(); e.stopPropagation();
-        setContextMenu({ x: e.clientX, y: e.clientY, apiStation: station });
+        openApiStationContextMenu(station, e.clientX, e.clientY);
       }}
       style={{
         display: "flex", alignItems: "center", gap: 4 * s,
@@ -536,7 +541,7 @@ export default function RadioBrowserWindow({ skin, scale }: Props) {
         overflow: "hidden", userSelect: "none", imageRendering: "pixelated" as any,
       }}
       onMouseDown={handleEdgeMouseDown}
-      onContextMenu={(e) => { e.preventDefault(); setContextMenu({ x: e.clientX, y: e.clientY }); }}
+      onContextMenu={(e) => { e.preventDefault(); }}
     >
       {/* ── TOP BAR ── */}
       <div
@@ -834,16 +839,6 @@ export default function RadioBrowserWindow({ skin, scale }: Props) {
         </div>
       </div>
 
-      {/* Context menu */}
-      {contextMenu && (
-        <ContextMenu
-          x={contextMenu.x}
-          y={contextMenu.y}
-          colors={ps}
-          onClose={() => setContextMenu(null)}
-          items={buildContextMenu(contextMenu.station, contextMenu.apiStation)}
-        />
-      )}
     </div>
   );
 }

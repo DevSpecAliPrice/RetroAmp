@@ -3,6 +3,7 @@
 pub mod audio;
 pub mod commands;
 pub mod config;
+pub mod context_menu;
 pub mod db;
 pub mod library;
 pub mod media_controls;
@@ -424,6 +425,8 @@ pub fn run() {
             commands::set_playlist_add_mode,
             commands::get_library_columns,
             commands::set_library_columns,
+            // Context menu
+            context_menu::show_context_menu,
         ])
         .run(tauri::generate_context!())
         .expect("error while running RetroAmp");

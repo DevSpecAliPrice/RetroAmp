@@ -13,7 +13,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { SkinData } from "./parser";
-import ContextMenu, { type MenuEntry } from "./ContextMenu";
+import { showContextMenu } from "../nativeMenu";
 
 // -- Interfaces --
 
@@ -65,8 +65,6 @@ export default function PlaylistWindow({ skin, scale }: Props) {
   const [scrollNeeded, setScrollNeeded] = useState(false);
   const [dragging, setDragging] = useState(false);
   const dragStartRef = useRef<{ startY: number; startRatio: number } | null>(null);
-
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
 
   const ps = skin.playlistStyle;
   const sp = skin.sprites;
@@ -226,9 +224,22 @@ export default function PlaylistWindow({ skin, scale }: Props) {
       }}
       onMouseDown={handleEdgeMouseDown}
       onMouseMove={handleMouseMove}
-      onContextMenu={(e) => {
+      onContextMenu={async (e) => {
         e.preventDefault();
-        setContextMenu({ x: e.clientX, y: e.clientY });
+        const selected = await showContextMenu([
+          { type: "item", id: "add_files", label: "Add Files..." },
+          { type: "item", id: "radio_browser", label: "Radio Browser..." },
+          { type: "item", id: "remove_selected", label: "Remove Selected" },
+          { type: "item", id: "clear_playlist", label: "Clear Playlist" },
+          { type: "separator" },
+          { type: "item", id: "preferences", label: "Preferences..." },
+        ], e.clientX, e.clientY);
+        if (!selected) return;
+        if (selected === "add_files") openFiles();
+        else if (selected === "radio_browser") invoke("toggle_window", { windowId: "RadioBrowser" });
+        else if (selected === "remove_selected") invoke("playlist_remove_selected");
+        else if (selected === "clear_playlist") invoke("playlist_clear");
+        else if (selected === "preferences") invoke("open_settings");
       }}
     >
       {/* ── TOP BAR (20*s px) ── */}
@@ -431,22 +442,6 @@ export default function PlaylistWindow({ skin, scale }: Props) {
         </div>
       </div>
 
-      {contextMenu && (
-        <ContextMenu
-          x={contextMenu.x}
-          y={contextMenu.y}
-          colors={ps}
-          onClose={() => setContextMenu(null)}
-          items={[
-            { label: "Add Files...", onClick: openFiles },
-            { label: "Radio Browser...", onClick: () => invoke("toggle_window", { windowId: "RadioBrowser" }) },
-            { label: "Remove Selected", onClick: () => invoke("playlist_remove_selected") },
-            { label: "Clear Playlist", onClick: () => invoke("playlist_clear") },
-            "separator",
-            { label: "Preferences...", onClick: () => invoke("open_settings") },
-          ] satisfies MenuEntry[]}
-        />
-      )}
     </div>
   );
 }

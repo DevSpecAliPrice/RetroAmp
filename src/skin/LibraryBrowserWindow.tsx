@@ -14,7 +14,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { SkinData } from "./parser";
-import ContextMenu, { type MenuEntry } from "./ContextMenu";
+import { showContextMenu, type NativeMenuEntry } from "../nativeMenu";
 
 // -- Interfaces --
 
@@ -152,15 +152,6 @@ export default function LibraryBrowserWindow({ skin, scale }: Props) {
   // Scan
   const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null);
 
-  // Context menus
-  const [contextMenu, setContextMenu] = useState<{
-    x: number; y: number;
-    track?: LibraryTrack;
-    artistName?: string;
-    albumName?: string;
-    genreName?: string;
-  } | null>(null);
-  const [columnMenu, setColumnMenu] = useState<{ x: number; y: number } | null>(null);
 
   // Scrollbar
   const listRef = useRef<HTMLDivElement>(null);
@@ -268,19 +259,31 @@ export default function LibraryBrowserWindow({ skin, scale }: Props) {
 
   // -- Selection --
 
+  // Build a combined list of all visible track IDs for range selection.
+  // In the tracks tab this is `tracks`; in browse tabs it includes expanded tracks.
+  const visibleTrackIds = useMemo(() => {
+    if (tab === "tracks") return tracks.map((t) => t.id);
+    // In browse tabs, the expanded tracks are the only selectable rows.
+    return expandedTracks.map((t) => t.id);
+  }, [tab, tracks, expandedTracks]);
+
   const handleTrackClick = useCallback((track: LibraryTrack, e: React.MouseEvent) => {
     if (e.button !== 0) return;
+    // Prevent browser text selection on shift+click and stop propagation
+    // so the parent's clear-selection handler doesn't fire.
+    e.preventDefault();
+    e.stopPropagation();
+
     setSelectedIds((prev) => {
       const next = new Set(prev);
       if (e.ctrlKey || e.metaKey) {
         if (next.has(track.id)) next.delete(track.id); else next.add(track.id);
       } else if (e.shiftKey && lastClickedId.current != null) {
-        const ids = tracks.map((t) => t.id);
-        const from = ids.indexOf(lastClickedId.current);
-        const to = ids.indexOf(track.id);
+        const from = visibleTrackIds.indexOf(lastClickedId.current);
+        const to = visibleTrackIds.indexOf(track.id);
         if (from >= 0 && to >= 0) {
           const [lo, hi] = from < to ? [from, to] : [to, from];
-          for (let i = lo; i <= hi; i++) next.add(ids[i]);
+          for (let i = lo; i <= hi; i++) next.add(visibleTrackIds[i]);
         }
       } else {
         next.clear(); next.add(track.id);
@@ -288,7 +291,7 @@ export default function LibraryBrowserWindow({ skin, scale }: Props) {
       return next;
     });
     lastClickedId.current = track.id;
-  }, [tracks]);
+  }, [visibleTrackIds]);
 
   // -- Playlist actions --
 
@@ -377,45 +380,78 @@ export default function LibraryBrowserWindow({ skin, scale }: Props) {
     });
   }, []);
 
-  // -- Context menu --
+  // -- Native context menu helpers --
 
-  const buildContextMenu = useCallback((): MenuEntry[] => {
-    const ctx = contextMenu;
-    if (!ctx) return [];
-    const items: MenuEntry[] = [];
+  const openTrackContextMenu = useCallback(async (track: LibraryTrack, mx: number, my: number) => {
+    const selected = selectedIds.size > 1 && selectedIds.has(track.id)
+      ? tracks.filter((t) => selectedIds.has(t.id))
+      : [track];
+    const label = selected.length > 1 ? `${selected.length} tracks` : (track.title ?? "Unknown");
 
-    if (ctx.track) {
-      const track = ctx.track;
-      const selected = selectedIds.size > 1 && selectedIds.has(track.id)
-        ? tracks.filter((t) => selectedIds.has(t.id))
-        : [track];
-      const label = selected.length > 1 ? `${selected.length} tracks` : (track.title ?? "Unknown");
+    const items: NativeMenuEntry[] = [
+      { type: "item", id: "play", label: `Play "${label}"` },
+      { type: "item", id: "add", label: "Add to Playlist" },
+      { type: "separator" },
+      { type: "item", id: "reveal", label: "Show in File Manager" },
+      { type: "separator" },
+      {
+        type: "submenu", label: "Rating", items: [
+          ...([5, 4, 3, 2, 1] as const).map((r) => ({
+            type: "item" as const, id: `rate:${r}`, label: starStr(r),
+          })),
+          { type: "separator" },
+          { type: "item", id: "rate:0", label: "Clear rating" },
+        ],
+      },
+    ];
 
-      items.push({ label: `Play "${label}"`, onClick: () => doPlayTracks(selected) });
-      items.push({ label: "Add to Playlist", onClick: () => doAddTracks(selected) });
-      items.push("separator");
-      items.push({ label: "Show in File Manager", onClick: () => invoke("reveal_in_file_manager", { path: track.path }) });
-      items.push("separator");
-      items.push({ label: "Rate:", disabled: true, onClick: () => {} });
-      for (let r = 5; r >= 0; r--) {
-        items.push({
-          label: r === 0 ? "  Clear rating" : "  " + starStr(r),
-          onClick: () => { for (const t of selected) setRating(t.path, r); },
-        });
-      }
-    } else if (ctx.artistName) {
-      items.push({ label: `Play all by "${ctx.artistName}"`, onClick: () => playByArtist(ctx.artistName!) });
-      items.push({ label: "Add all to Playlist", onClick: () => addArtist(ctx.artistName!) });
-    } else if (ctx.albumName) {
-      items.push({ label: `Play album "${ctx.albumName}"`, onClick: () => playByAlbum(ctx.albumName!) });
-      items.push({ label: "Add album to Playlist", onClick: () => addAlbum(ctx.albumName!) });
-    } else if (ctx.genreName) {
-      items.push({ label: `Play all "${ctx.genreName}"`, onClick: () => playByGenre(ctx.genreName!) });
-      items.push({ label: "Add all to Playlist", onClick: () => addGenre(ctx.genreName!) });
+    const sel = await showContextMenu(items, mx, my);
+    if (!sel) return;
+    if (sel === "play") doPlayTracks(selected);
+    else if (sel === "add") doAddTracks(selected);
+    else if (sel === "reveal") invoke("reveal_in_file_manager", { path: track.path });
+    else if (sel.startsWith("rate:")) {
+      const r = parseInt(sel.slice(5), 10);
+      for (const t of selected) setRating(t.path, r);
     }
-    return items;
-  }, [contextMenu, selectedIds, tracks, doPlayTracks, doAddTracks, setRating,
-      playByArtist, addArtist, playByAlbum, addAlbum, playByGenre, addGenre]);
+  }, [selectedIds, tracks, doPlayTracks, doAddTracks, setRating]);
+
+  const openArtistContextMenu = useCallback(async (artistName: string, mx: number, my: number) => {
+    const sel = await showContextMenu([
+      { type: "item", id: "play", label: `Play all by "${artistName}"` },
+      { type: "item", id: "add", label: "Add all to Playlist" },
+    ], mx, my);
+    if (sel === "play") playByArtist(artistName);
+    else if (sel === "add") addArtist(artistName);
+  }, [playByArtist, addArtist]);
+
+  const openAlbumContextMenu = useCallback(async (albumName: string, mx: number, my: number) => {
+    const sel = await showContextMenu([
+      { type: "item", id: "play", label: `Play album "${albumName}"` },
+      { type: "item", id: "add", label: "Add album to Playlist" },
+    ], mx, my);
+    if (sel === "play") playByAlbum(albumName);
+    else if (sel === "add") addAlbum(albumName);
+  }, [playByAlbum, addAlbum]);
+
+  const openGenreContextMenu = useCallback(async (genreName: string, mx: number, my: number) => {
+    const sel = await showContextMenu([
+      { type: "item", id: "play", label: `Play all "${genreName}"` },
+      { type: "item", id: "add", label: "Add all to Playlist" },
+    ], mx, my);
+    if (sel === "play") playByGenre(genreName);
+    else if (sel === "add") addGenre(genreName);
+  }, [playByGenre, addGenre]);
+
+  const openColumnMenu = useCallback(async (mx: number, my: number) => {
+    const items: NativeMenuEntry[] = ALL_COLUMNS.map((col) => ({
+      type: "item" as const,
+      id: `col:${col.key}`,
+      label: `${visibleCols.includes(col.key) ? "\u2713 " : "   "}${col.label}`,
+    }));
+    const sel = await showContextMenu(items, mx, my);
+    if (sel?.startsWith("col:")) toggleColumn(sel.slice(4));
+  }, [visibleCols, toggleColumn]);
 
   // -- Scrollbar --
 
@@ -479,7 +515,7 @@ export default function LibraryBrowserWindow({ skin, scale }: Props) {
         onContextMenu={(e) => {
           e.preventDefault(); e.stopPropagation();
           if (!selectedIds.has(track.id)) { setSelectedIds(new Set([track.id])); lastClickedId.current = track.id; }
-          setContextMenu({ x: e.clientX, y: e.clientY, track });
+          openTrackContextMenu(track, e.clientX, e.clientY);
         }}
         style={{
           display: "flex", padding: `${1 * s}px ${4 * s}px`,
@@ -586,7 +622,7 @@ export default function LibraryBrowserWindow({ skin, scale }: Props) {
             {/* Column headers (tracks tab) — right-click to toggle columns */}
             {tab === "tracks" && (
               <div style={{ display: "flex", padding: `0 ${4 * s}px`, flexShrink: 0, borderBottom: `1px solid ${ps.selectedbg}`, fontFamily: `"${ps.font}", Arial, sans-serif`, fontSize: tinyFont, color: ps.normal, opacity: 0.7, cursor: "pointer" }}
-                onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setColumnMenu({ x: e.clientX, y: e.clientY }); }}
+                onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); openColumnMenu(e.clientX, e.clientY); }}
               >
                 {columns.map((col) => (
                   <div key={col.key} onClick={() => col.sortKey && toggleSort(col.sortKey)}
@@ -606,7 +642,7 @@ export default function LibraryBrowserWindow({ skin, scale }: Props) {
               {tab === "artists" && filteredArtists.map((artist) => (
                 <div key={artist}>
                   <div data-row onDoubleClick={() => toggleExpand(artist, "artist")}
-                    onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setContextMenu({ x: e.clientX, y: e.clientY, artistName: artist }); }}
+                    onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); openArtistContextMenu(artist, e.clientX, e.clientY); }}
                     style={{ padding: `${2 * s}px ${4 * s}px`, height: ROW_HEIGHT * s, display: "flex", alignItems: "center", gap: 4 * s, color: expandedKey === artist ? ps.current : ps.normal, cursor: "default" }}>
                     <span style={{ fontSize: tinyFont, width: 8 * s, flexShrink: 0 }}>{expandedKey === artist ? "\u25be" : "\u25b8"}</span>
                     <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{artist}</span>
@@ -626,7 +662,7 @@ export default function LibraryBrowserWindow({ skin, scale }: Props) {
               {tab === "albums" && filteredAlbums.map((album) => (
                 <div key={album.album}>
                   <div data-row onDoubleClick={() => toggleExpand(album.album, "album")}
-                    onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setContextMenu({ x: e.clientX, y: e.clientY, albumName: album.album }); }}
+                    onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); openAlbumContextMenu(album.album, e.clientX, e.clientY); }}
                     style={{ padding: `${2 * s}px ${4 * s}px`, height: ROW_HEIGHT * s * 1.5, display: "flex", alignItems: "center", gap: 4 * s, color: expandedKey === album.album ? ps.current : ps.normal, cursor: "default" }}>
                     <span style={{ fontSize: tinyFont, width: 8 * s, flexShrink: 0 }}>{expandedKey === album.album ? "\u25be" : "\u25b8"}</span>
                     <div style={{ flex: 1, overflow: "hidden" }}>
@@ -648,7 +684,7 @@ export default function LibraryBrowserWindow({ skin, scale }: Props) {
               {tab === "genres" && filteredGenres.map((genre) => (
                 <div key={genre}>
                   <div data-row onDoubleClick={() => toggleExpand(genre, "genre")}
-                    onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setContextMenu({ x: e.clientX, y: e.clientY, genreName: genre }); }}
+                    onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); openGenreContextMenu(genre, e.clientX, e.clientY); }}
                     style={{ padding: `${2 * s}px ${4 * s}px`, height: ROW_HEIGHT * s, display: "flex", alignItems: "center", gap: 4 * s, color: expandedKey === genre ? ps.current : ps.normal, cursor: "default" }}>
                     <span style={{ fontSize: tinyFont, width: 8 * s, flexShrink: 0 }}>{expandedKey === genre ? "\u25be" : "\u25b8"}</span>
                     <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{genre}</span>
@@ -714,18 +750,6 @@ export default function LibraryBrowserWindow({ skin, scale }: Props) {
         </div>
       </div>
 
-      {/* Context menu */}
-      {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} colors={ps} onClose={() => setContextMenu(null)} items={buildContextMenu()} />}
-
-      {/* Column chooser menu */}
-      {columnMenu && (
-        <ContextMenu x={columnMenu.x} y={columnMenu.y} colors={ps} onClose={() => setColumnMenu(null)}
-          items={ALL_COLUMNS.map((col) => ({
-            label: `${visibleCols.includes(col.key) ? "\u2713 " : "   "}${col.label}`,
-            onClick: () => toggleColumn(col.key),
-          }))}
-        />
-      )}
     </div>
   );
 }

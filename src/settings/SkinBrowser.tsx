@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import ContextMenu, { type MenuEntry } from "../skin/ContextMenu";
+import { showContextMenu } from "../nativeMenu";
 
 interface SkinCatalogEntry {
   id: number;
@@ -35,7 +35,6 @@ export default function SkinBrowser({ playlistStyle: ps }: Props) {
   const [filter, setFilter] = useState("");
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
   const [loading, setLoading] = useState(true);
-  const [skinMenu, setSkinMenu] = useState<{ x: number; y: number; skin: SkinCatalogEntry } | null>(null);
 
   // Thumbnail cache: path -> data URI
   const [thumbnails, setThumbnails] = useState<Record<string, string>>({});
@@ -187,12 +186,24 @@ export default function SkinBrowser({ playlistStyle: ps }: Props) {
   };
 
   const handleSkinContextMenu = useCallback(
-    (e: React.MouseEvent, skin: SkinCatalogEntry) => {
+    async (e: React.MouseEvent, skin: SkinCatalogEntry) => {
       e.preventDefault();
       e.stopPropagation();
-      setSkinMenu({ x: e.clientX, y: e.clientY, skin });
+      const sel = await showContextMenu([
+        { type: "item", id: "apply", label: "Apply Skin" },
+        { type: "item", id: "toggle_fav", label: skin.is_favorite ? "Remove from Favorites" : "Add to Favorites" },
+        { type: "separator" },
+        { type: "item", id: "reveal", label: "Show in File Manager" },
+        { type: "separator" },
+        { type: "item", id: "delete", label: "Delete Skin" },
+      ], e.clientX, e.clientY);
+      if (!sel) return;
+      if (sel === "apply") applySkin(skin.path);
+      else if (sel === "toggle_fav") toggleFavorite(skin.path);
+      else if (sel === "reveal") revealSkin(skin.path);
+      else if (sel === "delete") deleteSkin(skin);
     },
-    []
+    [applySkin, toggleFavorite, revealSkin, deleteSkin]
   );
 
   const lowerFilter = filter.toLowerCase();
@@ -325,26 +336,6 @@ export default function SkinBrowser({ playlistStyle: ps }: Props) {
         playlistStyle={ps}
       />
 
-      {/* Per-skin context menu */}
-      {skinMenu && (
-        <ContextMenu
-          x={skinMenu.x}
-          y={skinMenu.y}
-          colors={ps}
-          onClose={() => setSkinMenu(null)}
-          items={[
-            { label: "Apply Skin", onClick: () => applySkin(skinMenu.skin.path) },
-            {
-              label: skinMenu.skin.is_favorite ? "Remove from Favorites" : "Add to Favorites",
-              onClick: () => toggleFavorite(skinMenu.skin.path),
-            },
-            "separator",
-            { label: "Show in File Manager", onClick: () => revealSkin(skinMenu.skin.path) },
-            "separator",
-            { label: "Delete Skin", onClick: () => deleteSkin(skinMenu.skin) },
-          ] satisfies MenuEntry[]}
-        />
-      )}
     </div>
   );
 }

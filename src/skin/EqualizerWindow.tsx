@@ -13,7 +13,7 @@ import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { SkinData } from "./parser";
-import ContextMenu, { type MenuEntry } from "./ContextMenu";
+import { showContextMenu, type NativeMenuEntry } from "../nativeMenu";
 
 // -- Native Winamp dimensions (before scaling) --
 
@@ -104,8 +104,6 @@ export default function EqualizerWindow({ skin, scale }: Props) {
   });
   const [pressed, setPressed] = useState<string | null>(null);
   const dragging = useRef<{ sliderIndex: number } | null>(null);
-  const [presetsMenu, setPresetsMenu] = useState<{ x: number; y: number } | null>(null);
-  const [eqContextMenu, setEqContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [customPresets, setCustomPresets] = useState<EqPresetEntry[]>([]);
   const [saveDialog, setSaveDialog] = useState(false);
   const [presetName, setPresetName] = useState("");
@@ -287,13 +285,67 @@ export default function EqualizerWindow({ skin, scale }: Props) {
     [settings, getNativePos, applySettings],
   );
 
-  // Close presets menu.
-  useEffect(() => {
-    if (!presetsMenu) return;
-    const close = () => setPresetsMenu(null);
-    const timer = setTimeout(() => window.addEventListener("mousedown", close), 0);
-    return () => { clearTimeout(timer); window.removeEventListener("mousedown", close); };
-  }, [presetsMenu]);
+  // Show native presets menu.
+  const openPresetsMenu = useCallback(async (mx: number, my: number) => {
+    const items: NativeMenuEntry[] = [
+      { type: "item", id: "save_preset", label: "Save Preset..." },
+      { type: "item", id: "reset_flat", label: "Reset (Flat)" },
+      { type: "separator" },
+      ...PRESETS.map((p) => ({
+        type: "item" as const, id: `preset:${p.name}`, label: p.name,
+      })),
+    ];
+
+    if (customPresets.length > 0) {
+      items.push({ type: "separator" });
+      items.push({
+        type: "submenu", label: "Custom Presets", items: customPresets.flatMap((p) => [
+          {
+            type: "submenu" as const, label: p.name, items: [
+              { type: "item" as const, id: `custom:${p.name}`, label: "Apply" },
+              { type: "item" as const, id: `delete_preset:${p.name}`, label: "Delete" },
+            ],
+          },
+        ]),
+      });
+    }
+
+    const selected = await showContextMenu(items, mx, my);
+    if (!selected) return;
+
+    if (selected === "save_preset") {
+      setPresetName(""); setSaveDialog(true);
+      setTimeout(() => saveInputRef.current?.focus(), 50);
+    } else if (selected === "reset_flat") {
+      applySettings({ ...settings, gains: [0,0,0,0,0,0,0,0,0,0], preamp: 0 });
+    } else if (selected.startsWith("preset:")) {
+      const name = selected.slice(7);
+      const p = PRESETS.find((pr) => pr.name === name);
+      if (p) applySettings({ ...settings, gains: [...p.gains], preamp: p.preamp });
+    } else if (selected.startsWith("custom:")) {
+      const name = selected.slice(7);
+      const p = customPresets.find((pr) => pr.name === name);
+      if (p) applySettings({ ...settings, gains: [...p.gains], preamp: p.preamp });
+    } else if (selected.startsWith("delete_preset:")) {
+      deletePreset(selected.slice(14));
+    }
+  }, [settings, customPresets, applySettings, deletePreset]);
+
+  // Show native EQ context menu.
+  const openEqContextMenu = useCallback(async (e: React.MouseEvent) => {
+    e.preventDefault();
+    const selected = await showContextMenu([
+      { type: "item", id: "toggle_eq", label: settings.enabled ? "Disable EQ" : "Enable EQ" },
+      { type: "item", id: "reset_flat", label: "Reset to Flat" },
+      { type: "separator" },
+      { type: "item", id: "preferences", label: "Preferences..." },
+    ], e.clientX, e.clientY);
+    if (!selected) return;
+
+    if (selected === "toggle_eq") applySettings({ ...settings, enabled: !settings.enabled });
+    else if (selected === "reset_flat") applySettings({ ...settings, gains: [0,0,0,0,0,0,0,0,0,0], preamp: 0 });
+    else if (selected === "preferences") invoke("open_settings");
+  }, [settings, applySettings]);
 
   // -- Sprite helpers --
 
@@ -343,10 +395,7 @@ export default function EqualizerWindow({ skin, scale }: Props) {
       onMouseDown={handleMouseDown}
       onDoubleClick={handleDoubleClick}
       onMouseUp={() => setPressed(null)}
-      onContextMenu={(e) => {
-        e.preventDefault();
-        setEqContextMenu({ x: e.clientX, y: e.clientY });
-      }}
+      onContextMenu={openEqContextMenu}
     >
       {/* 1) Full EQ background */}
       <div style={{
@@ -422,7 +471,7 @@ export default function EqualizerWindow({ skin, scale }: Props) {
         onMouseDown={(e) => {
           e.stopPropagation();
           setPressed("presets");
-          setPresetsMenu({ x: e.clientX, y: e.clientY });
+          openPresetsMenu(e.clientX, e.clientY);
         }}
       />
 
@@ -477,122 +526,6 @@ export default function EqualizerWindow({ skin, scale }: Props) {
         );
       })}
 
-      {/* Presets context menu */}
-      {presetsMenu && createPortal(
-        <div
-          style={{
-            position: "fixed",
-            left: presetsMenu.x,
-            top: presetsMenu.y,
-            background: ps.normalbg,
-            border: `1px solid ${ps.selectedbg}`,
-            padding: "4px 0",
-            zIndex: 1000,
-            fontFamily: `"${ps.font}", system-ui, sans-serif`,
-            fontSize: 12,
-            color: ps.normal,
-            minWidth: 160,
-            maxHeight: 400,
-            overflowY: "auto",
-            boxShadow: "2px 2px 8px rgba(0,0,0,0.5)",
-          }}
-          onMouseDown={(e) => e.stopPropagation()}
-        >
-          <PresetItem
-            label="Save Preset..."
-            hoverBg={ps.selectedbg}
-            onClick={() => {
-              setPresetsMenu(null);
-              setPresetName("");
-              setSaveDialog(true);
-              setTimeout(() => saveInputRef.current?.focus(), 50);
-            }}
-          />
-          <PresetItem
-            label="Reset (Flat)"
-            hoverBg={ps.selectedbg}
-            onClick={() => {
-              applySettings({ ...settings, gains: [0,0,0,0,0,0,0,0,0,0], preamp: 0 });
-              setPresetsMenu(null);
-            }}
-          />
-          <div style={{ height: 1, background: ps.selectedbg, margin: "4px 0" }} />
-          {PRESETS.map((p) => (
-            <PresetItem
-              key={p.name}
-              label={p.name}
-              hoverBg={ps.selectedbg}
-              onClick={() => {
-                applySettings({ ...settings, gains: [...p.gains], preamp: p.preamp });
-                setPresetsMenu(null);
-              }}
-            />
-          ))}
-          {customPresets.length > 0 && (
-            <>
-              <div style={{ height: 1, background: ps.selectedbg, margin: "4px 0" }} />
-              <div style={{ padding: "2px 12px", opacity: 0.6, fontSize: 10, userSelect: "none" }}>
-                Custom Presets
-              </div>
-              {customPresets.map((p) => (
-                <div
-                  key={p.id}
-                  style={{ display: "flex", alignItems: "center", padding: "0 4px 0 0" }}
-                >
-                  <PresetItem
-                    label={p.name}
-                    hoverBg={ps.selectedbg}
-                    onClick={() => {
-                      applySettings({ ...settings, gains: [...p.gains], preamp: p.preamp });
-                      setPresetsMenu(null);
-                    }}
-                    style={{ flex: 1 }}
-                  />
-                  <div
-                    title="Delete preset"
-                    style={{
-                      cursor: "pointer",
-                      padding: "2px 6px",
-                      opacity: 0.5,
-                      fontSize: 10,
-                    }}
-                    onMouseEnter={(e) => ((e.target as HTMLElement).style.opacity = "1")}
-                    onMouseLeave={(e) => ((e.target as HTMLElement).style.opacity = "0.5")}
-                    onMouseDown={(e) => {
-                      e.stopPropagation();
-                      deletePreset(p.name);
-                    }}
-                  >
-                    ✕
-                  </div>
-                </div>
-              ))}
-            </>
-          )}
-        </div>,
-        document.body,
-      )}
-
-      {eqContextMenu && (
-        <ContextMenu
-          x={eqContextMenu.x}
-          y={eqContextMenu.y}
-          colors={ps}
-          onClose={() => setEqContextMenu(null)}
-          items={[
-            {
-              label: settings.enabled ? "Disable EQ" : "Enable EQ",
-              onClick: () => applySettings({ ...settings, enabled: !settings.enabled }),
-            },
-            {
-              label: "Reset to Flat",
-              onClick: () => applySettings({ ...settings, gains: [0,0,0,0,0,0,0,0,0,0], preamp: 0 }),
-            },
-            "separator",
-            { label: "Preferences...", onClick: () => invoke("open_settings") },
-          ] satisfies MenuEntry[]}
-        />
-      )}
 
       {/* Save preset dialog */}
       {saveDialog && createPortal(
@@ -679,20 +612,3 @@ export default function EqualizerWindow({ skin, scale }: Props) {
   );
 }
 
-function PresetItem({ label, onClick, hoverBg, style }: {
-  label: string; onClick: () => void; hoverBg: string; style?: React.CSSProperties;
-}) {
-  return (
-    <div
-      style={{ padding: "5px 12px", cursor: "pointer", ...style }}
-      onMouseEnter={(e) => ((e.target as HTMLElement).style.background = hoverBg)}
-      onMouseLeave={(e) => ((e.target as HTMLElement).style.background = "transparent")}
-      onMouseDown={(e) => {
-        e.stopPropagation();
-        onClick();
-      }}
-    >
-      {label}
-    </div>
-  );
-}

@@ -20,6 +20,7 @@ import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { SkinData } from "./parser";
+import { showContextMenu, type NativeMenuEntry } from "../nativeMenu";
 import {
   CHAR_WIDTH,
   CHAR_HEIGHT,
@@ -162,7 +163,7 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
   const dragging = useRef<"volume" | "balance" | "posbar" | null>(null);
 
   // Shorthand for playlist style (used by context menu theming).
-  const ps = skin.playlistStyle;
+
 
   // Build the marquee text from current metadata.
   const meta = status.metadata;
@@ -829,27 +830,54 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
     [isShade, canvasH],
   );
 
-  // Right-click context menu.
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
-  const [recentSkins, setRecentSkins] = useState<RecentSkin[]>([]);
-  const [showSkins, setShowSkins] = useState(false);
-
-  const handleContextMenu = useCallback((e: React.MouseEvent) => {
+  // Right-click context menu (native OS menu).
+  const handleContextMenu = useCallback(async (e: React.MouseEvent) => {
     e.preventDefault();
-    setContextMenu({ x: e.clientX, y: e.clientY });
-    setShowSkins(false);
-    invoke<RecentSkin[]>("get_recent_skins", { limit: 5 })
-      .then(setRecentSkins)
-      .catch(console.error);
-  }, []);
 
-  // Close context menu on any click.
-  useEffect(() => {
-    if (!contextMenu) return;
-    const close = () => setContextMenu(null);
-    window.addEventListener("mousedown", close);
-    return () => window.removeEventListener("mousedown", close);
-  }, [contextMenu]);
+    // Fetch recent skins for the submenu.
+    let skinItems: NativeMenuEntry[] = [];
+    try {
+      const recent = await invoke<RecentSkin[]>("get_recent_skins", { limit: 5 });
+      skinItems = recent.map((s) => ({
+        type: "item" as const, id: `skin:${s.path}`, label: s.name,
+      }));
+    } catch { /* ignore */ }
+
+    const items: NativeMenuEntry[] = [
+      { type: "item", id: "toggle_playlist", label: "Toggle Playlist" },
+      { type: "item", id: "toggle_equalizer", label: "Toggle Equalizer" },
+      { type: "separator" },
+      { type: "item", id: "add_files", label: "Add Files..." },
+      { type: "item", id: "radio_browser", label: "Radio Browser..." },
+      { type: "item", id: "media_library", label: "Media Library..." },
+      { type: "separator" },
+      {
+        type: "submenu", label: "Skins", items: [
+          ...skinItems,
+          ...(skinItems.length > 0 ? [{ type: "separator" as const }] : []),
+          { type: "item" as const, id: "skins_browse", label: "Browse All..." },
+        ],
+      },
+      { type: "separator" },
+      { type: "item", id: "preferences", label: "Preferences..." },
+    ];
+
+    const selected = await showContextMenu(items, e.clientX, e.clientY);
+    if (!selected) return;
+
+    if (selected === "toggle_playlist") invoke("toggle_window", { windowId: "Playlist" });
+    else if (selected === "toggle_equalizer") invoke("toggle_window", { windowId: "Equalizer" });
+    else if (selected === "add_files") {
+      const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
+      const sel = await openDialog({ multiple: true, filters: [{ name: "Audio", extensions: ["mp3", "flac", "ogg", "wav", "aac", "m4a", "m3u", "m3u8", "pls"] }] });
+      if (sel) invoke("playlist_add_files", { paths: Array.isArray(sel) ? sel : [sel] });
+    }
+    else if (selected === "radio_browser") invoke("toggle_window", { windowId: "RadioBrowser" });
+    else if (selected === "media_library") invoke("toggle_window", { windowId: "LibraryBrowser" });
+    else if (selected === "skins_browse") invoke("open_settings");
+    else if (selected === "preferences") invoke("open_settings");
+    else if (selected.startsWith("skin:")) onSkinChange?.(selected.slice(5));
+  }, [onSkinChange]);
 
   return (
     <div style={{
@@ -900,91 +928,6 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
         document.body
       )}
 
-      {/* Context menu — rendered via portal so it can overflow the window */}
-      {contextMenu && createPortal(
-        <div
-          style={{
-            position: "fixed",
-            left: contextMenu.x,
-            top: contextMenu.y,
-            background: ps.normalbg,
-            border: `1px solid ${ps.selectedbg}`,
-            padding: "4px 0",
-            zIndex: 1000,
-            fontFamily: `"${ps.font}", system-ui, sans-serif`,
-            fontSize: "12px",
-            color: ps.normal,
-            minWidth: "180px",
-            boxShadow: "2px 2px 8px rgba(0,0,0,0.5)",
-          }}
-          onMouseDown={(e) => e.stopPropagation()}
-        >
-          <MenuItem label="Toggle Playlist" hoverBg={ps.selectedbg} onClick={() => { invoke("toggle_window", { windowId: "Playlist" }); setContextMenu(null); }} />
-          <MenuItem label="Toggle Equalizer" hoverBg={ps.selectedbg} onClick={() => { invoke("toggle_window", { windowId: "Equalizer" }); setContextMenu(null); }} />
-          <div style={{ height: "1px", background: ps.selectedbg, margin: "4px 0" }} />
-          <MenuItem label="Add Files..." hoverBg={ps.selectedbg} onClick={() => {
-            import("@tauri-apps/plugin-dialog").then(({ open: openDialog }) => {
-              openDialog({ multiple: true, filters: [{ name: "Audio", extensions: ["mp3", "flac", "ogg", "wav", "aac", "m4a", "m3u", "m3u8", "pls"] }] })
-                .then((selected) => { if (selected) { const paths = Array.isArray(selected) ? selected : [selected]; invoke("playlist_add_files", { paths }); } });
-            });
-            setContextMenu(null);
-          }} />
-          <MenuItem label="Radio Browser..." hoverBg={ps.selectedbg} onClick={() => {
-            invoke("toggle_window", { windowId: "RadioBrowser" });
-            setContextMenu(null);
-          }} />
-          <MenuItem label="Media Library..." hoverBg={ps.selectedbg} onClick={() => {
-            invoke("toggle_window", { windowId: "LibraryBrowser" });
-            setContextMenu(null);
-          }} />
-          <div style={{ height: "1px", background: ps.selectedbg, margin: "4px 0" }} />
-          <MenuItem
-            label={showSkins ? "\u25be Skins" : "\u25b8 Skins"}
-            hoverBg={ps.selectedbg}
-            onClick={() => setShowSkins(!showSkins)}
-          />
-          {showSkins && (
-            <div style={{ maxHeight: "300px", overflowY: "auto", overflowX: "hidden" }}>
-              {recentSkins.map((s) => (
-                <div
-                  key={s.path}
-                  style={{ padding: "4px 12px 4px 24px", cursor: "pointer", fontSize: "11px" }}
-                  onMouseEnter={(e) => ((e.target as HTMLElement).style.background = ps.selectedbg)}
-                  onMouseLeave={(e) => ((e.target as HTMLElement).style.background = "transparent")}
-                  onMouseDown={(e) => {
-                    e.stopPropagation();
-                    onSkinChange?.(s.path);
-                    setContextMenu(null);
-                  }}
-                >
-                  {s.name}
-                </div>
-              ))}
-              {recentSkins.length === 0 && (
-                <div style={{ padding: "4px 24px", color: ps.current, fontSize: "11px" }}>
-                  No recent skins
-                </div>
-              )}
-              <div style={{ height: "1px", background: ps.selectedbg, margin: "4px 0" }} />
-              <div
-                style={{ padding: "4px 12px 4px 24px", cursor: "pointer", fontSize: "11px" }}
-                onMouseEnter={(e) => ((e.target as HTMLElement).style.background = ps.selectedbg)}
-                onMouseLeave={(e) => ((e.target as HTMLElement).style.background = "transparent")}
-                onMouseDown={(e) => {
-                  e.stopPropagation();
-                  invoke("open_settings");
-                  setContextMenu(null);
-                }}
-              >
-                Browse All...
-              </div>
-            </div>
-          )}
-          <div style={{ height: "1px", background: ps.selectedbg, margin: "4px 0" }} />
-          <MenuItem label="Preferences..." hoverBg={ps.selectedbg} onClick={() => { invoke("open_settings"); setContextMenu(null); }} />
-        </div>,
-        document.body
-      )}
     </div>
   );
 }
@@ -1009,18 +952,3 @@ function drawDigit(
   ctx.drawImage(numbersImg, digit * 9, 0, 9, 13, x, y, 9, 13);
 }
 
-function MenuItem({ label, onClick, hoverBg }: { label: string; onClick: () => void; hoverBg: string }) {
-  return (
-    <div
-      style={{ padding: "6px 12px", cursor: "pointer" }}
-      onMouseEnter={(e) => ((e.target as HTMLElement).style.background = hoverBg)}
-      onMouseLeave={(e) => ((e.target as HTMLElement).style.background = "transparent")}
-      onMouseDown={(e) => {
-        e.stopPropagation();
-        onClick();
-      }}
-    >
-      {label}
-    </div>
-  );
-}
