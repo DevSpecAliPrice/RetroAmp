@@ -62,6 +62,8 @@ dirs = "6.0.0"
 toml = "0.8"
 rusqlite = { version = "0.33", features = ["bundled"] }
 ureq = "3"
+lofty = "0.22"
+sha2 = "0.10"
 souvlaki = { version = "0.8", default-features = false, features = ["use_zbus"] }
 
 [features]

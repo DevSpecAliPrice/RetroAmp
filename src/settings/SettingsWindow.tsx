@@ -1,11 +1,11 @@
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { SkinData } from "../skin/parser";
 import SkinBrowser from "./SkinBrowser";
 import "./settings.css";
 
-type Tab = "skins" | "shortcuts" | "general";
+type Tab = "skins" | "shortcuts" | "library" | "general";
 
 const SHORTCUTS: { section: string; bindings: [string, string][] }[] = [
   {
@@ -56,6 +56,94 @@ function ShortcutsTab({ colors }: { colors: { normal: string; current: string; n
       ))}
       <div className="shortcuts-note" style={{ color: colors.normal }}>
         Shortcuts are disabled while typing in text fields.
+      </div>
+    </div>
+  );
+}
+
+type ColorProps = { normal: string; current: string; normalbg: string; selectedbg: string };
+
+function LibraryTab({ colors }: { colors: ColorProps }) {
+  const [dirs, setDirs] = useState<string[]>([]);
+  const [addMode, setAddMode] = useState("append");
+  const [scanning, setScanning] = useState(false);
+  const [trackCount, setTrackCount] = useState(0);
+
+  useEffect(() => {
+    invoke<string[]>("get_library_dirs").then(setDirs).catch(() => {});
+    invoke<string>("get_playlist_add_mode").then(setAddMode).catch(() => {});
+    invoke<number>("get_library_track_count").then(setTrackCount).catch(() => {});
+    invoke<boolean>("get_scan_status").then(setScanning).catch(() => {});
+  }, []);
+
+  const addDir = useCallback(async () => {
+    const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
+    const selected = await openDialog({ directory: true, multiple: false });
+    if (selected && typeof selected === "string") {
+      await invoke("add_library_dir", { path: selected });
+      setDirs((prev) => [...prev, selected]);
+    }
+  }, []);
+
+  const removeDir = useCallback(async (path: string) => {
+    await invoke("remove_library_dir", { path });
+    setDirs((prev) => prev.filter((d) => d !== path));
+  }, []);
+
+  const changeMode = useCallback(async (mode: string) => {
+    await invoke("set_playlist_add_mode", { mode });
+    setAddMode(mode);
+  }, []);
+
+  const startScan = useCallback(async () => {
+    try {
+      await invoke("scan_library");
+      setScanning(true);
+    } catch { /* already scanning */ }
+  }, []);
+
+  return (
+    <div className="shortcuts-tab">
+      <div className="shortcuts-group">
+        <div className="shortcuts-group-title" style={{ color: colors.current }}>Watch Folders</div>
+        <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
+          RetroAmp scans these directories for audio files.
+        </div>
+        {dirs.map((dir) => (
+          <div key={dir} className="shortcuts-row" style={{ justifyContent: "space-between" }}>
+            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, fontSize: 12 }}>{dir}</span>
+            <span onClick={() => removeDir(dir)} style={{ cursor: "pointer", padding: "2px 8px", color: colors.current, opacity: 0.7, fontSize: 12 }}>Remove</span>
+          </div>
+        ))}
+        <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+          <div onClick={addDir}
+            style={{ padding: "4px 12px", background: colors.selectedbg, color: colors.current, cursor: "pointer", fontSize: 12 }}>
+            Add Folder
+          </div>
+          <div onClick={startScan}
+            style={{ padding: "4px 12px", background: colors.selectedbg, color: colors.current, cursor: "pointer", fontSize: 12, opacity: scanning ? 0.5 : 1 }}>
+            {scanning ? "Scanning..." : "Rescan Library"}
+          </div>
+        </div>
+        <div style={{ fontSize: 11, opacity: 0.5, marginTop: 8 }}>
+          {trackCount} track{trackCount !== 1 ? "s" : ""} indexed
+        </div>
+      </div>
+
+      <div className="shortcuts-group">
+        <div className="shortcuts-group-title" style={{ color: colors.current }}>Playlist Behavior</div>
+        <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
+          When playing from the library:
+        </div>
+        {(["append", "replace"] as const).map((mode) => (
+          <label key={mode} className="shortcuts-row" style={{ cursor: "pointer", gap: 8 }}>
+            <input type="radio" name="addMode" checked={addMode === mode} onChange={() => changeMode(mode)}
+              style={{ accentColor: colors.current }} />
+            <span style={{ fontSize: 13 }}>
+              {mode === "append" ? "Add to current playlist" : "Replace current playlist"}
+            </span>
+          </label>
+        ))}
       </div>
     </div>
   );
@@ -167,6 +255,16 @@ export default function SettingsWindow({ skin, scale }: Props) {
               Shortcuts
             </button>
             <button
+              className={`settings-tab ${activeTab === "library" ? "active" : ""}`}
+              style={{
+                color: activeTab === "library" ? ps.current : ps.normal,
+                borderBottomColor: activeTab === "library" ? ps.current : "transparent",
+              }}
+              onClick={() => setActiveTab("library")}
+            >
+              Library
+            </button>
+            <button
               className={`settings-tab ${activeTab === "general" ? "active" : ""}`}
               style={{
                 color: activeTab === "general" ? ps.current : ps.normal,
@@ -180,6 +278,7 @@ export default function SettingsWindow({ skin, scale }: Props) {
           <div className="settings-content" style={{ color: ps.normal }}>
             {activeTab === "skins" && <SkinBrowser playlistStyle={ps} />}
             {activeTab === "shortcuts" && <ShortcutsTab colors={ps} />}
+            {activeTab === "library" && <LibraryTab colors={ps} />}
             {activeTab === "general" && (
               <div className="settings-placeholder" style={{ color: ps.normal }}>
                 General settings coming soon.

@@ -87,6 +87,12 @@ impl Database {
         Ok(db)
     }
 
+    /// Expose the underlying connection for sub-modules that need direct access.
+    /// Callers must already hold the Mutex lock on Database.
+    pub fn conn(&self) -> &Connection {
+        &self.conn
+    }
+
     fn init_schema(&self) -> Result<(), String> {
         self.conn
             .execute_batch(
@@ -130,7 +136,52 @@ impl Database {
                     added_at    INTEGER NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_radio_url ON radio_stations(url);
-                CREATE INDEX IF NOT EXISTS idx_radio_favorite ON radio_stations(is_favorite);",
+                CREATE INDEX IF NOT EXISTS idx_radio_favorite ON radio_stations(is_favorite);
+
+                -- Library: user-configured scan directories.
+                CREATE TABLE IF NOT EXISTS library_dirs (
+                    id   INTEGER PRIMARY KEY AUTOINCREMENT,
+                    path TEXT NOT NULL UNIQUE
+                );
+
+                -- Library: one row per audio file.
+                CREATE TABLE IF NOT EXISTS library_tracks (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    path          TEXT NOT NULL UNIQUE,
+                    title         TEXT,
+                    artist        TEXT,
+                    album_artist  TEXT,
+                    album         TEXT,
+                    genre         TEXT,
+                    year          INTEGER,
+                    track_number  INTEGER,
+                    disc_number   INTEGER,
+                    duration_ms   INTEGER,
+                    bitrate       INTEGER,
+                    sample_rate   INTEGER,
+                    channels      INTEGER,
+                    rating        INTEGER NOT NULL DEFAULT 0,
+                    file_size     INTEGER NOT NULL,
+                    file_mtime    INTEGER NOT NULL,
+                    cover_art_hash TEXT,
+                    format        TEXT,
+                    has_tags      INTEGER NOT NULL DEFAULT 1,
+                    scan_error    TEXT,
+                    indexed_at    INTEGER NOT NULL,
+                    updated_at    INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_lib_path ON library_tracks(path);
+                CREATE INDEX IF NOT EXISTS idx_lib_artist ON library_tracks(artist);
+                CREATE INDEX IF NOT EXISTS idx_lib_album ON library_tracks(album);
+                CREATE INDEX IF NOT EXISTS idx_lib_genre ON library_tracks(genre);
+                CREATE INDEX IF NOT EXISTS idx_lib_rating ON library_tracks(rating);
+
+                -- Library: deduplicated cover art blobs.
+                CREATE TABLE IF NOT EXISTS library_covers (
+                    hash      TEXT PRIMARY KEY,
+                    data      BLOB NOT NULL,
+                    mime_type TEXT NOT NULL
+                );",
             )
             .map_err(|e| format!("failed to initialize database schema: {e}"))?;
         Ok(())

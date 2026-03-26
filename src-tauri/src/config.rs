@@ -26,15 +26,14 @@ pub struct AppConfig {
 
     #[serde(default)]
     pub ui: UiConfig,
+
+    #[serde(default)]
+    pub library: LibraryConfig,
 }
 
 /// Skin-related preferences.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct SkinConfig {
-    /// Additional directories to scan for skins (beyond the built-in skins dir).
-    #[serde(default)]
-    pub extra_dirs: Vec<PathBuf>,
-
     /// Last-used skin path, restored on next launch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_skin_path: Option<String>,
@@ -68,9 +67,35 @@ impl Default for EqConfig {
     }
 }
 
-/// Playback-related preferences (future use).
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct PlaybackConfig {}
+/// Playback-related preferences.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaybackConfig {
+    /// What to do when playing from the library: "append", "replace", or "ask".
+    #[serde(default = "default_append")]
+    pub playlist_add_mode: String,
+}
+
+impl Default for PlaybackConfig {
+    fn default() -> Self {
+        Self {
+            playlist_add_mode: "append".to_string(),
+        }
+    }
+}
+
+fn default_append() -> String {
+    "append".to_string()
+}
+
+/// Library browser preferences.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LibraryConfig {
+    /// Which columns are visible in the tracks view.
+    /// If empty, defaults are used.
+    #[serde(default)]
+    pub visible_columns: Vec<String>,
+}
+
 
 /// UI layout persisted across restarts — window visibility, positions, sizes.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -93,6 +118,9 @@ pub struct UiConfig {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<WindowLayoutEntry>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_browser: Option<WindowLayoutEntry>,
 }
 
 /// Saved layout for a single window.
@@ -145,21 +173,6 @@ impl AppConfig {
         Ok(())
     }
 
-    /// Add a skin directory if it isn't already present.
-    pub fn add_skin_dir(&mut self, dir: PathBuf) -> bool {
-        if self.skins.extra_dirs.contains(&dir) {
-            return false;
-        }
-        self.skins.extra_dirs.push(dir);
-        true
-    }
-
-    /// Remove a skin directory. Returns true if it was present.
-    pub fn remove_skin_dir(&mut self, dir: &PathBuf) -> bool {
-        let len = self.skins.extra_dirs.len();
-        self.skins.extra_dirs.retain(|d| d != dir);
-        self.skins.extra_dirs.len() != len
-    }
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -188,8 +201,6 @@ fn migrate_from_json() {
     #[derive(Deserialize)]
     struct LegacyConfig {
         #[serde(default)]
-        extra_skin_dirs: Vec<PathBuf>,
-        #[serde(default)]
         last_skin_path: Option<String>,
     }
 
@@ -198,7 +209,6 @@ fn migrate_from_json() {
 
     let new_config = AppConfig {
         skins: SkinConfig {
-            extra_dirs: legacy.extra_skin_dirs,
             last_skin_path: legacy.last_skin_path,
         },
         ..Default::default()

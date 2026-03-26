@@ -15,6 +15,7 @@ use crate::audio::local::LocalFileSource;
 use crate::audio::radio::RadioSource;
 use crate::audio::source::AudioSource;
 use crate::db::{Database, EqPresetEntry, SkinCatalogEntry};
+use crate::library;
 use crate::playlist::manager::{PlaylistManager, PlaylistState};
 use crate::skin::loader::SkinContents;
 use crate::skin::scanner::SkinInfo;
@@ -392,6 +393,9 @@ pub fn save_window_layout(app: &AppHandle, states: &WindowStates) {
     if is_visible("settings") || app.get_webview_window("settings").is_some() {
         cfg.ui.settings = Some(capture("settings", is_visible("settings"), true));
     }
+    if is_visible("librarybrowser") || app.get_webview_window("librarybrowser").is_some() {
+        cfg.ui.library_browser = Some(capture("librarybrowser", is_visible("librarybrowser"), true));
+    }
 
     let _ = cfg.save();
 }
@@ -731,67 +735,86 @@ pub fn get_skins_dir() -> Result<String, String> {
     Ok(dir.to_string_lossy().into_owned())
 }
 
-/// List all available skins from the skins directories.
+/// List all available skins from the skins directory.
 #[tauri::command]
 pub fn get_skins() -> Vec<SkinInfo> {
-    let mut dirs = Vec::new();
+    let Some(dir) = skins_dir() else {
+        return Vec::new();
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    crate::skin::scanner::scan_all(&[dir])
+}
 
-    // Platform skins directory (primary).
-    if let Some(dir) = skins_dir() {
-        // Ensure it exists so users always have a place to drop skins.
-        let _ = std::fs::create_dir_all(&dir);
-        dirs.push(dir);
-    }
+/// Import skin files (`.wsz` / `.zip`) into the skins directory.
+/// Copies each file, adds it to the catalog, and returns the imported paths.
+#[tauri::command]
+pub fn import_skins(
+    database: State<'_, Arc<Mutex<Database>>>,
+    paths: Vec<String>,
+) -> Result<Vec<String>, String> {
+    let dir = skins_dir().ok_or("could not determine skins directory")?;
+    let _ = std::fs::create_dir_all(&dir);
 
-    // User-configured extra skin directories.
-    for dir in crate::config::AppConfig::load().skins.extra_dirs {
-        if dir.is_dir() {
-            dirs.push(dir);
+    let mut imported = Vec::new();
+    for src in &paths {
+        let src_path = std::path::Path::new(src);
+        if !src_path.is_file() {
+            log::warn!("import_skins: skipping non-file {src}");
+            continue;
         }
-    }
 
-    // Project skins directory (development convenience).
-    if cfg!(debug_assertions) {
-        let project_skins = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .map(|p| p.join("skins"));
-        if let Some(dir) = project_skins {
-            if dir.is_dir() {
-                dirs.push(dir);
-            }
+        let Some(filename) = src_path.file_name() else { continue };
+        let dest = dir.join(filename);
+
+        // Don't overwrite if it already exists in the skins folder.
+        if dest.exists() {
+            log::info!("import_skins: {src} already exists, skipping copy");
+            imported.push(dest.to_string_lossy().into_owned());
+            continue;
         }
+
+        if let Err(e) = std::fs::copy(src_path, &dest) {
+            log::warn!("import_skins: failed to copy {src}: {e}");
+            continue;
+        }
+
+        let dest_str = dest.to_string_lossy().into_owned();
+        log::info!("imported skin: {dest_str}");
+
+        // Add to the catalog immediately.
+        let name = dest.file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let skin_info = crate::skin::scanner::SkinInfo {
+            name,
+            path: dest_str.clone(),
+            is_archive: true,
+        };
+        if let Ok(db) = database.lock() {
+            let _ = db.upsert_skin(&skin_info, None);
+        }
+
+        imported.push(dest_str);
     }
 
-    crate::skin::scanner::scan_all(&dirs)
+    Ok(imported)
 }
 
-/// Add a user-chosen directory to the skin scan list.
+/// Open the skins directory in the system file manager.
 #[tauri::command]
-pub fn add_skin_dir(path: String) -> Result<Vec<String>, String> {
-    let mut cfg = crate::config::AppConfig::load();
-    cfg.add_skin_dir(path.into());
-    cfg.save()?;
-    Ok(cfg.skins.extra_dirs.iter().map(|p| p.to_string_lossy().into_owned()).collect())
-}
+pub async fn open_skins_folder() -> Result<(), String> {
+    let dir = skins_dir().ok_or("could not determine skins directory")?;
+    let _ = std::fs::create_dir_all(&dir);
+    let folder = dir.to_string_lossy().into_owned();
 
-/// Remove a directory from the skin scan list.
-#[tauri::command]
-pub fn remove_skin_dir(path: String) -> Result<Vec<String>, String> {
-    let mut cfg = crate::config::AppConfig::load();
-    cfg.remove_skin_dir(&path.into());
-    cfg.save()?;
-    Ok(cfg.skins.extra_dirs.iter().map(|p| p.to_string_lossy().into_owned()).collect())
-}
+    #[cfg(target_os = "linux")]
+    { let _ = std::process::Command::new("xdg-open").arg(&folder).spawn(); }
+    #[cfg(target_os = "macos")]
+    { let _ = std::process::Command::new("open").arg(&folder).spawn(); }
+    #[cfg(target_os = "windows")]
+    { let _ = std::process::Command::new("explorer").arg(&folder).spawn(); }
 
-/// Get the list of extra skin directories.
-#[tauri::command]
-pub fn get_extra_skin_dirs() -> Vec<String> {
-    crate::config::AppConfig::load()
-        .skins
-        .extra_dirs
-        .iter()
-        .map(|p| p.to_string_lossy().into_owned())
-        .collect()
+    Ok(())
 }
 
 /// Delete a skin file from disk and remove it from the catalog.
@@ -901,29 +924,12 @@ pub fn refresh_skin_catalog(
 ) -> Result<Vec<SkinCatalogEntry>, String> {
     let db = database.lock().map_err(|e| e.to_string())?;
 
-    // Gather scan directories.
-    let mut dirs = Vec::new();
-    if let Some(dir) = skins_dir() {
-        let _ = std::fs::create_dir_all(&dir);
-        dirs.push(dir);
-    }
-    for dir in crate::config::AppConfig::load().skins.extra_dirs {
-        if dir.is_dir() {
-            dirs.push(dir);
-        }
-    }
-    if cfg!(debug_assertions) {
-        let project_skins = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .map(|p| p.join("skins"));
-        if let Some(dir) = project_skins {
-            if dir.is_dir() {
-                dirs.push(dir);
-            }
-        }
-    }
-
-    let skins = crate::skin::scanner::scan_all(&dirs);
+    // Scan the skins directory.
+    let Some(dir) = skins_dir() else {
+        return db.get_all_skins();
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    let skins = crate::skin::scanner::scan_all(&[dir]);
     let valid_paths: Vec<String> = skins.iter().map(|s| s.path.clone()).collect();
 
     // Only upsert metadata — no thumbnail extraction here.
@@ -1133,4 +1139,240 @@ pub async fn radio_browser_by_tag(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+// -- Library --
+
+/// Trigger a library scan. Returns immediately; the scan runs in the background.
+#[tauri::command]
+pub fn scan_library(
+    database: State<'_, Arc<Mutex<Database>>>,
+    app: AppHandle,
+) -> Result<(), String> {
+    if library::is_scanning() {
+        return Err("scan already in progress".to_string());
+    }
+    let db = Arc::clone(&*database);
+    std::thread::Builder::new()
+        .name("retroamp-library-scan".into())
+        .spawn(move || {
+            library::scan_library(db, app);
+        })
+        .map_err(|e| format!("{e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_scan_status() -> bool {
+    library::is_scanning()
+}
+
+#[tauri::command]
+pub fn get_library_dirs(
+    database: State<'_, Arc<Mutex<Database>>>,
+) -> Result<Vec<String>, String> {
+    let db = database.lock().map_err(|e| e.to_string())?;
+    Ok(library::db::get_library_dirs(db.conn())
+        .into_iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect())
+}
+
+#[tauri::command]
+pub fn add_library_dir(
+    database: State<'_, Arc<Mutex<Database>>>,
+    path: String,
+) -> Result<(), String> {
+    let db = database.lock().map_err(|e| e.to_string())?;
+    library::db::add_library_dir(db.conn(), &path)
+}
+
+#[tauri::command]
+pub fn remove_library_dir(
+    database: State<'_, Arc<Mutex<Database>>>,
+    path: String,
+) -> Result<(), String> {
+    let db = database.lock().map_err(|e| e.to_string())?;
+    library::db::remove_library_dir(db.conn(), &path)
+}
+
+#[tauri::command]
+pub fn get_library_tracks(
+    database: State<'_, Arc<Mutex<Database>>>,
+    search: Option<String>,
+    sort_by: Option<String>,
+    sort_dir: Option<String>,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<Vec<library::db::LibraryTrack>, String> {
+    let db = database.lock().map_err(|e| e.to_string())?;
+    library::db::get_tracks(
+        db.conn(),
+        search.as_deref(),
+        sort_by.as_deref().unwrap_or("title"),
+        sort_dir.as_deref().unwrap_or("asc"),
+        offset.unwrap_or(0),
+        limit.unwrap_or(200),
+    )
+}
+
+#[tauri::command]
+pub fn search_library(
+    database: State<'_, Arc<Mutex<Database>>>,
+    query: String,
+) -> Result<Vec<library::db::LibraryTrack>, String> {
+    let db = database.lock().map_err(|e| e.to_string())?;
+    library::db::get_tracks(db.conn(), Some(&query), "title", "asc", 0, 200)
+}
+
+#[tauri::command]
+pub fn get_library_artists(
+    database: State<'_, Arc<Mutex<Database>>>,
+) -> Result<Vec<String>, String> {
+    let db = database.lock().map_err(|e| e.to_string())?;
+    library::db::get_artists(db.conn())
+}
+
+#[tauri::command]
+pub fn get_library_albums(
+    database: State<'_, Arc<Mutex<Database>>>,
+) -> Result<Vec<library::db::AlbumEntry>, String> {
+    let db = database.lock().map_err(|e| e.to_string())?;
+    library::db::get_albums(db.conn())
+}
+
+#[tauri::command]
+pub fn get_library_genres(
+    database: State<'_, Arc<Mutex<Database>>>,
+) -> Result<Vec<String>, String> {
+    let db = database.lock().map_err(|e| e.to_string())?;
+    library::db::get_genres(db.conn())
+}
+
+#[tauri::command]
+pub fn get_library_cover(
+    database: State<'_, Arc<Mutex<Database>>>,
+    hash: String,
+) -> Result<Option<String>, String> {
+    let db = database.lock().map_err(|e| e.to_string())?;
+    match library::db::get_cover(db.conn(), &hash)? {
+        Some((data, mime)) => {
+            let b64 = base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                &data,
+            );
+            Ok(Some(format!("data:{mime};base64,{b64}")))
+        }
+        None => Ok(None),
+    }
+}
+
+#[tauri::command]
+pub fn get_library_track_count(
+    database: State<'_, Arc<Mutex<Database>>>,
+) -> Result<i64, String> {
+    let db = database.lock().map_err(|e| e.to_string())?;
+    Ok(library::db::get_track_count(db.conn()))
+}
+
+#[tauri::command]
+pub fn get_tracks_by_artist(
+    database: State<'_, Arc<Mutex<Database>>>,
+    artist: String,
+) -> Result<Vec<library::db::LibraryTrack>, String> {
+    let db = database.lock().map_err(|e| e.to_string())?;
+    library::db::get_tracks_by_artist(db.conn(), &artist)
+}
+
+#[tauri::command]
+pub fn get_tracks_by_album(
+    database: State<'_, Arc<Mutex<Database>>>,
+    album: String,
+) -> Result<Vec<library::db::LibraryTrack>, String> {
+    let db = database.lock().map_err(|e| e.to_string())?;
+    library::db::get_tracks_by_album(db.conn(), &album)
+}
+
+#[tauri::command]
+pub fn get_tracks_by_genre(
+    database: State<'_, Arc<Mutex<Database>>>,
+    genre: String,
+) -> Result<Vec<library::db::LibraryTrack>, String> {
+    let db = database.lock().map_err(|e| e.to_string())?;
+    library::db::get_tracks_by_genre(db.conn(), &genre)
+}
+
+/// Set a track's star rating. Writes to the file first, then updates the DB.
+#[tauri::command]
+pub fn set_track_rating(
+    database: State<'_, Arc<Mutex<Database>>>,
+    path: String,
+    rating: u8,
+) -> Result<(), String> {
+    if rating > 5 {
+        return Err("rating must be 0-5".to_string());
+    }
+    // Write to file first (source of truth).
+    library::tags::write_rating(&path, rating)?;
+    // Then update the DB cache.
+    let db = database.lock().map_err(|e| e.to_string())?;
+    library::db::update_track_rating(db.conn(), &path, rating)
+}
+
+/// Open the parent folder of a file in the system file manager.
+#[tauri::command]
+pub async fn reveal_in_file_manager(path: String) -> Result<(), String> {
+    let p = std::path::Path::new(&path);
+    let folder = if p.is_file() {
+        p.parent().map(|pp| pp.to_string_lossy().into_owned())
+    } else {
+        Some(path.clone())
+    };
+    if let Some(folder) = folder {
+        #[cfg(target_os = "linux")]
+        { let _ = std::process::Command::new("xdg-open").arg(&folder).spawn(); }
+        #[cfg(target_os = "macos")]
+        { let _ = std::process::Command::new("open").arg(&folder).spawn(); }
+        #[cfg(target_os = "windows")]
+        { let _ = std::process::Command::new("explorer").arg(&folder).spawn(); }
+    }
+    Ok(())
+}
+
+/// Get the playlist add mode preference ("append", "replace", or "ask").
+#[tauri::command]
+pub fn get_playlist_add_mode() -> String {
+    crate::config::AppConfig::load().playback.playlist_add_mode
+}
+
+/// Set the playlist add mode preference.
+#[tauri::command]
+pub fn set_playlist_add_mode(mode: String) -> Result<(), String> {
+    if !["append", "replace", "ask"].contains(&mode.as_str()) {
+        return Err("mode must be 'append', 'replace', or 'ask'".to_string());
+    }
+    let mut cfg = crate::config::AppConfig::load();
+    cfg.playback.playlist_add_mode = mode;
+    cfg.save()
+}
+
+/// Get visible library columns from config.
+#[tauri::command]
+pub fn get_library_columns() -> Vec<String> {
+    let cols = crate::config::AppConfig::load().library.visible_columns;
+    if cols.is_empty() {
+        // Sensible defaults
+        vec!["title", "artist", "album", "duration"]
+            .into_iter().map(String::from).collect()
+    } else {
+        cols
+    }
+}
+
+/// Save visible library columns to config.
+#[tauri::command]
+pub fn set_library_columns(columns: Vec<String>) -> Result<(), String> {
+    let mut cfg = crate::config::AppConfig::load();
+    cfg.library.visible_columns = columns;
+    cfg.save()
 }

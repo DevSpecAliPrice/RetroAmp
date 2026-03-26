@@ -142,19 +142,32 @@ export default function SkinBrowser({ playlistStyle: ps }: Props) {
     }
   };
 
-  const addSkinFolder = async () => {
+  const importSkins = async () => {
     try {
       const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
-      const selected = await openDialog({ directory: true, title: "Add Skin Folder" });
+      const selected = await openDialog({
+        multiple: true,
+        title: "Import Skins",
+        filters: [{ name: "Winamp Skins", extensions: ["wsz", "zip"] }],
+      });
       if (selected) {
-        const path = Array.isArray(selected) ? selected[0] : selected;
-        if (path) {
-          await invoke("add_skin_dir", { path });
+        const paths = Array.isArray(selected) ? selected : [selected];
+        const valid = paths.filter(Boolean) as string[];
+        if (valid.length > 0) {
+          await invoke("import_skins", { paths: valid });
           await refreshCatalog();
         }
       }
     } catch (e) {
-      console.error("Failed to add skin folder:", e);
+      console.error("Failed to import skins:", e);
+    }
+  };
+
+  const openSkinsFolder = async () => {
+    try {
+      await invoke("open_skins_folder");
+    } catch (e) {
+      console.error("Failed to open skins folder:", e);
     }
   };
 
@@ -241,15 +254,25 @@ export default function SkinBrowser({ playlistStyle: ps }: Props) {
           </button>
           <button
             className="skin-action-btn"
-            onClick={addSkinFolder}
+            onClick={importSkins}
             style={{ background: ps.normalbg, borderColor: ps.selectedbg, color: ps.normal }}
+            title="Import .wsz skin files"
           >
-            Add Folder
+            Import
+          </button>
+          <button
+            className="skin-action-btn"
+            onClick={openSkinsFolder}
+            style={{ background: ps.normalbg, borderColor: ps.selectedbg, color: ps.normal }}
+            title="Open skins folder in file manager"
+          >
+            Open Folder
           </button>
           <button
             className="skin-action-btn"
             onClick={refreshCatalog}
             style={{ background: ps.normalbg, borderColor: ps.selectedbg, color: ps.normal }}
+            title="Rescan skins folder"
           >
             Refresh
           </button>

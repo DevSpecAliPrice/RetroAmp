@@ -8,6 +8,7 @@ import PlaylistWindow from "./skin/PlaylistWindow";
 import EqualizerWindow from "./skin/EqualizerWindow";
 import SettingsWindow from "./settings/SettingsWindow";
 import RadioBrowserWindow from "./skin/RadioBrowserWindow";
+import LibraryBrowserWindow from "./skin/LibraryBrowserWindow";
 
 const DEFAULT_SKIN_NAME = "RetroAmp Default";
 
@@ -230,13 +231,28 @@ function App() {
   }, []);
 
   // Drag-and-drop files onto any window.
+  // Skin files (.wsz/.zip) are imported and applied; everything else goes to the playlist.
   useEffect(() => {
     const webview = getCurrentWebviewWindow();
     const unlisten = webview.onDragDropEvent(async (event) => {
       if (event.payload.type === "drop") {
         const paths = event.payload.paths;
-        if (paths.length > 0) {
-          await invoke("playlist_add_files", { paths });
+        if (paths.length === 0) return;
+
+        const skinExts = [".wsz", ".zip"];
+        const skinPaths = paths.filter((p) => skinExts.some((ext) => p.toLowerCase().endsWith(ext)));
+        const audioPaths = paths.filter((p) => !skinExts.some((ext) => p.toLowerCase().endsWith(ext)));
+
+        if (skinPaths.length > 0) {
+          const imported = await invoke<string[]>("import_skins", { paths: skinPaths });
+          // Apply the first imported skin immediately.
+          if (imported.length > 0) {
+            await invoke("set_active_skin", { path: imported[0] });
+            await invoke("load_skin", { path: imported[0] });
+          }
+        }
+        if (audioPaths.length > 0) {
+          await invoke("playlist_add_files", { paths: audioPaths });
         }
       }
     });
@@ -315,6 +331,8 @@ function App() {
       return <EqualizerWindow skin={skin} scale={scale} />;
     case "radiobrowser":
       return <RadioBrowserWindow skin={skin} scale={scale} />;
+    case "librarybrowser":
+      return <LibraryBrowserWindow skin={skin} scale={scale} />;
     case "shade":
       return <MainWindow skin={skin} scale={scale} isShade />;
     default:

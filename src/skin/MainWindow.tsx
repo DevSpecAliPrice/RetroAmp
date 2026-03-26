@@ -933,6 +933,10 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
             invoke("toggle_window", { windowId: "RadioBrowser" });
             setContextMenu(null);
           }} />
+          <MenuItem label="Media Library..." hoverBg={ps.selectedbg} onClick={() => {
+            invoke("toggle_window", { windowId: "LibraryBrowser" });
+            setContextMenu(null);
+          }} />
           <div style={{ height: "1px", background: ps.selectedbg, margin: "4px 0" }} />
           <MenuItem
             label={showSkins ? "\u25be Skins" : "\u25b8 Skins"}

@@ -4,6 +4,7 @@ pub mod audio;
 pub mod commands;
 pub mod config;
 pub mod db;
+pub mod library;
 pub mod media_controls;
 pub mod playlist;
 pub mod tray;
@@ -199,10 +200,12 @@ pub fn run() {
             // Restore previously-open panel windows.
             let default_layout = config::WindowLayoutEntry::default();
             let radio_layout = saved_ui.radio_browser.as_ref().unwrap_or(&default_layout);
+            let library_layout = saved_ui.library_browser.as_ref().unwrap_or(&default_layout);
             let panels_to_restore: Vec<(WindowId, &config::WindowLayoutEntry)> = [
                 (WindowId::Equalizer, &saved_ui.equalizer),
                 (WindowId::Playlist, &saved_ui.playlist),
                 (WindowId::RadioBrowser, radio_layout),
+                (WindowId::LibraryBrowser, library_layout),
             ]
             .into_iter()
             .filter(|(_, entry)| entry.visible == Some(true))
@@ -322,6 +325,7 @@ pub fn run() {
                     "equalizer" => Some(WindowId::Equalizer),
                     "settings" => Some(WindowId::Settings),
                     "radiobrowser" => Some(WindowId::RadioBrowser),
+                    "librarybrowser" => Some(WindowId::LibraryBrowser),
                     _ => None,
                 };
                 if let Some(id) = window_id {
@@ -379,9 +383,8 @@ pub fn run() {
             commands::get_skins_dir,
             commands::set_active_skin,
             commands::get_last_skin_path,
-            commands::add_skin_dir,
-            commands::remove_skin_dir,
-            commands::get_extra_skin_dirs,
+            commands::import_skins,
+            commands::open_skins_folder,
             commands::delete_skin,
             commands::reveal_skin_folder,
             // Skin catalog (database-backed)
@@ -399,6 +402,28 @@ pub fn run() {
             commands::set_scale,
             commands::enter_shade,
             commands::exit_shade,
+            // Library
+            commands::scan_library,
+            commands::get_scan_status,
+            commands::get_library_dirs,
+            commands::add_library_dir,
+            commands::remove_library_dir,
+            commands::get_library_tracks,
+            commands::search_library,
+            commands::get_library_artists,
+            commands::get_library_albums,
+            commands::get_library_genres,
+            commands::get_library_cover,
+            commands::get_library_track_count,
+            commands::set_track_rating,
+            commands::get_tracks_by_artist,
+            commands::get_tracks_by_album,
+            commands::get_tracks_by_genre,
+            commands::reveal_in_file_manager,
+            commands::get_playlist_add_mode,
+            commands::set_playlist_add_mode,
+            commands::get_library_columns,
+            commands::set_library_columns,
         ])
         .run(tauri::generate_context!())
         .expect("error while running RetroAmp");
@@ -425,29 +450,13 @@ fn sync_skin_catalog(db: Arc<Mutex<Database>>, app: tauri::AppHandle) {
         current: 0, total: 0, phase: "scanning", skin_name: String::new(),
     });
 
-    // Gather scan directories (same logic as commands::get_skins).
-    let mut dirs = Vec::new();
-    if let Some(dir) = dirs::config_dir().map(|c| c.join("retroamp").join("skins")) {
-        let _ = std::fs::create_dir_all(&dir);
-        dirs.push(dir);
-    }
-    for dir in config::AppConfig::load().skins.extra_dirs {
-        if dir.is_dir() {
-            dirs.push(dir);
-        }
-    }
-    if cfg!(debug_assertions) {
-        if let Some(dir) = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .map(|p| p.join("skins"))
-        {
-            if dir.is_dir() {
-                dirs.push(dir);
-            }
-        }
-    }
-
-    let skins = skin::scanner::scan_all(&dirs);
+    // Scan the skins directory.
+    let Some(dir) = dirs::config_dir().map(|c| c.join("retroamp").join("skins")) else {
+        log::warn!("could not determine skins directory, skipping catalog sync");
+        return;
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    let skins = skin::scanner::scan_all(&[dir]);
     let total = skins.len();
     let valid_paths: Vec<String> = skins.iter().map(|s| s.path.clone()).collect();
 
