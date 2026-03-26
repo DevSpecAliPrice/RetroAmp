@@ -943,7 +943,7 @@ fn skins_dir() -> Option<std::path::PathBuf> {
 
 // -- Internal helpers --
 
-fn play_path(engine: &AudioEngine, path: &str) -> Result<(), String> {
+pub fn play_path(engine: &AudioEngine, path: &str) -> Result<(), String> {
     let source = create_source(path)?;
     engine.play(source);
     Ok(())

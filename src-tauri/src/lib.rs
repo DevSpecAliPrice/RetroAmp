@@ -4,6 +4,7 @@ pub mod audio;
 pub mod commands;
 pub mod config;
 pub mod db;
+pub mod media_controls;
 pub mod playlist;
 pub mod radio_browser;
 pub mod skin;
@@ -96,6 +97,40 @@ pub fn run() {
         .manage(Mutex::new(commands::SkinCache::new()))
         .manage(Arc::clone(&database))
         .setup(move |app| {
+            // Start OS media controls (MPRIS on Linux, SMTC on Windows,
+            // MPRemoteCommandCenter on macOS). Non-fatal if it fails.
+            {
+                let engine_mc: Arc<AudioEngine> =
+                    Arc::clone(&*app.state::<Arc<AudioEngine>>());
+                let playlist_mc: Arc<Mutex<PlaylistManager>> =
+                    Arc::clone(&*app.state::<Arc<Mutex<PlaylistManager>>>());
+
+                // On Windows, souvlaki needs the main window's HWND.
+                #[allow(unused_mut)]
+                let mut hwnd: Option<*mut std::ffi::c_void> = None;
+                #[cfg(target_os = "windows")]
+                {
+                    if let Some(win) = app.get_webview_window("main") {
+                        use raw_window_handle::HasWindowHandle;
+                        if let Ok(handle) = win.window_handle() {
+                            if let raw_window_handle::RawWindowHandle::Win32(h) = handle.as_raw() {
+                                hwnd = Some(h.hwnd.get() as *mut std::ffi::c_void);
+                            }
+                        }
+                    }
+                }
+
+                match media_controls::MediaService::new(engine_mc, playlist_mc, hwnd) {
+                    Ok(service) => {
+                        app.manage(service);
+                        log::info!("OS media controls registered");
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to register OS media controls: {e}");
+                    }
+                }
+            }
+
             // Sync the skin catalog in the background so startup isn't blocked.
             {
                 let db = Arc::clone(&database);
