@@ -437,22 +437,22 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
     // 5) Draw mono/stereo indicators.
     // Both are always drawn: the active mode uses the lit sprite (top row, y=0)
     // and the inactive mode uses the dim sprite (bottom row, y=rowH).
-    // In MONOSTER.BMP, STEREO is the left 29px and MONO is the right 27px.
+    // In MONOSTER.BMP, STEREO is at x=0 (29px) and MONO is at x=29 (27px).
     // In the window, they display in REVERSE order: MONO on the left at x=212,
     // STEREO on the right at x=239. They are perfectly adjacent (212+27=239).
-    // BMP widths vary (56, 58, 54, etc.): mono source starts at max(29, w-27)
-    // to skip any gap in wider BMPs without overlapping the stereo region.
+    // Standard source positions (x=0 and x=29) are used regardless of BMP
+    // width — wider BMPs (58px) have border pixels at the far edges that
+    // should not be displayed.
     const monoster = skin.sheets["monoster"];
     if (monoster && status.metadata) {
       const isStereo = (status.metadata.channels ?? 0) >= 2;
       const rowH = Math.floor(monoster.height / 2);
       if (rowH > 0) {
         const stereoW = Math.min(29, monoster.width);
-        const monoSrcX = Math.max(29, monoster.width - 27);
-        const monoW = Math.max(0, monoster.width - monoSrcX);
+        const monoW = Math.min(27, Math.max(0, monoster.width - 29));
         // Mono at (212, 41) LEFT: dim if stereo, lit if mono
         if (monoW > 0) {
-          ctx.drawImage(monoster, monoSrcX, isStereo ? rowH : 0, monoW, rowH, 212, 41, monoW, rowH);
+          ctx.drawImage(monoster, 29, isStereo ? rowH : 0, monoW, rowH, 212, 41, monoW, rowH);
         }
         // Stereo at (239, 41) RIGHT: lit if stereo, dim if mono
         ctx.drawImage(monoster, 0, isStereo ? 0 : rowH, stereoW, rowH, 239, 41, stereoW, rowH);

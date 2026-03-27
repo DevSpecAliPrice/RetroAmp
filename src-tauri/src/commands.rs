@@ -463,9 +463,8 @@ pub async fn toggle_window(
             });
 
         // Use saved size for resizable windows, otherwise derive from main.
-        // Playlist needs ~15% extra width so its graphics aren't clipped.
         let default_w = match window_id {
-            WindowId::Playlist => main_w * 1.15,
+            WindowId::Playlist => main_w,
             WindowId::RadioBrowser => main_w * 1.5,
             WindowId::Settings => 700.0,
             _ => main_w,

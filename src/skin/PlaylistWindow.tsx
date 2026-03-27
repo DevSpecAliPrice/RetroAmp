@@ -412,7 +412,7 @@ export default function PlaylistWindow({ skin, scale }: Props) {
           />
         </div>
 
-        <div style={{ flex: 1, ...bgTile("PL_BOTTOM_TILE", "repeat-x") }}>
+        <div style={{ flex: 1, minWidth: 0, overflow: "hidden", ...bgTile("PL_BOTTOM_TILE", "repeat-x") }}>
           <div style={{
             display: "flex", alignItems: "center", justifyContent: "center",
             height: "100%",
