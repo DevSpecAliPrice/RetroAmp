@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::audio::eq::{EqSettings, Equalizer};
 use crate::audio::error::AudioError;
 use crate::audio::fft::{FftAnalyser, FftData};
-use crate::audio::output::OutputManager;
+use crate::audio::output::{OutputManager, BUFFER_SECS_LOCAL, BUFFER_SECS_STREAM};
 use crate::audio::resample::AudioResampler;
 use crate::audio::source::{AudioSource, TrackMetadata};
 
@@ -241,6 +241,7 @@ fn audio_thread(
     let mut playback_state = PlaybackState::Stopped;
     let mut volume: f32 = 1.0;
     let mut balance: f32 = 0.0;
+    let mut current_is_stream = false;
     let mut eq = Equalizer::new(current_rate, current_channels);
     let mut fft_analyser = FftAnalyser::new();
 
@@ -351,24 +352,35 @@ fn audio_thread(
             activate_pending = false;
             if let Some(new_source) = pending_source.take() {
                 resampler = None;
+                let is_stream = new_source.capabilities().has_dynamic_metadata;
+                let buffer_secs = if is_stream { BUFFER_SECS_STREAM } else { BUFFER_SECS_LOCAL };
 
                 if let Ok(meta) = new_source.metadata() {
                     let source_rate = meta.sample_rate;
                     eprintln!(
-                        "[retroamp] source: {}Hz, {}ch | output: {current_rate}Hz",
+                        "[retroamp] source: {}Hz, {}ch | output: {current_rate}Hz | stream: {is_stream}",
                         source_rate, meta.channels
                     );
 
-                    if source_rate != current_rate {
-                        eprintln!("[retroamp] rate mismatch — attempting device reconfiguration");
-                        match output_manager.open_at_rate(source_rate, meta.channels) {
+                    // Reopen output if sample rate changed or buffer sizing changed
+                    // (local ↔ stream).
+                    if source_rate != current_rate || is_stream != current_is_stream {
+                        eprintln!("[retroamp] reconfiguring output (rate or buffer change)");
+                        match output_manager.open_at_rate(source_rate, meta.channels, buffer_secs) {
                             Ok(new_output) => {
                                 output = new_output;
                                 current_rate = source_rate;
                                 current_channels = output.config().channels;
+                                current_is_stream = is_stream;
                                 eq.reconfigure(current_rate, current_channels);
-                                eprintln!("[retroamp] output reconfigured to {source_rate}Hz (native)");
-                                log::info!("output reconfigured to {source_rate}Hz (native)");
+                                eprintln!(
+                                    "[retroamp] output reconfigured to {source_rate}Hz, buffer {:.0}ms",
+                                    buffer_secs * 1000.0
+                                );
+                                log::info!(
+                                    "output reconfigured to {source_rate}Hz, buffer {:.0}ms",
+                                    buffer_secs * 1000.0
+                                );
                             }
                             Err(ref e) => {
                                 eprintln!("[retroamp] reconfigure failed: {e}, falling back to resampler");
@@ -376,6 +388,21 @@ fn audio_thread(
                                     "device doesn't support {source_rate}Hz, \
                                      resampling to {current_rate}Hz"
                                 );
+                                // Still update stream status even if rate reconfig failed,
+                                // so the buffer is resized on next successful reconfig.
+                                if is_stream != current_is_stream {
+                                    match output_manager.open_at_rate(current_rate, current_channels, buffer_secs) {
+                                        Ok(new_output) => {
+                                            output = new_output;
+                                            current_is_stream = is_stream;
+                                            eprintln!(
+                                                "[retroamp] buffer resized to {:.0}ms (keeping {current_rate}Hz)",
+                                                buffer_secs * 1000.0
+                                            );
+                                        }
+                                        Err(_) => {}
+                                    }
+                                }
                                 match AudioResampler::new(source_rate, current_rate, meta.channels) {
                                     Ok(r) => {
                                         eprintln!("[retroamp] resampler created: {source_rate}Hz → {current_rate}Hz");

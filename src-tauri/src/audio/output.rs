@@ -13,6 +13,12 @@ use ringbuf::{
 
 use crate::audio::error::AudioError;
 
+/// Output buffer duration for local files — small for responsive controls.
+pub const BUFFER_SECS_LOCAL: f32 = 0.1;
+/// Output buffer duration for internet streams — larger to absorb network
+/// and scheduling jitter without underruns.
+pub const BUFFER_SECS_STREAM: f32 = 0.5;
+
 /// Describes the output device and its configuration.
 #[derive(Debug, Clone)]
 pub struct OutputConfig {
@@ -76,7 +82,7 @@ impl OutputManager {
             .default_output_config()
             .map_err(|e| AudioError::Output(format!("failed to get output config: {e}")))?;
 
-        self.build_stream(supported.into())
+        self.build_stream(supported.into(), BUFFER_SECS_LOCAL)
     }
 
     /// Open the output at a specific sample rate and channel count. If the
@@ -86,6 +92,7 @@ impl OutputManager {
         &self,
         desired_rate: u32,
         desired_channels: u16,
+        buffer_secs: f32,
     ) -> Result<AudioOutput, AudioError> {
         let desired = SampleRate(desired_rate);
 
@@ -113,7 +120,7 @@ impl OutputManager {
 
         if let Some(range) = best {
             let config: StreamConfig = range.with_sample_rate(desired).into();
-            self.build_stream(config)
+            self.build_stream(config, buffer_secs)
         } else {
             Err(AudioError::Output(format!(
                 "device does not support {desired_rate}Hz output"
@@ -122,11 +129,9 @@ impl OutputManager {
     }
 
     /// Build and start a CPAL output stream with the given config.
-    fn build_stream(&self, config: StreamConfig) -> Result<AudioOutput, AudioError> {
-        // Buffer ~100ms of audio — small enough for responsive controls,
-        // large enough to absorb scheduling jitter without underruns.
+    fn build_stream(&self, config: StreamConfig, buffer_secs: f32) -> Result<AudioOutput, AudioError> {
         let buffer_samples =
-            (config.sample_rate.0 as usize) * (config.channels as usize) / 10;
+            (config.sample_rate.0 as f32 * buffer_secs) as usize * config.channels as usize;
 
         let rb = HeapRb::<f32>::new(buffer_samples);
         let (producer, mut consumer) = rb.split();
