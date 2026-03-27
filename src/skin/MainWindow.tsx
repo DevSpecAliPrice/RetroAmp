@@ -434,15 +434,28 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
       drawDigit(ctx, numbers, digits[3], positions[4], 26);
     }
 
-    // 5) Draw mono/stereo indicator.
+    // 5) Draw mono/stereo indicators.
+    // Both are always drawn: the active mode uses the lit sprite (top row, y=0)
+    // and the inactive mode uses the dim sprite (bottom row, y=rowH).
+    // In MONOSTER.BMP, STEREO is the left 29px and MONO is the right 27px.
+    // In the window, they display in REVERSE order: MONO on the left at x=212,
+    // STEREO on the right at x=239. They are perfectly adjacent (212+27=239).
+    // BMP widths vary (56, 58, 54, etc.): mono source starts at max(29, w-27)
+    // to skip any gap in wider BMPs without overlapping the stereo region.
     const monoster = skin.sheets["monoster"];
     if (monoster && status.metadata) {
       const isStereo = (status.metadata.channels ?? 0) >= 2;
-      // Stereo indicator at x=212, y=41 in main window
-      if (isStereo) {
-        ctx.drawImage(monoster, 0, 0, 29, 12, 212, 41, 29, 12);
-      } else {
-        ctx.drawImage(monoster, 29, 0, 27, 12, 241, 41, 27, 12);
+      const rowH = Math.floor(monoster.height / 2);
+      if (rowH > 0) {
+        const stereoW = Math.min(29, monoster.width);
+        const monoSrcX = Math.max(29, monoster.width - 27);
+        const monoW = Math.max(0, monoster.width - monoSrcX);
+        // Mono at (212, 41) LEFT: dim if stereo, lit if mono
+        if (monoW > 0) {
+          ctx.drawImage(monoster, monoSrcX, isStereo ? rowH : 0, monoW, rowH, 212, 41, monoW, rowH);
+        }
+        // Stereo at (239, 41) RIGHT: lit if stereo, dim if mono
+        ctx.drawImage(monoster, 0, isStereo ? 0 : rowH, stereoW, rowH, 239, 41, stereoW, rowH);
       }
     }
 
@@ -524,31 +537,46 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
     }
 
     // 9) Draw volume slider.
+    // Volume BMPs vary in height: 433 (standard with thumbs), 418-422 (frames
+    // only, no thumb area), etc. Only draw if the source region fits.
     const volumeSheet = skin.sheets["volume"];
     if (volumeSheet) {
-      // The volume BMP has 28 frames stacked vertically, each 68x15.
       const frame = Math.round(status.volume * 27);
       const srcY = frame * 15;
-      ctx.drawImage(volumeSheet, 0, srcY, 68, 14, 107, 57, 68, 14);
-      // Draw thumb.
+      if (srcY + 14 <= volumeSheet.height) {
+        ctx.drawImage(volumeSheet, 0, srcY, 68, 14, 107, 57, 68, 14);
+      }
+      // Draw thumb (standard position y=422, needs 11px).
       const thumbX = Math.round(status.volume * (68 - 14));
       const volThumbSrcX = pressed === "volume" ? 0 : 15;
-      ctx.drawImage(volumeSheet, volThumbSrcX, 422, 14, 11, 107 + thumbX, 58, 14, 11);
+      if (422 + 11 <= volumeSheet.height) {
+        ctx.drawImage(volumeSheet, volThumbSrcX, 422, 14, 11, 107 + thumbX, 58, 14, 11);
+      }
     }
 
     // 10) Draw balance slider.
+    // Balance BMPs vary widely: 68×433 (standard), 47×433 (common — visible
+    // 38px starts at x=9), 47×13 or 38×13 (thumb-only, no usable frames).
     const balanceSheet = skin.sheets["balance"];
     if (balanceSheet) {
-      // Balance BMP: 28 frames of 38x15, same vertical layout as volume.
-      // balance: -1.0..1.0 → fraction 0.0..1.0
       const balFraction = (status.balance + 1) / 2;
       const balFrame = Math.round(balFraction * 27);
       const balSrcY = balFrame * 15;
-      ctx.drawImage(balanceSheet, 9, balSrcY, 38, 14, 177, 57, 38, 14);
-      // Draw thumb.
+      // Detect source X: standard 68px uses x=9, 47px also uses x=9 (47-9=38),
+      // pre-cropped 38px uses x=0.
+      const balSrcX = balanceSheet.width >= 47 ? 9 : Math.max(0, balanceSheet.width - 38);
+      const balDrawW = Math.min(38, balanceSheet.width - balSrcX);
+      if (balDrawW > 0 && balSrcY + 14 <= balanceSheet.height) {
+        ctx.drawImage(balanceSheet, balSrcX, balSrcY, balDrawW, 14, 177, 57, balDrawW, 14);
+      }
+      // Draw thumb — try balance sheet first, fall back to volume sheet.
       const balThumbX = Math.round(balFraction * (38 - 14));
       const balThumbSrcX = pressed === "balance" ? 0 : 15;
-      ctx.drawImage(balanceSheet, balThumbSrcX, 422, 14, 11, 177 + balThumbX, 58, 14, 11);
+      if (422 + 11 <= balanceSheet.height) {
+        ctx.drawImage(balanceSheet, balThumbSrcX, 422, 14, 11, 177 + balThumbX, 58, 14, 11);
+      } else if (volumeSheet && 422 + 11 <= volumeSheet.height) {
+        ctx.drawImage(volumeSheet, balThumbSrcX, 422, 14, 11, 177 + balThumbX, 58, 14, 11);
+      }
     }
 
     } // end normal mode
