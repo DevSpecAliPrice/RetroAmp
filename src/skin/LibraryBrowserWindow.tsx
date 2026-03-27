@@ -734,10 +734,11 @@ export default function LibraryBrowserWindow({ skin, scale }: Props) {
         </div>
       </div>
 
-      {/* BOTTOM BAR */}
-      <div style={{ display: "flex", height: 38 * s, minHeight: 38 * s, flexShrink: 0 }}>
-        <div style={{ flex: 1, ...bgTile("PL_BOTTOM_TILE", "repeat-x"), position: "relative" }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", height: "100%", padding: `0 ${8 * s}px`, fontFamily: `"${ps.font}", Arial, sans-serif`, fontSize: smallFont, color: ps.normal }}>
+      {/* BOTTOM BAR — flipped title bar for clean corner transitions */}
+      <div style={{ display: "flex", height: 20 * s, minHeight: 20 * s, flexShrink: 0 }}>
+        <div style={{ width: 25 * s, flexShrink: 0, ...bg("PL_TOP_LEFT_SELECTED"), transform: "scaleY(-1)" }} />
+        <div style={{ flex: 1, minWidth: 0, overflow: "hidden", position: "relative", ...bgTile("PL_TOP_TILE_SELECTED", "repeat-x"), transform: "scaleY(-1)" }}>
+          <div style={{ transform: "scaleY(-1)", display: "flex", alignItems: "center", justifyContent: "space-between", height: "100%", padding: `0 ${8 * s}px`, fontFamily: `"${ps.font}", Arial, sans-serif`, fontSize: smallFont, color: ps.normal }}>
             <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
               {statusMsg ? <span style={{ color: ps.current }}>{statusMsg}</span>
                 : selectedIds.size > 1 ? `${selectedIds.size} selected`
@@ -745,7 +746,9 @@ export default function LibraryBrowserWindow({ skin, scale }: Props) {
             </span>
             {libraryDirs.length > 0 && <span onClick={addDir} style={{ cursor: "pointer", opacity: 0.7, marginLeft: 4 * s, flexShrink: 0 }}>+ Folder</span>}
           </div>
-          <div style={{ position: "absolute", right: 0, bottom: 0, width: 20 * s, height: 20 * s, cursor: "se-resize" }}
+        </div>
+        <div style={{ width: 25 * s, flexShrink: 0, position: "relative", ...bg("PL_TOP_RIGHT_SELECTED"), transform: "scaleY(-1)" }}>
+          <div style={{ position: "absolute", right: 0, top: 0, width: 20 * s, height: 20 * s, cursor: "se-resize" }}
             onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); getCurrentWindow().startResizeDragging("SouthEast" as any); }} />
         </div>
       </div>

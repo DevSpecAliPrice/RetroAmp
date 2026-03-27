@@ -290,14 +290,11 @@ export default function SettingsWindow({ skin, scale }: Props) {
         <div style={{ width: 20 * s, flexShrink: 0, ...bgTile("PL_RIGHT_TILE", "repeat-y") }} />
       </div>
 
-      {/* Bottom bar */}
-      <div style={{
-        display: "flex",
-        height: 38 * s,
-        minHeight: 38 * s,
-        flexShrink: 0,
-      }}>
-        <div style={{ flex: 1, ...bgTile("PL_BOTTOM_TILE", "repeat-x") }} />
+      {/* Bottom bar — flipped title bar for clean corner transitions */}
+      <div style={{ display: "flex", height: 20 * s, minHeight: 20 * s, flexShrink: 0 }}>
+        <div style={{ width: 25 * s, flexShrink: 0, ...bg("PL_TOP_LEFT_SELECTED"), transform: "scaleY(-1)" }} />
+        <div style={{ flex: 1, minWidth: 0, overflow: "hidden", ...bgTile("PL_TOP_TILE_SELECTED", "repeat-x"), transform: "scaleY(-1)" }} />
+        <div style={{ width: 25 * s, flexShrink: 0, ...bg("PL_TOP_RIGHT_SELECTED"), transform: "scaleY(-1)" }} />
       </div>
     </div>
   );

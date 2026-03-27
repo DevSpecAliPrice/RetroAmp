@@ -808,13 +808,12 @@ export default function RadioBrowserWindow({ skin, scale }: Props) {
         </div>
       </div>
 
-      {/* ── BOTTOM BAR ── */}
-      <div style={{
-        display: "flex", height: 38 * s, minHeight: 38 * s, flexShrink: 0,
-      }}>
-        <div style={{ flex: 1, ...bgTile("PL_BOTTOM_TILE", "repeat-x"), position: "relative" }}>
+      {/* ── BOTTOM BAR — flipped title bar for clean corner transitions ── */}
+      <div style={{ display: "flex", height: 20 * s, minHeight: 20 * s, flexShrink: 0 }}>
+        <div style={{ width: 25 * s, flexShrink: 0, ...bg("PL_TOP_LEFT_SELECTED"), transform: "scaleY(-1)" }} />
+        <div style={{ flex: 1, minWidth: 0, overflow: "hidden", position: "relative", ...bgTile("PL_TOP_TILE_SELECTED", "repeat-x"), transform: "scaleY(-1)" }}>
           <div style={{
-            display: "flex", alignItems: "center", justifyContent: "center",
+            transform: "scaleY(-1)", display: "flex", alignItems: "center", justifyContent: "center",
             height: "100%",
             fontFamily: `"${ps.font}", Arial, sans-serif`,
             fontSize: smallFont,
@@ -826,15 +825,11 @@ export default function RadioBrowserWindow({ skin, scale }: Props) {
                 ? (apiResults.length > 0 ? `${apiResults.length} results` : "")
                 : `${displayStations.length} station${displayStations.length !== 1 ? "s" : ""}`}
           </div>
+        </div>
+        <div style={{ width: 25 * s, flexShrink: 0, position: "relative", ...bg("PL_TOP_RIGHT_SELECTED"), transform: "scaleY(-1)" }}>
           <div
-            style={{
-              position: "absolute", right: 0, bottom: 0,
-              width: 20 * s, height: 20 * s, cursor: "se-resize",
-            }}
-            onMouseDown={(e) => {
-              e.preventDefault(); e.stopPropagation();
-              getCurrentWindow().startResizeDragging("SouthEast" as any);
-            }}
+            style={{ position: "absolute", right: 0, top: 0, width: 20 * s, height: 20 * s, cursor: "se-resize" }}
+            onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); getCurrentWindow().startResizeDragging("SouthEast" as any); }}
           />
         </div>
       </div>
