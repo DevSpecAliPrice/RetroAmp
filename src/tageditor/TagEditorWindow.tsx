@@ -212,11 +212,7 @@ export default function TagEditorWindow({ skin, scale }: Props) {
         }}
       >
         <div style={{ width: 25 * s, height: 20 * s, flexShrink: 0, ...bg("PL_TOP_LEFT_SELECTED") }} />
-        <div style={{ flex: 1, ...bgTile("PL_TOP_TILE_SELECTED", "repeat-x"), display: "flex", alignItems: "center", justifyContent: "center" }}>
-          <span style={{ color: ps.normal, fontSize: Math.round(8 * s), fontFamily: `"${ps.font}", Arial, sans-serif`, userSelect: "none" }}>
-            TAG EDITOR
-          </span>
-        </div>
+        <div style={{ flex: 1, ...bgTile("PL_TOP_TILE_SELECTED", "repeat-x") }} />
         <div style={{
           width: 25 * s, height: 20 * s, flexShrink: 0, position: "relative",
           ...bg("PL_TOP_RIGHT_SELECTED"),
@@ -237,6 +233,7 @@ export default function TagEditorWindow({ skin, scale }: Props) {
         <div style={{ width: 12 * s, flexShrink: 0, ...bgTile("PL_LEFT_TILE", "repeat-y") }} />
 
         <div className="tageditor-root" style={{ background: ps.normalbg, color: ps.normal }}>
+          <div style={{ padding: `${3 * s}px ${4 * s}px`, fontFamily: `"${ps.font}", Arial, sans-serif`, fontSize: Math.max(8, Math.round(9 * s)), color: ps.normal, textAlign: "center", userSelect: "none", flexShrink: 0, borderBottom: `1px solid ${ps.selectedbg}` }}>TAG EDITOR</div>
           {error && (
             <div className="tageditor-loading" style={{ color: "#ff4444" }}>
               Error: {error}

@@ -207,11 +207,7 @@ export default function SettingsWindow({ skin, scale }: Props) {
         }}
       >
         <div style={{ width: 25 * s, height: 20 * s, flexShrink: 0, ...bg("PL_TOP_LEFT_SELECTED") }} />
-        <div style={{ flex: 1, ...bgTile("PL_TOP_TILE_SELECTED", "repeat-x"), display: "flex", alignItems: "center", justifyContent: "center" }}>
-          <span style={{ color: ps.normal, fontSize: Math.round(8 * s), fontFamily: `"${ps.font}", Arial, sans-serif`, userSelect: "none" }}>
-            PREFERENCES
-          </span>
-        </div>
+        <div style={{ flex: 1, ...bgTile("PL_TOP_TILE_SELECTED", "repeat-x") }} />
         <div style={{
           width: 25 * s, height: 20 * s, flexShrink: 0, position: "relative",
           ...bg("PL_TOP_RIGHT_SELECTED"),
@@ -233,6 +229,7 @@ export default function SettingsWindow({ skin, scale }: Props) {
 
         {/* Content area */}
         <div className="settings-root" style={{ background: ps.normalbg }}>
+          <div style={{ padding: `${3 * s}px ${4 * s}px`, fontFamily: `"${ps.font}", Arial, sans-serif`, fontSize: Math.max(8, Math.round(9 * s)), color: ps.normal, textAlign: "center", userSelect: "none", flexShrink: 0, borderBottom: `1px solid ${ps.selectedbg}` }}>PREFERENCES</div>
           <div className="settings-tabs" style={{ borderBottomColor: ps.selectedbg }}>
             <button
               className={`settings-tab ${activeTab === "skins" ? "active" : ""}`}

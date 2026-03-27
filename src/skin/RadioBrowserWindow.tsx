@@ -555,11 +555,7 @@ export default function RadioBrowserWindow({ skin, scale }: Props) {
         }}
       >
         <div style={{ width: 25 * s, height: 20 * s, flexShrink: 0, ...bg("PL_TOP_LEFT_SELECTED") }} />
-        <div style={{ flex: 1, ...bgTile("PL_TOP_TILE_SELECTED", "repeat-x"), display: "flex", alignItems: "center", justifyContent: "center" }}>
-          <span style={{ color: ps.normal, fontSize: Math.round(8 * s), fontFamily: `"${ps.font}", Arial, sans-serif`, userSelect: "none" }}>
-            RADIO BROWSER
-          </span>
-        </div>
+        <div style={{ flex: 1, ...bgTile("PL_TOP_TILE_SELECTED", "repeat-x") }} />
         <div style={{
           width: 25 * s, height: 20 * s, flexShrink: 0, position: "relative",
           ...bg("PL_TOP_RIGHT_SELECTED"),
@@ -581,6 +577,8 @@ export default function RadioBrowserWindow({ skin, scale }: Props) {
 
         {/* Content area */}
         <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", background: ps.normalbg }}>
+
+          <div style={{ padding: `${3 * s}px ${4 * s}px`, fontFamily: `"${ps.font}", Arial, sans-serif`, fontSize: smallFont, color: ps.normal, textAlign: "center", userSelect: "none", flexShrink: 0, borderBottom: `1px solid ${ps.selectedbg}` }}>RADIO BROWSER</div>
 
           {/* Tabs */}
           <div style={{
@@ -776,6 +774,15 @@ export default function RadioBrowserWindow({ skin, scale }: Props) {
               + Add
             </div>
           </div>
+
+          {/* Status bar */}
+          <div style={{ padding: `${2 * s}px ${4 * s}px`, fontFamily: `"${ps.font}", Arial, sans-serif`, fontSize: smallFont, color: ps.normal, textAlign: "center", flexShrink: 0, borderTop: `1px solid ${ps.selectedbg}` }}>
+            {statusMsg
+              ? <span style={{ color: ps.current }}>{statusMsg}</span>
+              : isDiscover
+                ? (apiResults.length > 0 ? `${apiResults.length} results` : "\u00A0")
+                : `${displayStations.length} station${displayStations.length !== 1 ? "s" : ""}`}
+          </div>
         </div>
 
         {/* Right edge with scrollbar */}
@@ -811,21 +818,7 @@ export default function RadioBrowserWindow({ skin, scale }: Props) {
       {/* ── BOTTOM BAR — flipped title bar for clean corner transitions ── */}
       <div style={{ display: "flex", height: 20 * s, minHeight: 20 * s, flexShrink: 0 }}>
         <div style={{ width: 25 * s, flexShrink: 0, ...bg("PL_TOP_LEFT_SELECTED"), transform: "scaleY(-1)" }} />
-        <div style={{ flex: 1, minWidth: 0, overflow: "hidden", position: "relative", ...bgTile("PL_TOP_TILE_SELECTED", "repeat-x"), transform: "scaleY(-1)" }}>
-          <div style={{
-            transform: "scaleY(-1)", display: "flex", alignItems: "center", justifyContent: "center",
-            height: "100%",
-            fontFamily: `"${ps.font}", Arial, sans-serif`,
-            fontSize: smallFont,
-            color: ps.normal,
-          }}>
-            {statusMsg
-              ? <span style={{ color: ps.current, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "100%", display: "inline-block" }}>{statusMsg}</span>
-              : isDiscover
-                ? (apiResults.length > 0 ? `${apiResults.length} results` : "")
-                : `${displayStations.length} station${displayStations.length !== 1 ? "s" : ""}`}
-          </div>
-        </div>
+        <div style={{ flex: 1, minWidth: 0, overflow: "hidden", ...bgTile("PL_TOP_TILE_SELECTED", "repeat-x"), transform: "scaleY(-1)" }} />
         <div style={{ width: 25 * s, flexShrink: 0, position: "relative", ...bg("PL_TOP_RIGHT_SELECTED"), transform: "scaleY(-1)" }}>
           <div
             style={{ position: "absolute", right: 0, top: 0, width: 20 * s, height: 20 * s, cursor: "se-resize" }}

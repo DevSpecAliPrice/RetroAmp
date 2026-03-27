@@ -575,9 +575,7 @@ export default function LibraryBrowserWindow({ skin, scale }: Props) {
         onMouseDown={(e) => { if ((e.target as HTMLElement).closest("[data-action]")) return; e.stopPropagation(); getCurrentWindow().startDragging(); }}
       >
         <div style={{ width: 25 * s, height: 20 * s, flexShrink: 0, ...bg("PL_TOP_LEFT_SELECTED") }} />
-        <div style={{ flex: 1, ...bgTile("PL_TOP_TILE_SELECTED", "repeat-x"), display: "flex", alignItems: "center", justifyContent: "center" }}>
-          <span style={{ color: ps.normal, fontSize: Math.round(8 * s), fontFamily: `"${ps.font}", Arial, sans-serif`, userSelect: "none" }}>MEDIA LIBRARY</span>
-        </div>
+        <div style={{ flex: 1, ...bgTile("PL_TOP_TILE_SELECTED", "repeat-x") }} />
         <div style={{ width: 25 * s, height: 20 * s, flexShrink: 0, position: "relative", ...bg("PL_TOP_RIGHT_SELECTED") }}>
           <div data-action="close" style={{ position: "absolute", right: 3 * s, top: 3 * s, width: 9 * s, height: 9 * s, cursor: "pointer" }}
             onClick={() => invoke("toggle_window", { windowId: "LibraryBrowser" })} />
@@ -588,6 +586,7 @@ export default function LibraryBrowserWindow({ skin, scale }: Props) {
       <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
         <div style={{ width: 12 * s, flexShrink: 0, ...bgTile("PL_LEFT_TILE", "repeat-y") }} />
         <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", background: ps.normalbg }}>
+          <div style={{ padding: `${3 * s}px ${4 * s}px`, fontFamily: `"${ps.font}", Arial, sans-serif`, fontSize: smallFont, color: ps.normal, textAlign: "center", userSelect: "none", flexShrink: 0, borderBottom: `1px solid ${ps.selectedbg}` }}>MEDIA LIBRARY</div>
           {isSetup ? (
             <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8 * s, padding: 16 * s, fontFamily: `"${ps.font}", Arial, sans-serif`, fontSize: smallFont, color: ps.normal }}>
               <div style={{ textAlign: "center", opacity: 0.7 }}>{libraryDirs.length === 0 ? "No music directories configured." : "Directories configured. Click Scan to index."}</div>
@@ -724,6 +723,16 @@ export default function LibraryBrowserWindow({ skin, scale }: Props) {
                 </div>
               </div>
             )}
+
+            {/* Status bar */}
+            <div style={{ padding: `${2 * s}px ${4 * s}px`, fontFamily: `"${ps.font}", Arial, sans-serif`, fontSize: smallFont, color: ps.normal, display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0, borderTop: `1px solid ${ps.selectedbg}` }}>
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
+                {statusMsg ? <span style={{ color: ps.current }}>{statusMsg}</span>
+                  : selectedIds.size > 1 ? `${selectedIds.size} selected`
+                  : `${trackCount} track${trackCount !== 1 ? "s" : ""} in library`}
+              </span>
+              {libraryDirs.length > 0 && <span onClick={addDir} style={{ cursor: "pointer", opacity: 0.7, marginLeft: 4 * s, flexShrink: 0 }}>+ Folder</span>}
+            </div>
           </>)}
         </div>
 
@@ -745,16 +754,7 @@ export default function LibraryBrowserWindow({ skin, scale }: Props) {
       {/* BOTTOM BAR — flipped title bar for clean corner transitions */}
       <div style={{ display: "flex", height: 20 * s, minHeight: 20 * s, flexShrink: 0 }}>
         <div style={{ width: 25 * s, flexShrink: 0, ...bg("PL_TOP_LEFT_SELECTED"), transform: "scaleY(-1)" }} />
-        <div style={{ flex: 1, minWidth: 0, overflow: "hidden", position: "relative", ...bgTile("PL_TOP_TILE_SELECTED", "repeat-x"), transform: "scaleY(-1)" }}>
-          <div style={{ transform: "scaleY(-1)", display: "flex", alignItems: "center", justifyContent: "space-between", height: "100%", padding: `0 ${8 * s}px`, fontFamily: `"${ps.font}", Arial, sans-serif`, fontSize: smallFont, color: ps.normal }}>
-            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
-              {statusMsg ? <span style={{ color: ps.current }}>{statusMsg}</span>
-                : selectedIds.size > 1 ? `${selectedIds.size} selected`
-                : `${trackCount} track${trackCount !== 1 ? "s" : ""} in library`}
-            </span>
-            {libraryDirs.length > 0 && <span onClick={addDir} style={{ cursor: "pointer", opacity: 0.7, marginLeft: 4 * s, flexShrink: 0 }}>+ Folder</span>}
-          </div>
-        </div>
+        <div style={{ flex: 1, minWidth: 0, overflow: "hidden", ...bgTile("PL_TOP_TILE_SELECTED", "repeat-x"), transform: "scaleY(-1)" }} />
         <div style={{ width: 25 * s, flexShrink: 0, position: "relative", ...bg("PL_TOP_RIGHT_SELECTED"), transform: "scaleY(-1)" }}>
           <div style={{ position: "absolute", right: 0, top: 0, width: 20 * s, height: 20 * s, cursor: "se-resize" }}
             onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); getCurrentWindow().startResizeDragging("SouthEast" as any); }} />
