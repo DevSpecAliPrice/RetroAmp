@@ -88,6 +88,7 @@ impl RadioSource {
         }
         let icy_metadata = Arc::clone(&reader.icy_metadata);
         let connected = Arc::clone(&reader.connected);
+        let stop_flag = reader.stop_flag();
 
         // Wait for the ring buffer to accumulate some data before probing.
         // Symphonia's probe needs real audio bytes; if it gets 0 it sees EOF.
@@ -117,7 +118,7 @@ impl RadioSource {
         }
 
         // Wrap the consumer as a MediaSource → MediaSourceStream.
-        let buf_reader = StreamBufReader::new(consumer);
+        let buf_reader = StreamBufReader::new(consumer, stop_flag);
         let mss = MediaSourceStream::new(Box::new(buf_reader), Default::default());
 
         // Provide a format hint based on the Content-Type header.

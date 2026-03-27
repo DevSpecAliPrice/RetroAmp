@@ -11,6 +11,7 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Top-level application configuration.
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -113,6 +114,10 @@ pub struct LibraryConfig {
     /// Sort mode for browse tabs (artists/albums/genres): "name" or "count".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browse_sort_by: Option<String>,
+
+    /// Per-column widths (unscaled pixels). Only present for columns the user has resized.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub column_widths: HashMap<String, f64>,
 }
 
 /// Radio browser preferences.
@@ -125,6 +130,10 @@ pub struct RadioConfig {
     /// Whether hidden stations are shown.
     #[serde(default)]
     pub show_hidden: bool,
+
+    /// Per-column widths (unscaled pixels). Only present for columns the user has resized.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub column_widths: HashMap<String, f64>,
 }
 
 

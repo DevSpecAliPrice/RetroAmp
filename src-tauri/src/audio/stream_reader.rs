@@ -146,6 +146,12 @@ impl StreamReader {
         self.consumer.take()
     }
 
+    /// Get a clone of the stop flag (shared with `StreamBufReader` so it knows
+    /// when to return EOF).
+    pub fn stop_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.stop)
+    }
+
     /// Stop the reader thread.
     pub fn stop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
@@ -330,15 +336,19 @@ fn header_str(headers: &ureq::http::HeaderMap, name: &str) -> Option<String> {
 
 /// A `MediaSource` adapter over the ring buffer consumer for the audio thread.
 ///
-/// When the buffer is empty (network stall), briefly spin-waits before
-/// returning 0 bytes. This keeps the audio thread responsive while giving
-/// the network a chance to catch up.
+/// When the buffer is empty (network stall), blocks until data arrives or the
+/// stream is stopped. Returning `Ok(0)` (EOF) to Symphonia must only happen
+/// when the source is truly finished — a premature EOF corrupts
+/// `MediaSourceStream`'s internal position tracking and causes audio to repeat.
 ///
 /// The inner consumer is wrapped in a Mutex to satisfy `Sync` (required by
 /// Symphonia's `MediaSource`). Since only the audio thread accesses this,
 /// the lock is never contended.
 pub struct StreamBufReader {
     consumer: Mutex<ringbuf::HeapCons<u8>>,
+    /// Shared stop flag — set when the `StreamReader` (and its owning
+    /// `RadioSource`) is being dropped. Only then is EOF returned.
+    stop: Arc<AtomicBool>,
 }
 
 // Safety: StreamBufReader is only accessed from the audio thread. The Mutex
@@ -346,9 +356,10 @@ pub struct StreamBufReader {
 unsafe impl Sync for StreamBufReader {}
 
 impl StreamBufReader {
-    pub fn new(consumer: ringbuf::HeapCons<u8>) -> Self {
+    pub fn new(consumer: ringbuf::HeapCons<u8>, stop: Arc<AtomicBool>) -> Self {
         Self {
             consumer: Mutex::new(consumer),
+            stop,
         }
     }
 }
@@ -363,22 +374,21 @@ impl Read for StreamBufReader {
             return Ok(n);
         }
 
-        // Buffer empty — spin-wait up to ~200ms. This is long enough for
-        // network jitter but short enough to keep the audio thread responsive
-        // (a ~200ms stall produces a brief silence gap, not a hang).
-        for _ in 0..100 {
+        // Buffer empty — block until data arrives or the source is stopped.
+        // Never return Ok(0) for a temporary underrun; Symphonia treats that
+        // as a permanent EOF which corrupts its internal buffer tracking.
+        loop {
+            if self.stop.load(Ordering::Relaxed) {
+                return Ok(0); // True EOF — source is being torn down.
+            }
             drop(consumer);
-            thread::sleep(Duration::from_millis(2));
+            thread::sleep(Duration::from_millis(5));
             consumer = self.consumer.lock().unwrap();
             let n = consumer.pop_slice(buf);
             if n > 0 {
                 return Ok(n);
             }
         }
-
-        // Still empty — return 0. Symphonia will see this as EOF;
-        // the RadioSource handles it by returning silence.
-        Ok(0)
     }
 }
 

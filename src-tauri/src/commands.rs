@@ -1222,8 +1222,8 @@ pub fn get_library_tracks(
     search: Option<String>,
     sort_by: Option<String>,
     sort_dir: Option<String>,
-    offset: Option<usize>,
-    limit: Option<usize>,
+    offset: Option<i64>,
+    limit: Option<i64>,
 ) -> Result<Vec<library::db::LibraryTrack>, String> {
     let db = database.lock().map_err(|e| e.to_string())?;
     library::db::get_tracks(
@@ -1232,7 +1232,7 @@ pub fn get_library_tracks(
         sort_by.as_deref().unwrap_or("title"),
         sort_dir.as_deref().unwrap_or("asc"),
         offset.unwrap_or(0),
-        limit.unwrap_or(200),
+        limit.unwrap_or(-1),
     )
 }
 
@@ -1451,6 +1451,36 @@ pub fn set_radio_view_state(
     let mut cfg = crate::config::AppConfig::load();
     cfg.radio.active_tab = active_tab;
     cfg.radio.show_hidden = show_hidden;
+    cfg.save()
+}
+
+// -- Column width persistence --
+
+/// Get saved column widths for the library browser.
+#[tauri::command]
+pub fn get_library_column_widths() -> std::collections::HashMap<String, f64> {
+    crate::config::AppConfig::load().library.column_widths
+}
+
+/// Save column widths for the library browser.
+#[tauri::command]
+pub fn set_library_column_widths(widths: std::collections::HashMap<String, f64>) -> Result<(), String> {
+    let mut cfg = crate::config::AppConfig::load();
+    cfg.library.column_widths = widths;
+    cfg.save()
+}
+
+/// Get saved column widths for the radio browser.
+#[tauri::command]
+pub fn get_radio_column_widths() -> std::collections::HashMap<String, f64> {
+    crate::config::AppConfig::load().radio.column_widths
+}
+
+/// Save column widths for the radio browser.
+#[tauri::command]
+pub fn set_radio_column_widths(widths: std::collections::HashMap<String, f64>) -> Result<(), String> {
+    let mut cfg = crate::config::AppConfig::load();
+    cfg.radio.column_widths = widths;
     cfg.save()
 }
 

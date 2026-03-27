@@ -137,6 +137,8 @@ export default function LibraryBrowserWindow({ skin, scale }: Props) {
 
   // Columns
   const [visibleCols, setVisibleCols] = useState<string[]>(DEFAULT_COLUMNS);
+  const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
+  const [colResizing, setColResizing] = useState<{ key: string; startX: number; startW: number } | null>(null);
 
   // Selection
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
@@ -153,13 +155,16 @@ export default function LibraryBrowserWindow({ skin, scale }: Props) {
   const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null);
 
 
-  // Scrollbar
+  // Scrollbar (ref-based to avoid re-renders on scroll)
   const listRef = useRef<HTMLDivElement>(null);
   const scrollTrackRef = useRef<HTMLDivElement>(null);
-  const [scrollRatio, setScrollRatio] = useState(0);
+  const scrollHandleRef = useRef<HTMLDivElement>(null);
   const [scrollNeeded, setScrollNeeded] = useState(false);
   const [scrollDragging, setScrollDragging] = useState(false);
-  const dragStartRef = useRef<{ startY: number; startRatio: number } | null>(null);
+  const dragStartRef = useRef<{ startY: number; startScroll: number } | null>(null);
+
+  // Virtual scroll for tracks tab
+  const [visibleRange, setVisibleRange] = useState({ start: 0, end: 60 });
 
   // Status
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
@@ -184,6 +189,7 @@ export default function LibraryBrowserWindow({ skin, scale }: Props) {
   useEffect(() => {
     invoke<string>("get_playlist_add_mode").then((m) => setAddMode(m as AddMode)).catch(() => {});
     invoke<string[]>("get_library_columns").then((c) => { if (c.length > 0) setVisibleCols(c); }).catch(() => {});
+    invoke<Record<string, number>>("get_library_column_widths").then((w) => { if (Object.keys(w).length > 0) setColumnWidths(w); }).catch(() => {});
     // Restore saved view state.
     invoke<{ active_tab: string | null; sort_by: string | null; sort_dir: string | null; browse_sort_by: string | null }>("get_library_view_state").then((vs) => {
       if (vs.active_tab) setTab(vs.active_tab as Tab);
@@ -213,7 +219,7 @@ export default function LibraryBrowserWindow({ skin, scale }: Props) {
     try {
       if (tab === "tracks") {
         setTracks(await invoke<LibraryTrack[]>("get_library_tracks", {
-          search: search || undefined, sortBy, sortDir, offset: 0, limit: 500,
+          search: search || undefined, sortBy, sortDir, offset: 0,
         }));
       } else if (tab === "artists") {
         setArtists(await invoke<string[]>("get_library_artists"));
@@ -473,54 +479,113 @@ export default function LibraryBrowserWindow({ skin, scale }: Props) {
   }, [playByGenre, addGenre]);
 
   const openColumnMenu = useCallback(async (mx: number, my: number) => {
-    const items: NativeMenuEntry[] = ALL_COLUMNS.map((col) => ({
-      type: "item" as const,
-      id: `col:${col.key}`,
-      label: `${visibleCols.includes(col.key) ? "\u2713 " : "   "}${col.label}`,
-    }));
+    const items: NativeMenuEntry[] = [
+      ...ALL_COLUMNS.map((col) => ({
+        type: "item" as const,
+        id: `col:${col.key}`,
+        label: `${visibleCols.includes(col.key) ? "\u2713 " : "   "}${col.label}`,
+      })),
+      ...(Object.keys(columnWidths).length > 0 ? [
+        { type: "separator" as const },
+        { type: "item" as const, id: "reset_widths", label: "Reset Column Widths" },
+      ] : []),
+    ];
     const sel = await showContextMenu(items, mx, my);
-    if (sel?.startsWith("col:")) toggleColumn(sel.slice(4));
-  }, [visibleCols, toggleColumn]);
+    if (sel === "reset_widths") { setColumnWidths({}); invoke("set_library_column_widths", { widths: {} }).catch(() => {}); }
+    else if (sel?.startsWith("col:")) toggleColumn(sel.slice(4));
+  }, [visibleCols, columnWidths, toggleColumn]);
 
-  // -- Scrollbar --
+  // -- Scrollbar (ref-based — no re-renders on scroll) --
 
-  const updateScroll = useCallback(() => {
+  const rowH = ROW_HEIGHT * s;
+  const OVERSCAN = 15;
+
+  /** Move the scrollbar handle via DOM ref (no setState). */
+  const syncHandle = useCallback(() => {
+    const el = listRef.current; const handle = scrollHandleRef.current; const track = scrollTrackRef.current;
+    if (!el || !handle || !track) return;
+    const max = el.scrollHeight - el.clientHeight;
+    if (max <= 0) { handle.style.display = "none"; return; }
+    handle.style.display = "";
+    handle.style.top = `${(el.scrollTop / max) * (track.clientHeight - HANDLE_HEIGHT)}px`;
+  }, [HANDLE_HEIGHT]);
+
+  /** Scroll handler — update handle position + virtual-scroll visible range. */
+  const onListScroll = useCallback(() => {
+    syncHandle();
     const el = listRef.current;
-    if (!el) return;
-    const needed = el.scrollHeight > el.clientHeight;
-    setScrollNeeded(needed);
-    if (needed) setScrollRatio(el.scrollTop / (el.scrollHeight - el.clientHeight));
-  }, []);
+    if (!el || tab !== "tracks") return;
+    const start = Math.max(0, Math.floor(el.scrollTop / rowH) - OVERSCAN);
+    const end = Math.min(tracks.length, Math.ceil((el.scrollTop + el.clientHeight) / rowH) + OVERSCAN);
+    setVisibleRange((prev) => (prev.start === start && prev.end === end) ? prev : { start, end });
+  }, [syncHandle, tab, tracks.length, rowH]);
 
+  /** Check whether scrollbar is needed (only on data / size changes). */
   useEffect(() => {
-    updateScroll();
     const el = listRef.current;
     if (!el) return;
-    el.addEventListener("scroll", updateScroll);
-    const ro = new ResizeObserver(updateScroll);
+    const check = () => setScrollNeeded(el.scrollHeight > el.clientHeight);
+    check();
+    const ro = new ResizeObserver(check);
     ro.observe(el);
-    return () => { el.removeEventListener("scroll", updateScroll); ro.disconnect(); };
-  }, [updateScroll, tab, tracks, artists, albums, genres, expandedTracks]);
+    return () => ro.disconnect();
+  }, [tab, tracks, artists, albums, genres, expandedTracks]);
+
+  /** Attach scroll listener. */
+  useEffect(() => {
+    const el = listRef.current;
+    if (!el) return;
+    el.addEventListener("scroll", onListScroll, { passive: true });
+    syncHandle();
+    // initialise visible range
+    onListScroll();
+    return () => el.removeEventListener("scroll", onListScroll);
+  }, [onListScroll, syncHandle]);
 
   const onScrollHandleMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault(); e.stopPropagation();
     setScrollDragging(true);
-    dragStartRef.current = { startY: e.clientY, startRatio: scrollRatio };
-  }, [scrollRatio]);
+    dragStartRef.current = { startY: e.clientY, startScroll: listRef.current?.scrollTop ?? 0 };
+  }, []);
 
   useEffect(() => {
     if (!scrollDragging) return;
     const onMove = (e: MouseEvent) => {
       const start = dragStartRef.current; const track = scrollTrackRef.current; const list = listRef.current;
       if (!start || !track || !list) return;
-      const delta = (e.clientY - start.startY) / (track.clientHeight - HANDLE_HEIGHT);
-      list.scrollTop = Math.max(0, Math.min(1, start.startRatio + delta)) * (list.scrollHeight - list.clientHeight);
+      const trackH = track.clientHeight - HANDLE_HEIGHT;
+      if (trackH <= 0) return;
+      const maxScroll = list.scrollHeight - list.clientHeight;
+      list.scrollTop = start.startScroll + (e.clientY - start.startY) / trackH * maxScroll;
     };
     const onUp = () => setScrollDragging(false);
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
     return () => { window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
   }, [scrollDragging, HANDLE_HEIGHT]);
+
+  // -- Column resize --
+  useEffect(() => {
+    if (!colResizing) return;
+    const onMove = (e: MouseEvent) => {
+      const delta = e.clientX - colResizing.startX;
+      const newW = Math.max(16, colResizing.startW + delta / s);
+      setColumnWidths((prev) => ({ ...prev, [colResizing.key]: newW }));
+    };
+    const onUp = () => {
+      setColResizing(null);
+      setColumnWidths((prev) => { invoke("set_library_column_widths", { widths: prev }).catch(() => {}); return prev; });
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => { window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
+  }, [colResizing, s]);
+
+  const colStyle = useCallback((col: ColumnDef): React.CSSProperties => {
+    if (col.key in columnWidths) return { width: columnWidths[col.key] * s, flexShrink: 0, flexGrow: 0 };
+    if (col.flex) return { flex: col.flex, minWidth: 0 };
+    return { width: col.width! * s, flexShrink: 0 };
+  }, [columnWidths, s]);
 
   // -- Sprite helpers --
   const bg = (name: string) => ({ backgroundImage: sp[name] ? `url(${sp[name]})` : "none", backgroundRepeat: "no-repeat" as const, backgroundSize: "100% 100%" });
@@ -556,7 +621,7 @@ export default function LibraryBrowserWindow({ skin, scale }: Props) {
       >
         {cols.map((col) => (
           <div key={col.key} style={{
-            ...(col.flex ? { flex: col.flex } : { width: col.width! * s, flexShrink: 0 }),
+            ...colStyle(col),
             overflow: "hidden", textOverflow: "ellipsis",
             textAlign: col.key === "duration" || col.key === "year" || col.key === "bitrate" ? "right" : "left",
             opacity: ["artist", "album", "genre", "year", "format", "bitrate", "sample_rate"].includes(col.key) ? 0.7 : 1,
@@ -647,15 +712,24 @@ export default function LibraryBrowserWindow({ skin, scale }: Props) {
                 style={{ width: "100%", boxSizing: "border-box", background: ps.normalbg, color: ps.normal, border: `1px solid ${ps.selectedbg}`, padding: `${2 * s}px ${4 * s}px`, fontFamily: `"${ps.font}", Arial, sans-serif`, fontSize: smallFont, outline: "none" }} />
             </div>
 
-            {/* Column headers (tracks tab) — right-click to toggle columns */}
+            {/* Column headers (tracks tab) — right-click to toggle columns, drag edges to resize */}
             {tab === "tracks" && (
               <div style={{ display: "flex", padding: `0 ${4 * s}px`, flexShrink: 0, borderBottom: `1px solid ${ps.selectedbg}`, fontFamily: `"${ps.font}", Arial, sans-serif`, fontSize: tinyFont, color: ps.normal, opacity: 0.7, cursor: "pointer" }}
                 onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); openColumnMenu(e.clientX, e.clientY); }}
               >
                 {columns.map((col) => (
-                  <div key={col.key} onClick={() => col.sortKey && toggleSort(col.sortKey)}
-                    style={{ ...(col.flex ? { flex: col.flex } : { width: col.width! * s, flexShrink: 0 }), padding: `${1 * s}px 0`, textAlign: col.key === "duration" || col.key === "year" || col.key === "bitrate" ? "right" : "left" }}>
-                    {col.label}{col.sortKey ? sortArrow(col.sortKey) : ""}
+                  <div key={col.key} style={{ ...colStyle(col), position: "relative", padding: `${1 * s}px 0`, textAlign: col.key === "duration" || col.key === "year" || col.key === "bitrate" ? "right" : "left" }}>
+                    <span onClick={() => col.sortKey && toggleSort(col.sortKey)} style={{ cursor: "pointer" }}>
+                      {col.label}{col.sortKey ? sortArrow(col.sortKey) : ""}
+                    </span>
+                    <div
+                      onMouseDown={(e) => {
+                        e.preventDefault(); e.stopPropagation();
+                        const cellW = e.currentTarget.parentElement!.getBoundingClientRect().width / s;
+                        setColResizing({ key: col.key, startX: e.clientX, startW: cellW });
+                      }}
+                      style={{ position: "absolute", right: 0, top: 0, bottom: 0, width: Math.max(3, 3 * s), cursor: "col-resize" }}
+                    />
                   </div>
                 ))}
               </div>
@@ -663,8 +737,14 @@ export default function LibraryBrowserWindow({ skin, scale }: Props) {
 
             {/* Scrollable list */}
             <div ref={listRef} style={{ flex: 1, overflowY: "auto", overflowX: "hidden", fontFamily: `"${ps.font}", Arial, sans-serif`, fontSize: smallFont, scrollbarWidth: "none" }}>
-              {/* TRACKS */}
-              {tab === "tracks" && tracks.map((t) => renderTrackRow(t, true))}
+              {/* TRACKS — virtualised: only render visible rows */}
+              {tab === "tracks" && tracks.length > 0 && (
+                <div style={{ height: tracks.length * rowH, position: "relative" }}>
+                  <div style={{ position: "absolute", top: visibleRange.start * rowH, left: 0, right: 0 }}>
+                    {tracks.slice(visibleRange.start, visibleRange.end).map((t) => renderTrackRow(t, true))}
+                  </div>
+                </div>
+              )}
 
               {/* ARTISTS */}
               {tab === "artists" && filteredArtists.map((artist) => (
@@ -760,15 +840,13 @@ export default function LibraryBrowserWindow({ skin, scale }: Props) {
         {/* Scrollbar */}
         <div ref={scrollTrackRef} style={{ width: 20 * s, flexShrink: 0, position: "relative", ...bgTile("PL_RIGHT_TILE", "repeat-y") }}
           onMouseDown={(e) => { if (listRef.current && scrollTrackRef.current) { const r = (e.clientY - scrollTrackRef.current.getBoundingClientRect().top) / scrollTrackRef.current.clientHeight; listRef.current.scrollTop = r * (listRef.current.scrollHeight - listRef.current.clientHeight); } }}>
-          {scrollNeeded && (
-            <div onMouseDown={onScrollHandleMouseDown} style={{
-              position: "absolute", left: (20 * s - HANDLE_WIDTH) / 2,
-              top: scrollRatio * ((scrollTrackRef.current?.clientHeight ?? 0) - HANDLE_HEIGHT),
-              width: HANDLE_WIDTH, height: HANDLE_HEIGHT,
-              backgroundImage: sp[scrollDragging ? "PL_SCROLL_HANDLE_SELECTED" : "PL_SCROLL_HANDLE"] ? `url(${sp[scrollDragging ? "PL_SCROLL_HANDLE_SELECTED" : "PL_SCROLL_HANDLE"]})` : "none",
-              backgroundSize: "100% 100%", backgroundRepeat: "no-repeat", imageRendering: "pixelated" as any, cursor: "pointer",
-            }} />
-          )}
+          <div ref={scrollHandleRef} onMouseDown={onScrollHandleMouseDown} style={{
+            position: "absolute", left: (20 * s - HANDLE_WIDTH) / 2, top: 0,
+            width: HANDLE_WIDTH, height: HANDLE_HEIGHT,
+            backgroundImage: sp[scrollDragging ? "PL_SCROLL_HANDLE_SELECTED" : "PL_SCROLL_HANDLE"] ? `url(${sp[scrollDragging ? "PL_SCROLL_HANDLE_SELECTED" : "PL_SCROLL_HANDLE"]})` : "none",
+            backgroundSize: "100% 100%", backgroundRepeat: "no-repeat", imageRendering: "pixelated" as any, cursor: "pointer",
+            display: scrollNeeded ? "" : "none",
+          }} />
         </div>
       </div>
 

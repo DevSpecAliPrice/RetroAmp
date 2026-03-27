@@ -529,6 +529,11 @@ pub fn run() {
             commands::set_library_view_state,
             commands::get_radio_view_state,
             commands::set_radio_view_state,
+            // Column width persistence
+            commands::get_library_column_widths,
+            commands::set_library_column_widths,
+            commands::get_radio_column_widths,
+            commands::set_radio_column_widths,
             // Tag editor
             commands::read_track_tags,
             commands::write_track_tags,

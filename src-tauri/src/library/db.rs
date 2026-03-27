@@ -298,8 +298,8 @@ pub fn get_tracks(
     search: Option<&str>,
     sort_by: &str,
     sort_dir: &str,
-    offset: usize,
-    limit: usize,
+    offset: i64,
+    limit: i64,
 ) -> Result<Vec<LibraryTrack>, String> {
     let order = match sort_by {
         "artist" => "artist",
@@ -357,7 +357,7 @@ pub fn get_tracks(
     };
 
     let rows = if let Some(ref q) = search_param {
-        stmt.query_map(params![q, limit as i64, offset as i64], map_row)
+        stmt.query_map(params![q, limit, offset], map_row)
     } else {
         // Need a dummy param for ?1 position — rebuild without search.
         drop(stmt);
@@ -371,7 +371,7 @@ pub fn get_tracks(
         );
         let mut stmt2 = conn.prepare(&sql_no_search).map_err(|e| format!("{e}"))?;
         let rows: Vec<LibraryTrack> = stmt2
-            .query_map(params![limit as i64, offset as i64], map_row)
+            .query_map(params![limit, offset], map_row)
             .map_err(|e| format!("{e}"))?
             .flatten()
             .collect();

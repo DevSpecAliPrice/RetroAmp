@@ -62,6 +62,25 @@ const ROW_HEIGHT = 15; // px per station row (native, slightly taller than playl
 const RESIZE_EDGE = 5;
 const GENRE_FILTERS = ["Rock", "Jazz", "Electronic", "Classical", "Pop", "Ambient", "News"];
 
+// -- Radio column definitions --
+
+interface RadioColDef {
+  key: string;
+  label: string;
+  flex?: number;
+  width?: number;
+  align?: "left" | "center" | "right";
+}
+
+const RADIO_COLUMNS: RadioColDef[] = [
+  { key: "fav", label: "\u2606", width: 12 },
+  { key: "name", label: "Name", flex: 1 },
+  { key: "genre", label: "Genre", width: 60 },
+  { key: "country", label: "CC", width: 18, align: "center" },
+  { key: "bitrate", label: "kbps", width: 28, align: "right" },
+  { key: "codec", label: "Codec", width: 24, align: "right" },
+];
+
 // -- Component --
 
 export default function RadioBrowserWindow({ skin, scale }: Props) {
@@ -78,6 +97,7 @@ export default function RadioBrowserWindow({ skin, scale }: Props) {
       setShowHidden(vs.show_hidden);
       viewStateInitialized.current = true;
     }).catch(() => { viewStateInitialized.current = true; });
+    invoke<Record<string, number>>("get_radio_column_widths").then((w) => { if (Object.keys(w).length > 0) setColumnWidths(w); }).catch(() => {});
   }, []);
 
   // Save view state on change.
@@ -86,6 +106,10 @@ export default function RadioBrowserWindow({ skin, scale }: Props) {
     invoke("set_radio_view_state", { activeTab: tab, showHidden }).catch(() => {});
   }, [tab, showHidden]);
   const [urlInput, setUrlInput] = useState("");
+
+  // Column resize
+  const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
+  const [colResizing, setColResizing] = useState<{ key: string; startX: number; startW: number } | null>(null);
 
   // Station data
   const [stations, setStations] = useState<RadioStation[]>([]);
@@ -382,6 +406,29 @@ export default function RadioBrowserWindow({ skin, scale }: Props) {
     }
   }, []);
 
+  // -- Column resize --
+  useEffect(() => {
+    if (!colResizing) return;
+    const onMove = (e: MouseEvent) => {
+      const delta = e.clientX - colResizing.startX;
+      const newW = Math.max(12, colResizing.startW + delta / s);
+      setColumnWidths((prev) => ({ ...prev, [colResizing.key]: newW }));
+    };
+    const onUp = () => {
+      setColResizing(null);
+      setColumnWidths((prev) => { invoke("set_radio_column_widths", { widths: prev }).catch(() => {}); return prev; });
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => { window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
+  }, [colResizing, s]);
+
+  const radioColStyle = useCallback((col: RadioColDef): React.CSSProperties => {
+    if (col.key in columnWidths) return { width: columnWidths[col.key] * s, flexShrink: 0, flexGrow: 0 };
+    if (col.flex) return { flex: col.flex, minWidth: 0 };
+    return { width: col.width! * s, flexShrink: 0 };
+  }, [columnWidths, s]);
+
   // -- Sprite helpers --
 
   const bg = (name: string) => ({
@@ -439,6 +486,14 @@ export default function RadioBrowserWindow({ skin, scale }: Props) {
 
   // -- Render station row --
 
+  const tinyFont = Math.max(7, Math.round(8 * s));
+  const cellStyle = (col: RadioColDef, extra?: React.CSSProperties): React.CSSProperties => ({
+    ...radioColStyle(col),
+    overflow: "hidden", textOverflow: "ellipsis",
+    textAlign: col.align ?? "left",
+    ...extra,
+  });
+
   const renderLocalRow = (station: RadioStation) => (
     <div
       key={station.url}
@@ -457,36 +512,15 @@ export default function RadioBrowserWindow({ skin, scale }: Props) {
         color: station.is_hidden ? `${ps.normal}88` : ps.normal,
       }}
     >
-      <span
-        onClick={(e) => { e.stopPropagation(); toggleFavorite(station.url); }}
-        style={{ cursor: "pointer", fontSize: smallFont, width: 12 * s, textAlign: "center", flexShrink: 0 }}
+      <span onClick={(e) => { e.stopPropagation(); toggleFavorite(station.url); }}
+        style={{ ...cellStyle(RADIO_COLUMNS[0]), cursor: "pointer", fontSize: smallFont, textAlign: "center" }}
         title={station.is_favorite ? "Unfavorite" : "Favorite"}
-      >
-        {station.is_favorite ? "\u2605" : "\u2606"}
-      </span>
-      <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", fontSize: smallFont }}>
-        {station.name}
-      </span>
-      {station.genre && (
-        <span style={{ fontSize: Math.max(7, Math.round(8 * s)), opacity: 0.6, maxWidth: 60 * s, overflow: "hidden", textOverflow: "ellipsis", flexShrink: 0 }}>
-          {station.genre}
-        </span>
-      )}
-      {station.country && (
-        <span style={{ fontSize: Math.max(7, Math.round(8 * s)), opacity: 0.5, width: 18 * s, textAlign: "center", flexShrink: 0 }}>
-          {station.country}
-        </span>
-      )}
-      {station.bitrate && (
-        <span style={{ fontSize: Math.max(7, Math.round(8 * s)), opacity: 0.5, fontFamily: "monospace", width: 28 * s, textAlign: "right", flexShrink: 0 }}>
-          {station.bitrate}k
-        </span>
-      )}
-      {station.codec && (
-        <span style={{ fontSize: Math.max(7, Math.round(8 * s)), opacity: 0.5, fontFamily: "monospace", width: 24 * s, textAlign: "right", flexShrink: 0 }}>
-          {station.codec}
-        </span>
-      )}
+      >{station.is_favorite ? "\u2605" : "\u2606"}</span>
+      <span style={{ ...cellStyle(RADIO_COLUMNS[1]), fontSize: smallFont }}>{station.name}</span>
+      <span style={cellStyle(RADIO_COLUMNS[2], { fontSize: tinyFont, opacity: 0.6 })}>{station.genre ?? ""}</span>
+      <span style={cellStyle(RADIO_COLUMNS[3], { fontSize: tinyFont, opacity: 0.5 })}>{station.country ?? ""}</span>
+      <span style={cellStyle(RADIO_COLUMNS[4], { fontSize: tinyFont, opacity: 0.5, fontFamily: "monospace" })}>{station.bitrate ? `${station.bitrate}k` : ""}</span>
+      <span style={cellStyle(RADIO_COLUMNS[5], { fontSize: tinyFont, opacity: 0.5, fontFamily: "monospace" })}>{station.codec ?? ""}</span>
     </div>
   );
 
@@ -507,36 +541,15 @@ export default function RadioBrowserWindow({ skin, scale }: Props) {
         color: ps.normal,
       }}
     >
-      <span
-        onClick={(e) => { e.stopPropagation(); saveApiStation(station); }}
-        style={{ cursor: "pointer", fontSize: smallFont, width: 12 * s, textAlign: "center", flexShrink: 0 }}
+      <span onClick={(e) => { e.stopPropagation(); saveApiStation(station); }}
+        style={{ ...cellStyle(RADIO_COLUMNS[0]), cursor: "pointer", fontSize: smallFont, textAlign: "center" }}
         title="Save to Library"
-      >
-        +
-      </span>
-      <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", fontSize: smallFont }}>
-        {station.name}
-      </span>
-      {station.tags && (
-        <span style={{ fontSize: Math.max(7, Math.round(8 * s)), opacity: 0.6, maxWidth: 60 * s, overflow: "hidden", textOverflow: "ellipsis", flexShrink: 0 }}>
-          {station.tags.split(",")[0]}
-        </span>
-      )}
-      {station.countrycode && (
-        <span style={{ fontSize: Math.max(7, Math.round(8 * s)), opacity: 0.5, width: 18 * s, textAlign: "center", flexShrink: 0 }}>
-          {station.countrycode}
-        </span>
-      )}
-      {station.bitrate > 0 && (
-        <span style={{ fontSize: Math.max(7, Math.round(8 * s)), opacity: 0.5, fontFamily: "monospace", width: 28 * s, textAlign: "right", flexShrink: 0 }}>
-          {station.bitrate}k
-        </span>
-      )}
-      {station.codec && (
-        <span style={{ fontSize: Math.max(7, Math.round(8 * s)), opacity: 0.5, fontFamily: "monospace", width: 24 * s, textAlign: "right", flexShrink: 0 }}>
-          {station.codec}
-        </span>
-      )}
+      >+</span>
+      <span style={{ ...cellStyle(RADIO_COLUMNS[1]), fontSize: smallFont }}>{station.name}</span>
+      <span style={cellStyle(RADIO_COLUMNS[2], { fontSize: tinyFont, opacity: 0.6 })}>{station.tags ? station.tags.split(",")[0] : ""}</span>
+      <span style={cellStyle(RADIO_COLUMNS[3], { fontSize: tinyFont, opacity: 0.5 })}>{station.countrycode ?? ""}</span>
+      <span style={cellStyle(RADIO_COLUMNS[4], { fontSize: tinyFont, opacity: 0.5, fontFamily: "monospace" })}>{station.bitrate > 0 ? `${station.bitrate}k` : ""}</span>
+      <span style={cellStyle(RADIO_COLUMNS[5], { fontSize: tinyFont, opacity: 0.5, fontFamily: "monospace" })}>{station.codec ?? ""}</span>
     </div>
   );
 
@@ -703,6 +716,23 @@ export default function RadioBrowserWindow({ skin, scale }: Props) {
                 }}
               />
             )}
+          </div>
+
+          {/* Column headers — drag edges to resize */}
+          <div style={{ display: "flex", gap: 4 * s, padding: `0 ${4 * s}px`, flexShrink: 0, borderBottom: `1px solid ${ps.selectedbg}`, fontFamily: `"${ps.font}", Arial, sans-serif`, fontSize: tinyFont, color: ps.normal, opacity: 0.7 }}>
+            {RADIO_COLUMNS.map((col) => (
+              <div key={col.key} style={{ ...radioColStyle(col), position: "relative", padding: `${1 * s}px 0`, textAlign: col.align ?? "left" }}>
+                {col.label}
+                <div
+                  onMouseDown={(e) => {
+                    e.preventDefault(); e.stopPropagation();
+                    const cellW = e.currentTarget.parentElement!.getBoundingClientRect().width / s;
+                    setColResizing({ key: col.key, startX: e.clientX, startW: cellW });
+                  }}
+                  style={{ position: "absolute", right: 0, top: 0, bottom: 0, width: Math.max(3, 3 * s), cursor: "col-resize" }}
+                />
+              </div>
+            ))}
           </div>
 
           {/* Station list */}
