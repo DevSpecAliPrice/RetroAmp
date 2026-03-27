@@ -29,6 +29,9 @@ pub struct AppConfig {
 
     #[serde(default)]
     pub library: LibraryConfig,
+
+    #[serde(default)]
+    pub radio: RadioConfig,
 }
 
 /// Skin-related preferences.
@@ -94,6 +97,34 @@ pub struct LibraryConfig {
     /// If empty, defaults are used.
     #[serde(default)]
     pub visible_columns: Vec<String>,
+
+    /// Active tab: "tracks", "artists", "albums", "genres".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_tab: Option<String>,
+
+    /// Sort field for the tracks tab.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort_by: Option<String>,
+
+    /// Sort direction: "asc" or "desc".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort_dir: Option<String>,
+
+    /// Sort mode for browse tabs (artists/albums/genres): "name" or "count".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browse_sort_by: Option<String>,
+}
+
+/// Radio browser preferences.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RadioConfig {
+    /// Active tab: "favorites", "library", "discover".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_tab: Option<String>,
+
+    /// Whether hidden stations are shown.
+    #[serde(default)]
+    pub show_hidden: bool,
 }
 
 

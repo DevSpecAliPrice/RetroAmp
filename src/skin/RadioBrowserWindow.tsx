@@ -69,6 +69,22 @@ export default function RadioBrowserWindow({ skin, scale }: Props) {
   const [tab, setTab] = useState<Tab>("library");
   const [filter, setFilter] = useState("");
   const [showHidden, setShowHidden] = useState(false);
+
+  // Restore saved view state on mount.
+  const viewStateInitialized = useRef(false);
+  useEffect(() => {
+    invoke<{ active_tab: string | null; show_hidden: boolean }>("get_radio_view_state").then((vs) => {
+      if (vs.active_tab) setTab(vs.active_tab as Tab);
+      setShowHidden(vs.show_hidden);
+      viewStateInitialized.current = true;
+    }).catch(() => { viewStateInitialized.current = true; });
+  }, []);
+
+  // Save view state on change.
+  useEffect(() => {
+    if (!viewStateInitialized.current) return;
+    invoke("set_radio_view_state", { activeTab: tab, showHidden }).catch(() => {});
+  }, [tab, showHidden]);
   const [urlInput, setUrlInput] = useState("");
 
   // Station data

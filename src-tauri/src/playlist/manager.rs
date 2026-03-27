@@ -401,4 +401,24 @@ impl PlaylistManager {
     pub fn get_track_by_index(&self, index: usize) -> Option<&Track> {
         self.tracks.get(index)
     }
+
+    /// Get the raw file paths of all tracks (for persistence).
+    pub fn track_paths(&self) -> Vec<String> {
+        self.tracks.iter().map(|t| t.path.clone()).collect()
+    }
+
+    /// Get the current shuffle mode.
+    pub fn shuffle_mode(&self) -> &ShuffleMode {
+        &self.sequence.shuffle
+    }
+
+    /// Get the current repeat mode.
+    pub fn repeat_mode(&self) -> &RepeatMode {
+        &self.sequence.repeat
+    }
+
+    /// Get the current index.
+    pub fn current_index(&self) -> Option<usize> {
+        self.current_index
+    }
 }

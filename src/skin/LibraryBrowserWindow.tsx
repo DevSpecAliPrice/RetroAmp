@@ -184,7 +184,28 @@ export default function LibraryBrowserWindow({ skin, scale }: Props) {
   useEffect(() => {
     invoke<string>("get_playlist_add_mode").then((m) => setAddMode(m as AddMode)).catch(() => {});
     invoke<string[]>("get_library_columns").then((c) => { if (c.length > 0) setVisibleCols(c); }).catch(() => {});
+    // Restore saved view state.
+    invoke<{ active_tab: string | null; sort_by: string | null; sort_dir: string | null; browse_sort_by: string | null }>("get_library_view_state").then((vs) => {
+      if (vs.active_tab) setTab(vs.active_tab as Tab);
+      if (vs.sort_by) setSortBy(vs.sort_by);
+      if (vs.sort_dir) setSortDir(vs.sort_dir);
+      if (vs.browse_sort_by) setBrowseSortBy(vs.browse_sort_by as "name" | "count");
+    }).catch(() => {});
   }, []);
+
+  // -- Save view state on change --
+
+  const viewStateInitialized = useRef(false);
+  useEffect(() => {
+    // Skip saving on initial mount (we just loaded these values).
+    if (!viewStateInitialized.current) {
+      viewStateInitialized.current = true;
+      return;
+    }
+    invoke("set_library_view_state", {
+      activeTab: tab, sortBy, sortDir, browseSortBy,
+    }).catch(() => {});
+  }, [tab, sortBy, sortDir, browseSortBy]);
 
   // -- Data loading --
 

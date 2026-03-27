@@ -73,6 +73,101 @@ pub fn run() {
         }
     };
 
+    // Restore persisted playlist from database.
+    {
+        use crate::playlist::sequence::{ShuffleMode, RepeatMode};
+        if let Ok(db) = database.lock() {
+            match db.restore_playlist() {
+                Ok((paths, current_index, shuffle, repeat)) if !paths.is_empty() => {
+                    if let Ok(mut pl) = playlist_manager.lock() {
+                        // Only add tracks whose files still exist (skip stale entries).
+                        // Streams (URLs) are always kept.
+                        let mut index_offset: usize = 0;
+                        let mut valid_count: usize = 0;
+                        for (i, path) in paths.iter().enumerate() {
+                            let is_url = path.starts_with("http://") || path.starts_with("https://");
+                            if is_url || std::path::Path::new(path).exists() {
+                                pl.add_track(path);
+                                valid_count += 1;
+                            } else {
+                                // Track before current_index was skipped — adjust.
+                                if current_index.map_or(false, |ci| i < ci) {
+                                    index_offset += 1;
+                                }
+                            }
+                        }
+
+                        // Restore current index (adjusted for skipped tracks).
+                        if let Some(ci) = current_index {
+                            let adjusted = ci.saturating_sub(index_offset);
+                            if adjusted < valid_count {
+                                pl.play_index(adjusted);
+                                // Don't actually start playback — just set position.
+                                // The engine stays stopped; user presses play.
+                            }
+                        }
+
+                        // Restore shuffle/repeat modes.
+                        let shuffle_mode = match shuffle.as_str() {
+                            "All" => ShuffleMode::All,
+                            _ => ShuffleMode::Off,
+                        };
+                        let repeat_mode = match repeat.as_str() {
+                            "Track" => RepeatMode::Track,
+                            "Playlist" => RepeatMode::Playlist,
+                            _ => RepeatMode::Off,
+                        };
+                        pl.set_shuffle(shuffle_mode);
+                        pl.set_repeat(repeat_mode);
+
+                        log::info!(
+                            "restored playlist: {valid_count} tracks, index={:?}, shuffle={shuffle}, repeat={repeat}",
+                            current_index.map(|ci| ci.saturating_sub(index_offset))
+                        );
+                    }
+                }
+                Ok(_) => {} // Empty playlist, nothing to restore.
+                Err(e) => log::warn!("failed to restore playlist: {e}"),
+            }
+        }
+
+        // Load metadata for restored playlist tracks in the background.
+        {
+            let pl_clone = Arc::clone(&playlist_manager);
+            thread::Builder::new()
+                .name("retroamp-playlist-meta".into())
+                .spawn(move || {
+                    use crate::audio::local::LocalFileSource;
+                    use crate::audio::source::AudioSource;
+                    let ids_and_paths: Vec<(u64, String)> = {
+                        let Ok(pl) = pl_clone.lock() else { return };
+                        let state = pl.state();
+                        state.tracks.iter()
+                            .filter(|t| !t.is_stream)
+                            .map(|t| (t.id, t.path.clone()))
+                            .collect()
+                    };
+                    for (id, path) in ids_and_paths {
+                        // Bail out if the playlist was cleared by the user.
+                        if let Ok(pl) = pl_clone.lock() {
+                            if pl.track_count() == 0 { break; }
+                        }
+                        if let Ok(source) = LocalFileSource::open(&path) {
+                            if let Ok(meta) = source.metadata() {
+                                if let Ok(mut pl) = pl_clone.lock() {
+                                    pl.update_metadata(id, &meta);
+                                }
+                            }
+                        }
+                        // Yield to avoid starving other threads waiting for the lock.
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    log::info!("playlist metadata loading complete");
+                })
+                .ok();
+        }
+    }
+
     // Spawn the auto-advance listener. When the engine signals that a track
     // has finished, this thread advances the playlist and feeds the next
     // track to the engine.
@@ -287,7 +382,7 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // Save window layout before the main window closes.
+            // Save window layout and playlist state before the main window closes.
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 if window.label() == "main" {
                     if let Some(wm) = window.try_state::<Mutex<WindowManager>>() {
@@ -297,6 +392,10 @@ pub fn run() {
                             commands::save_window_layout(window.app_handle(), &states);
                         }
                     }
+                    // Save playlist to database.
+                    let db = Arc::clone(&*window.state::<Arc<Mutex<Database>>>());
+                    let pl = Arc::clone(&*window.state::<Arc<Mutex<PlaylistManager>>>());
+                    commands::save_playlist_state(&db, &pl);
                 }
             }
 
@@ -425,6 +524,11 @@ pub fn run() {
             commands::set_playlist_add_mode,
             commands::get_library_columns,
             commands::set_library_columns,
+            // Browser view state persistence
+            commands::get_library_view_state,
+            commands::set_library_view_state,
+            commands::get_radio_view_state,
+            commands::set_radio_view_state,
             // Tag editor
             commands::read_track_tags,
             commands::write_track_tags,

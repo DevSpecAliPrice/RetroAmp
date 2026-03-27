@@ -181,6 +181,19 @@ impl Database {
                     hash      TEXT PRIMARY KEY,
                     data      BLOB NOT NULL,
                     mime_type TEXT NOT NULL
+                );
+
+                -- Persisted playlist: remembers tracks between sessions.
+                CREATE TABLE IF NOT EXISTS playlist_state (
+                    id       INTEGER PRIMARY KEY CHECK (id = 1),
+                    current_index INTEGER,
+                    shuffle  TEXT NOT NULL DEFAULT 'Off',
+                    repeat   TEXT NOT NULL DEFAULT 'Off'
+                );
+
+                CREATE TABLE IF NOT EXISTS playlist_tracks (
+                    position INTEGER PRIMARY KEY,
+                    path     TEXT NOT NULL
                 );",
             )
             .map_err(|e| format!("failed to initialize database schema: {e}"))?;
@@ -677,6 +690,80 @@ impl Database {
 
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| format!("row error: {e}"))
+    }
+
+    // -- Playlist persistence methods --
+
+    /// Save the current playlist state (tracks + playback modes) to the database.
+    /// Replaces any previously saved state.
+    pub fn save_playlist(
+        &self,
+        paths: &[String],
+        current_index: Option<usize>,
+        shuffle: &str,
+        repeat: &str,
+    ) -> Result<(), String> {
+        self.conn
+            .execute("DELETE FROM playlist_tracks", [])
+            .map_err(|e| format!("failed to clear saved playlist: {e}"))?;
+
+        {
+            let mut stmt = self
+                .conn
+                .prepare("INSERT INTO playlist_tracks (position, path) VALUES (?1, ?2)")
+                .map_err(|e| format!("prepare error: {e}"))?;
+            for (i, path) in paths.iter().enumerate() {
+                stmt.execute(params![i as i64, path])
+                    .map_err(|e| format!("failed to save playlist track: {e}"))?;
+            }
+        }
+
+        self.conn
+            .execute(
+                "INSERT INTO playlist_state (id, current_index, shuffle, repeat)
+                 VALUES (1, ?1, ?2, ?3)
+                 ON CONFLICT(id) DO UPDATE SET
+                    current_index = excluded.current_index,
+                    shuffle = excluded.shuffle,
+                    repeat = excluded.repeat",
+                params![current_index.map(|i| i as i64), shuffle, repeat],
+            )
+            .map_err(|e| format!("failed to save playlist state: {e}"))?;
+
+        Ok(())
+    }
+
+    /// Restore the saved playlist. Returns (paths, current_index, shuffle, repeat).
+    pub fn restore_playlist(&self) -> Result<(Vec<String>, Option<usize>, String, String), String> {
+        let mut paths = Vec::new();
+        {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT path FROM playlist_tracks ORDER BY position")
+                .map_err(|e| format!("query error: {e}"))?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|e| format!("query error: {e}"))?;
+            for row in rows {
+                paths.push(row.map_err(|e| format!("row error: {e}"))?);
+            }
+        }
+
+        let (current_index, shuffle, repeat) = self
+            .conn
+            .query_row(
+                "SELECT current_index, shuffle, repeat FROM playlist_state WHERE id = 1",
+                [],
+                |row| {
+                    let idx: Option<i64> = row.get(0)?;
+                    let shuffle: String = row.get(1)?;
+                    let repeat: String = row.get(2)?;
+                    Ok((idx.map(|i| i as usize), shuffle, repeat))
+                },
+            )
+            .unwrap_or((None, "Off".to_string(), "Off".to_string()));
+
+        Ok((paths, current_index, shuffle, repeat))
     }
 
     /// Get the set of all paths that already have thumbnails cached.

@@ -343,6 +343,27 @@ pub fn playlist_clear(
     })
 }
 
+// -- Playlist persistence --
+
+/// Save the current playlist state to the database. Called on app exit.
+pub fn save_playlist_state(
+    database: &Arc<Mutex<Database>>,
+    playlist: &Arc<Mutex<PlaylistManager>>,
+) {
+    let Ok(pl) = playlist.lock() else { return };
+    let paths = pl.track_paths();
+    let current_index = pl.current_index();
+    let shuffle = format!("{:?}", pl.shuffle_mode());
+    let repeat = format!("{:?}", pl.repeat_mode());
+    drop(pl);
+
+    if let Ok(db) = database.lock() {
+        if let Err(e) = db.save_playlist(&paths, current_index, &shuffle, &repeat) {
+            log::warn!("failed to save playlist state: {e}");
+        }
+    }
+}
+
 // -- Window layout persistence --
 
 /// Capture the current window layout (visibility, positions, sizes) and save
@@ -1378,6 +1399,58 @@ pub fn get_library_columns() -> Vec<String> {
 pub fn set_library_columns(columns: Vec<String>) -> Result<(), String> {
     let mut cfg = crate::config::AppConfig::load();
     cfg.library.visible_columns = columns;
+    cfg.save()
+}
+
+// -- Browser view state persistence --
+
+/// Get saved library browser view state.
+#[tauri::command]
+pub fn get_library_view_state() -> serde_json::Value {
+    let cfg = crate::config::AppConfig::load();
+    serde_json::json!({
+        "active_tab": cfg.library.active_tab,
+        "sort_by": cfg.library.sort_by,
+        "sort_dir": cfg.library.sort_dir,
+        "browse_sort_by": cfg.library.browse_sort_by,
+    })
+}
+
+/// Save library browser view state.
+#[tauri::command]
+pub fn set_library_view_state(
+    active_tab: Option<String>,
+    sort_by: Option<String>,
+    sort_dir: Option<String>,
+    browse_sort_by: Option<String>,
+) -> Result<(), String> {
+    let mut cfg = crate::config::AppConfig::load();
+    cfg.library.active_tab = active_tab;
+    cfg.library.sort_by = sort_by;
+    cfg.library.sort_dir = sort_dir;
+    cfg.library.browse_sort_by = browse_sort_by;
+    cfg.save()
+}
+
+/// Get saved radio browser view state.
+#[tauri::command]
+pub fn get_radio_view_state() -> serde_json::Value {
+    let cfg = crate::config::AppConfig::load();
+    serde_json::json!({
+        "active_tab": cfg.radio.active_tab,
+        "show_hidden": cfg.radio.show_hidden,
+    })
+}
+
+/// Save radio browser view state.
+#[tauri::command]
+pub fn set_radio_view_state(
+    active_tab: Option<String>,
+    show_hidden: bool,
+) -> Result<(), String> {
+    let mut cfg = crate::config::AppConfig::load();
+    cfg.radio.active_tab = active_tab;
+    cfg.radio.show_hidden = show_hidden;
     cfg.save()
 }
 
