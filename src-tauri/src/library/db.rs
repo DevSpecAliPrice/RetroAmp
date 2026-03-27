@@ -245,11 +245,48 @@ pub fn remove_missing_tracks(conn: &Connection, valid_paths: &[String]) -> Resul
 
 // -- Query functions --
 
+/// Get the stored rating for a track by path. Returns 0 if not found.
+pub fn get_track_rating(conn: &Connection, path: &str) -> i32 {
+    conn.query_row(
+        "SELECT rating FROM library_tracks WHERE path = ?1",
+        params![path],
+        |row| row.get(0),
+    )
+    .unwrap_or(0)
+}
+
 pub fn update_track_rating(conn: &Connection, path: &str, rating: u8) -> Result<(), String> {
     let now = unix_now();
     conn.execute(
         "UPDATE library_tracks SET rating = ?1, updated_at = ?2 WHERE path = ?3",
         params![rating, now, path],
+    )
+    .map_err(|e| format!("{e}"))?;
+    Ok(())
+}
+
+/// Update tag-related metadata for a track in the library cache.
+/// Returns Ok even if the track is not in the library (0 rows affected).
+pub fn update_track_metadata(
+    conn: &Connection,
+    path: &str,
+    title: Option<&str>,
+    artist: Option<&str>,
+    album_artist: Option<&str>,
+    album: Option<&str>,
+    genre: Option<&str>,
+    year: Option<i32>,
+    track_number: Option<i32>,
+    disc_number: Option<i32>,
+) -> Result<(), String> {
+    let now = unix_now();
+    conn.execute(
+        "UPDATE library_tracks SET
+            title = ?1, artist = ?2, album_artist = ?3, album = ?4,
+            genre = ?5, year = ?6, track_number = ?7, disc_number = ?8,
+            updated_at = ?9
+         WHERE path = ?10",
+        params![title, artist, album_artist, album, genre, year, track_number, disc_number, now, path],
     )
     .map_err(|e| format!("{e}"))?;
     Ok(())

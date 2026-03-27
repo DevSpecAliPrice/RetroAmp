@@ -9,6 +9,7 @@ import EqualizerWindow from "./skin/EqualizerWindow";
 import SettingsWindow from "./settings/SettingsWindow";
 import RadioBrowserWindow from "./skin/RadioBrowserWindow";
 import LibraryBrowserWindow from "./skin/LibraryBrowserWindow";
+import TagEditorWindow from "./tageditor/TagEditorWindow";
 
 const DEFAULT_SKIN_NAME = "RetroAmp Default";
 
@@ -267,9 +268,12 @@ function App() {
     await doLoadSkin(path);
   };
 
-  // Settings window renders with the skin for theming but doesn't block on it.
+  // Settings and tag editor render with the skin for theming but don't block on it.
   if (panel === "settings") {
     return <SettingsWindow skin={skin} scale={scale} />;
+  }
+  if (panel === "tageditor") {
+    return <TagEditorWindow skin={skin} scale={scale} />;
   }
 
   if (skinError) {

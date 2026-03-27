@@ -6,7 +6,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 use crate::audio::engine::{AudioEngine, EngineStatus};
 use crate::audio::eq::EqSettings;
@@ -1301,21 +1301,26 @@ pub fn get_tracks_by_genre(
     library::db::get_tracks_by_genre(db.conn(), &genre)
 }
 
-/// Set a track's star rating. Writes to the file first, then updates the DB.
+/// Set a track's star rating. Always updates the DB (authoritative store).
+/// File tag write is best-effort — some formats may not support it.
 #[tauri::command]
 pub fn set_track_rating(
     database: State<'_, Arc<Mutex<Database>>>,
+    app: AppHandle,
     path: String,
     rating: u8,
 ) -> Result<(), String> {
     if rating > 5 {
         return Err("rating must be 0-5".to_string());
     }
-    // Write to file first (source of truth).
-    library::tags::write_rating(&path, rating)?;
-    // Then update the DB cache.
+    // Best-effort write to file tags.
+    let _ = library::tags::write_rating(&path, rating);
+    // Always update the DB (authoritative for ratings).
     let db = database.lock().map_err(|e| e.to_string())?;
-    library::db::update_track_rating(db.conn(), &path, rating)
+    library::db::update_track_rating(db.conn(), &path, rating)?;
+    // Notify other windows.
+    let _ = app.emit("tags-updated", &path);
+    Ok(())
 }
 
 /// Open the parent folder of a file in the system file manager.
@@ -1374,4 +1379,117 @@ pub fn set_library_columns(columns: Vec<String>) -> Result<(), String> {
     let mut cfg = crate::config::AppConfig::load();
     cfg.library.visible_columns = columns;
     cfg.save()
+}
+
+// -- Tag editor commands --
+
+/// Read all tag information from a file for the tag editor.
+/// The file is the source of truth for all tags. If the file's embedded
+/// rating is 0, we check the DB as a fallback — this covers formats where
+/// the rating couldn't be written to the file, or where a previous write
+/// was best-effort.
+#[tauri::command]
+pub fn read_track_tags(
+    database: State<'_, Arc<Mutex<Database>>>,
+    path: String,
+) -> Result<library::tags::TrackTagInfo, String> {
+    let mut info = library::tags::read_track_tags(std::path::Path::new(&path))?;
+
+    if info.rating == 0 {
+        if let Ok(db) = database.lock() {
+            let db_rating = library::db::get_track_rating(db.conn(), &path);
+            if db_rating > 0 {
+                info.rating = db_rating as u8;
+            }
+        }
+    }
+
+    Ok(info)
+}
+
+/// Write tag edits to a file, then update the library DB cache.
+/// File tag writes may partially fail for formats with limited tag support;
+/// the DB is always updated as the authoritative store.
+#[tauri::command]
+pub fn write_track_tags(
+    database: State<'_, Arc<Mutex<Database>>>,
+    app: AppHandle,
+    path: String,
+    edits: library::tags::TagEdits,
+) -> Result<(), String> {
+    // Write to file (best-effort for rating, hard fail for text tags).
+    let _file_write_err = library::tags::write_tags(&path, &edits).err();
+
+    // Always update the DB cache, regardless of file write success.
+    // Re-read the file to get canonical values if the write succeeded.
+    let db = database.lock().map_err(|e| e.to_string())?;
+    match library::tags::read_track_tags(std::path::Path::new(&path)) {
+        Ok(info) => {
+            let _ = library::db::update_track_metadata(
+                db.conn(),
+                &path,
+                info.title.as_deref(),
+                info.artist.as_deref(),
+                info.album_artist.as_deref(),
+                info.album.as_deref(),
+                info.genre.as_deref(),
+                info.year,
+                info.track_number,
+                info.disc_number,
+            );
+        }
+        Err(_) => {
+            // File re-read failed — update DB from the edits directly.
+            let _ = library::db::update_track_metadata(
+                db.conn(),
+                &path,
+                edits.title.as_deref(),
+                edits.artist.as_deref(),
+                edits.album_artist.as_deref(),
+                edits.album.as_deref(),
+                edits.genre.as_deref(),
+                edits.year.as_deref().and_then(|v| v.parse::<i32>().ok()),
+                edits.track_number.as_deref().and_then(|v| v.parse::<i32>().ok()),
+                edits.disc_number.as_deref().and_then(|v| v.parse::<i32>().ok()),
+            );
+        }
+    }
+    // Rating always goes to DB (authoritative).
+    if let Some(stars) = edits.rating {
+        let _ = library::db::update_track_rating(db.conn(), &path, stars);
+    }
+
+    // Notify other windows that tags changed.
+    let _ = app.emit("tags-updated", &path);
+
+    Ok(())
+}
+
+/// Open the tag editor window for a specific track.
+#[tauri::command]
+pub async fn open_tag_editor(app: AppHandle, path: String) -> Result<(), String> {
+    let label = "tageditor";
+
+    // Close existing tag editor if open (one at a time).
+    if let Some(existing) = app.get_webview_window(label) {
+        let _ = existing.close();
+    }
+
+    // Percent-encode the path for the URL query parameter.
+    use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+    let encoded_path = utf8_percent_encode(&path, NON_ALPHANUMERIC).to_string();
+    let url = format!("/?window=tageditor&path={encoded_path}");
+
+    let builder =
+        WebviewWindowBuilder::new(&app, label, WebviewUrl::App(url.into()))
+            .title("RetroAmp \u{2014} Tag Editor")
+            .inner_size(550.0, 500.0)
+            .min_inner_size(450.0, 400.0)
+            .decorations(false)
+            .resizable(true)
+            .visible(true)
+            .skip_taskbar(true);
+
+    builder.build().map_err(|e| e.to_string())?;
+    Ok(())
 }

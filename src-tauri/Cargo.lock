@@ -3870,6 +3870,7 @@ dependencies = [
  "env_logger",
  "lofty",
  "log",
+ "percent-encoding",
  "rand 0.10.0",
  "ringbuf",
  "rubato",

@@ -32,6 +32,7 @@ pub struct PlaylistState {
 #[derive(Debug, Clone, Serialize)]
 pub struct PlaylistEntry {
     pub id: TrackId,
+    pub path: String,
     pub display_name: String,
     pub duration: String,
     pub is_current: bool,
@@ -367,6 +368,7 @@ impl PlaylistManager {
             .enumerate()
             .map(|(i, track)| PlaylistEntry {
                 id: track.id,
+                path: track.path.clone(),
                 display_name: track.display_name(),
                 duration: track.duration_display(),
                 is_current: self.current_index == Some(i),

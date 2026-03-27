@@ -425,6 +425,10 @@ pub fn run() {
             commands::set_playlist_add_mode,
             commands::get_library_columns,
             commands::set_library_columns,
+            // Tag editor
+            commands::read_track_tags,
+            commands::write_track_tags,
+            commands::open_tag_editor,
             // Context menu
             context_menu::show_context_menu,
         ])

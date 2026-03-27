@@ -19,6 +19,7 @@ import { showContextMenu } from "../nativeMenu";
 
 interface PlaylistEntry {
   id: number;
+  path: string;
   display_name: string;
   duration: string;
   is_current: boolean;
@@ -309,6 +310,24 @@ export default function PlaylistWindow({ skin, scale }: Props) {
               <div
                 key={track.id}
                 onDoubleClick={() => playIndex(index)}
+                onContextMenu={async (e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  const items = [
+                    { type: "item" as const, id: "play", label: "Play" },
+                    { type: "separator" as const },
+                    { type: "item" as const, id: "edit_tags", label: "Edit Tags...", disabled: track.is_stream },
+                    { type: "item" as const, id: "reveal", label: "Show in File Manager", disabled: track.is_stream },
+                    { type: "separator" as const },
+                    { type: "item" as const, id: "remove", label: "Remove from Playlist" },
+                  ];
+                  const sel = await showContextMenu(items, e.clientX, e.clientY);
+                  if (!sel) return;
+                  if (sel === "play") playIndex(index);
+                  else if (sel === "edit_tags") invoke("open_tag_editor", { path: track.path });
+                  else if (sel === "reveal") invoke("reveal_in_file_manager", { path: track.path });
+                  else if (sel === "remove") invoke("playlist_remove_selected");
+                }}
                 style={{
                   display: "flex",
                   alignItems: "center",

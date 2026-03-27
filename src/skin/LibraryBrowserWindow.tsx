@@ -227,6 +227,12 @@ export default function LibraryBrowserWindow({ skin, scale }: Props) {
     return () => { unlisten.then((fn) => fn()); };
   }, [loadData, showStatus]);
 
+  // Refresh when tags are edited in the tag editor.
+  useEffect(() => {
+    const unlisten = listen<string>("tags-updated", () => { loadData(); });
+    return () => { unlisten.then((fn) => fn()); };
+  }, [loadData]);
+
   useEffect(() => {
     setSelectedIds(new Set());
     lastClickedId.current = null;
@@ -393,6 +399,7 @@ export default function LibraryBrowserWindow({ skin, scale }: Props) {
       { type: "item", id: "add", label: "Add to Playlist" },
       { type: "separator" },
       { type: "item", id: "reveal", label: "Show in File Manager" },
+      { type: "item", id: "edit_tags", label: "Edit Tags..." },
       { type: "separator" },
       {
         type: "submenu", label: "Rating", items: [
@@ -410,6 +417,7 @@ export default function LibraryBrowserWindow({ skin, scale }: Props) {
     if (sel === "play") doPlayTracks(selected);
     else if (sel === "add") doAddTracks(selected);
     else if (sel === "reveal") invoke("reveal_in_file_manager", { path: track.path });
+    else if (sel === "edit_tags") invoke("open_tag_editor", { path: track.path });
     else if (sel.startsWith("rate:")) {
       const r = parseInt(sel.slice(5), 10);
       for (const t of selected) setRating(t.path, r);
