@@ -123,11 +123,10 @@ impl OutputManager {
 
     /// Build and start a CPAL output stream with the given config.
     fn build_stream(&self, config: StreamConfig) -> Result<AudioOutput, AudioError> {
-        // Buffer ~1 second of audio. Generous sizing avoids underruns
-        // without adding perceptible latency (playback starts as soon as
-        // the first samples arrive, not when the buffer is full).
+        // Buffer ~100ms of audio — small enough for responsive controls,
+        // large enough to absorb scheduling jitter without underruns.
         let buffer_samples =
-            (config.sample_rate.0 as usize) * (config.channels as usize);
+            (config.sample_rate.0 as usize) * (config.channels as usize) / 10;
 
         let rb = HeapRb::<f32>::new(buffer_samples);
         let (producer, mut consumer) = rb.split();

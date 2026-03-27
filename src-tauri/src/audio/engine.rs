@@ -65,6 +65,21 @@ pub enum EngineEvent {
     TrackFinished,
 }
 
+/// What the engine should do after a fade-out completes.
+enum FadeAction {
+    /// No pending action.
+    None,
+    /// Stop playback and clear the source.
+    Stop,
+    /// Pause playback (keep source intact).
+    Pause,
+    /// Switch to a new source (stored separately) and fade in.
+    Switch,
+}
+
+/// Duration of micro-fades in seconds (~15ms — inaudible but eliminates clicks).
+const FADE_SECS: f32 = 0.015;
+
 /// Handle held by the main thread to control the audio engine.
 ///
 /// All methods are non-blocking — they send commands to the audio thread.
@@ -229,81 +244,83 @@ fn audio_thread(
     let mut eq = Equalizer::new(current_rate, current_channels);
     let mut fft_analyser = FftAnalyser::new();
 
+    // Micro-fade state: ~15ms gain ramp to eliminate clicks on transitions.
+    let mut fade_gain: f32 = 1.0;
+    let mut fade_target: f32 = 1.0;
+    let mut fade_step: f32 = 1.0 / (current_rate as f32 * FADE_SECS);
+    let mut fade_action = FadeAction::None;
+    let mut pending_source: Option<Box<dyn AudioSource>> = None;
+    let mut activate_pending = false;
+
     loop {
         while let Ok(cmd) = command_rx.try_recv() {
             match cmd {
                 EngineCommand::Play(new_source) => {
-                    resampler = None;
-
-                    if let Ok(meta) = new_source.metadata() {
-                        let source_rate = meta.sample_rate;
-                        eprintln!(
-                            "[retroamp] source: {}Hz, {}ch | output: {current_rate}Hz",
-                            source_rate, meta.channels
-                        );
-
-                        if source_rate != current_rate {
-                            // Try to reconfigure the output to match the source.
-                            eprintln!("[retroamp] rate mismatch — attempting device reconfiguration");
-                            match output_manager.open_at_rate(source_rate, meta.channels) {
-                                Ok(new_output) => {
-                                    output = new_output;
-                                    current_rate = source_rate;
-                                    current_channels = output.config().channels;
-                                    eq.reconfigure(current_rate, current_channels);
-                                    eprintln!("[retroamp] output reconfigured to {source_rate}Hz (native)");
-                                    log::info!(
-                                        "output reconfigured to {source_rate}Hz (native)"
-                                    );
-                                }
-                                Err(ref e) => {
-                                    // Device doesn't support this rate — fall back
-                                    // to resampling.
-                                    eprintln!("[retroamp] reconfigure failed: {e}, falling back to resampler");
-                                    log::info!(
-                                        "device doesn't support {source_rate}Hz, \
-                                         resampling to {current_rate}Hz"
-                                    );
-                                    match AudioResampler::new(
-                                        source_rate,
-                                        current_rate,
-                                        meta.channels,
-                                    ) {
-                                        Ok(r) => {
-                                            eprintln!("[retroamp] resampler created: {source_rate}Hz → {current_rate}Hz");
-                                            resampler = Some(r);
-                                        }
-                                        Err(e) => {
-                                            eprintln!("[retroamp] resampler FAILED: {e}");
-                                            log::error!("failed to create resampler: {e}");
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                    pending_source = Some(new_source);
+                    if playback_state == PlaybackState::Playing && fade_gain > 0.01 {
+                        // Fade out current track, then switch.
+                        fade_target = 0.0;
+                        fade_step = 1.0 / (current_rate as f32 * FADE_SECS);
+                        fade_action = FadeAction::Switch;
+                    } else {
+                        // Not audibly playing — activate immediately with fade-in.
+                        activate_pending = true;
                     }
-
-                    source = Some(new_source);
-                    playback_state = PlaybackState::Playing;
-                    update_status(&status, &source, playback_state, volume, balance);
                 }
                 EngineCommand::Pause => {
                     if playback_state == PlaybackState::Playing {
-                        playback_state = PlaybackState::Paused;
-                        update_status(&status, &source, playback_state, volume, balance);
+                        pending_source = None;
+                        activate_pending = false;
+                        if fade_gain > 0.01 {
+                            fade_target = 0.0;
+                            fade_step = 1.0 / (current_rate as f32 * FADE_SECS);
+                            fade_action = FadeAction::Pause;
+                        } else {
+                            playback_state = PlaybackState::Paused;
+                            fade_action = FadeAction::None;
+                            update_status(&status, &source, playback_state, volume, balance);
+                        }
                     }
                 }
                 EngineCommand::Resume => {
                     if playback_state == PlaybackState::Paused {
                         playback_state = PlaybackState::Playing;
+                        fade_gain = 0.0;
+                        fade_target = 1.0;
+                        fade_step = 1.0 / (current_rate as f32 * FADE_SECS);
                         update_status(&status, &source, playback_state, volume, balance);
                     }
                 }
                 EngineCommand::Stop => {
-                    source = None;
-                    resampler = None;
-                    playback_state = PlaybackState::Stopped;
-                    update_status(&status, &source, playback_state, volume, balance);
+                    pending_source = None;
+                    activate_pending = false;
+                    match playback_state {
+                        PlaybackState::Playing => {
+                            if fade_gain > 0.01 {
+                                fade_target = 0.0;
+                                fade_step = 1.0 / (current_rate as f32 * FADE_SECS);
+                                fade_action = FadeAction::Stop;
+                            } else {
+                                source = None;
+                                resampler = None;
+                                playback_state = PlaybackState::Stopped;
+                                fade_gain = 1.0;
+                                fade_target = 1.0;
+                                fade_action = FadeAction::None;
+                                update_status(&status, &source, playback_state, volume, balance);
+                            }
+                        }
+                        PlaybackState::Paused => {
+                            source = None;
+                            resampler = None;
+                            playback_state = PlaybackState::Stopped;
+                            fade_gain = 1.0;
+                            fade_target = 1.0;
+                            fade_action = FadeAction::None;
+                            update_status(&status, &source, playback_state, volume, balance);
+                        }
+                        _ => {}
+                    }
                 }
                 EngineCommand::Seek(pos) => {
                     if let Some(src) = source.as_mut() {
@@ -326,6 +343,60 @@ fn audio_thread(
                 EngineCommand::Shutdown => {
                     return;
                 }
+            }
+        }
+
+        // Activate a pending source (deferred from Play command or fade-out switch).
+        if activate_pending {
+            activate_pending = false;
+            if let Some(new_source) = pending_source.take() {
+                resampler = None;
+
+                if let Ok(meta) = new_source.metadata() {
+                    let source_rate = meta.sample_rate;
+                    eprintln!(
+                        "[retroamp] source: {}Hz, {}ch | output: {current_rate}Hz",
+                        source_rate, meta.channels
+                    );
+
+                    if source_rate != current_rate {
+                        eprintln!("[retroamp] rate mismatch — attempting device reconfiguration");
+                        match output_manager.open_at_rate(source_rate, meta.channels) {
+                            Ok(new_output) => {
+                                output = new_output;
+                                current_rate = source_rate;
+                                current_channels = output.config().channels;
+                                eq.reconfigure(current_rate, current_channels);
+                                eprintln!("[retroamp] output reconfigured to {source_rate}Hz (native)");
+                                log::info!("output reconfigured to {source_rate}Hz (native)");
+                            }
+                            Err(ref e) => {
+                                eprintln!("[retroamp] reconfigure failed: {e}, falling back to resampler");
+                                log::info!(
+                                    "device doesn't support {source_rate}Hz, \
+                                     resampling to {current_rate}Hz"
+                                );
+                                match AudioResampler::new(source_rate, current_rate, meta.channels) {
+                                    Ok(r) => {
+                                        eprintln!("[retroamp] resampler created: {source_rate}Hz → {current_rate}Hz");
+                                        resampler = Some(r);
+                                    }
+                                    Err(e) => {
+                                        eprintln!("[retroamp] resampler FAILED: {e}");
+                                        log::error!("failed to create resampler: {e}");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                source = Some(new_source);
+                playback_state = PlaybackState::Playing;
+                fade_gain = 0.0;
+                fade_target = 1.0;
+                fade_step = 1.0 / (current_rate as f32 * FADE_SECS);
+                update_status(&status, &source, playback_state, volume, balance);
             }
         }
 
@@ -406,6 +477,49 @@ fn audio_thread(
             // Mono — just apply volume, balance has no effect.
             for sample in &mut samples {
                 *sample *= volume;
+            }
+        }
+
+        // Apply micro-fade envelope to eliminate clicks on transitions.
+        if (fade_gain - fade_target).abs() > f32::EPSILON {
+            let frame_size = current_channels as usize;
+            for frame in samples.chunks_exact_mut(frame_size) {
+                if fade_target > fade_gain {
+                    fade_gain = (fade_gain + fade_step).min(1.0);
+                } else {
+                    fade_gain = (fade_gain - fade_step).max(0.0);
+                }
+                for s in frame.iter_mut() {
+                    *s *= fade_gain;
+                }
+            }
+
+            // Fade-out completed — execute the pending action.
+            if fade_gain <= 0.0 {
+                match fade_action {
+                    FadeAction::Stop => {
+                        source = None;
+                        resampler = None;
+                        playback_state = PlaybackState::Stopped;
+                        fade_gain = 1.0;
+                        fade_target = 1.0;
+                        update_status(&status, &source, playback_state, volume, balance);
+                    }
+                    FadeAction::Pause => {
+                        playback_state = PlaybackState::Paused;
+                        update_status(&status, &source, playback_state, volume, balance);
+                    }
+                    FadeAction::Switch => {
+                        activate_pending = true;
+                    }
+                    FadeAction::None => {}
+                }
+                fade_action = FadeAction::None;
+            }
+        } else if fade_gain < 1.0 - f32::EPSILON {
+            // Stable at sub-unity gain (e.g. mid-switch gap) — silence output.
+            for s in samples.iter_mut() {
+                *s *= fade_gain;
             }
         }
 
