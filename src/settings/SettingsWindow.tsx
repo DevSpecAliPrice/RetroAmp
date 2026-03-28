@@ -5,7 +5,7 @@ import type { SkinData } from "../skin/parser";
 import SkinBrowser from "./SkinBrowser";
 import "./settings.css";
 
-type Tab = "skins" | "shortcuts" | "library" | "general";
+type Tab = "skins" | "shortcuts" | "library" | "spotify" | "general";
 
 const SHORTCUTS: { section: string; bindings: [string, string][] }[] = [
   {
@@ -188,6 +188,172 @@ function GeneralTab({ colors }: { colors: ColorProps }) {
   );
 }
 
+interface SpotifyStatus {
+  connected: boolean;
+  username: string | null;
+  account_type: string | null;
+}
+
+interface SpotifySettingsData {
+  client_id: string | null;
+  quality: string;
+  device_name: string;
+  connect_enabled: boolean;
+  normalize_volume: boolean;
+}
+
+function SpotifyTab({ colors }: { colors: ColorProps }) {
+  const [status, setStatus] = useState<SpotifyStatus>({ connected: false, username: null, account_type: null });
+  const [settings, setSettings] = useState<SpotifySettingsData>({
+    client_id: null, quality: "very_high", device_name: "RetroAmp", connect_enabled: false, normalize_volume: false,
+  });
+  const [loggingIn, setLoggingIn] = useState(false);
+
+  useEffect(() => {
+    invoke<SpotifyStatus>("spotify_status").then(setStatus).catch(() => {});
+    invoke<SpotifySettingsData>("get_spotify_settings").then(setSettings).catch(() => {});
+  }, []);
+
+  const login = useCallback(async () => {
+    setLoggingIn(true);
+    try {
+      const result = await invoke<SpotifyStatus>("spotify_login");
+      setStatus(result);
+    } catch (e) {
+      console.error("Spotify login failed:", e);
+    } finally {
+      setLoggingIn(false);
+    }
+  }, []);
+
+  const logout = useCallback(async () => {
+    try {
+      const result = await invoke<SpotifyStatus>("spotify_logout");
+      setStatus(result);
+    } catch (e) {
+      console.error("Spotify logout failed:", e);
+    }
+  }, []);
+
+  const updateSetting = useCallback(async (key: keyof SpotifySettingsData, value: string | boolean) => {
+    const updated = { ...settings, [key]: value };
+    setSettings(updated);
+    try {
+      await invoke("set_spotify_settings", { settings: updated });
+    } catch (e) {
+      console.error("Failed to save Spotify settings:", e);
+    }
+  }, [settings]);
+
+  return (
+    <div className="shortcuts-tab">
+      {/* Account section */}
+      <div className="shortcuts-group">
+        <div className="shortcuts-group-title" style={{ color: colors.current }}>Account</div>
+        {status.connected ? (
+          <>
+            <div className="shortcuts-row" style={{ gap: 8 }}>
+              <span style={{ fontSize: 12, opacity: 0.7 }}>Logged in as</span>
+              <span style={{ fontSize: 13, color: colors.current }}>{status.username || "Unknown"}</span>
+            </div>
+            {status.account_type && (
+              <div className="shortcuts-row" style={{ gap: 8 }}>
+                <span style={{ fontSize: 12, opacity: 0.7 }}>Account type</span>
+                <span style={{ fontSize: 13, color: colors.current, textTransform: "capitalize" as const }}>{status.account_type}</span>
+              </div>
+            )}
+            <div style={{ marginTop: 8 }}>
+              <div onClick={logout}
+                style={{ display: "inline-block", padding: "4px 12px", background: colors.selectedbg, color: colors.current, cursor: "pointer", fontSize: 12 }}>
+                Log Out
+              </div>
+            </div>
+          </>
+        ) : (
+          <>
+            <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
+              Connect your Spotify Premium account to stream music through RetroAmp.
+            </div>
+            <div onClick={loggingIn ? undefined : login}
+              style={{ display: "inline-block", padding: "4px 12px", background: colors.selectedbg, color: colors.current, cursor: loggingIn ? "wait" : "pointer", fontSize: 12, opacity: loggingIn ? 0.5 : 1 }}>
+              {loggingIn ? "Waiting for browser..." : "Log In with Spotify"}
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* Audio Quality */}
+      <div className="shortcuts-group">
+        <div className="shortcuts-group-title" style={{ color: colors.current }}>Audio Quality</div>
+        {(["normal", "high", "very_high"] as const).map((q) => (
+          <label key={q} className="shortcuts-row" style={{ cursor: "pointer", gap: 8 }}>
+            <input type="radio" name="quality" checked={settings.quality === q}
+              onChange={() => updateSetting("quality", q)}
+              style={{ accentColor: colors.current }} />
+            <span style={{ fontSize: 13 }}>
+              {q === "normal" ? "Normal (96 kbps)" : q === "high" ? "High (160 kbps)" : "Very High (320 kbps)"}
+            </span>
+          </label>
+        ))}
+      </div>
+
+      {/* Spotify Connect */}
+      <div className="shortcuts-group">
+        <div className="shortcuts-group-title" style={{ color: colors.current }}>Spotify Connect</div>
+        <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
+          When enabled, RetroAmp appears as a playback device in the Spotify app.
+        </div>
+        <label className="shortcuts-row" style={{ cursor: "pointer", gap: 8 }}>
+          <input type="checkbox" checked={settings.connect_enabled}
+            onChange={(e) => updateSetting("connect_enabled", e.target.checked)}
+            style={{ accentColor: colors.current }} />
+          <span style={{ fontSize: 13 }}>Enable Spotify Connect</span>
+        </label>
+        <div className="shortcuts-row" style={{ gap: 8, marginTop: 4 }}>
+          <span style={{ fontSize: 12, opacity: 0.7 }}>Device name</span>
+          <input type="text" value={settings.device_name}
+            onChange={(e) => updateSetting("device_name", e.target.value)}
+            style={{
+              background: "rgba(255,255,255,0.08)", border: `1px solid ${colors.selectedbg}`,
+              color: colors.normal, padding: "2px 6px", fontSize: 12, width: 140,
+              fontFamily: "inherit",
+            }} />
+        </div>
+      </div>
+
+      {/* Volume Normalisation */}
+      <div className="shortcuts-group">
+        <div className="shortcuts-group-title" style={{ color: colors.current }}>Playback</div>
+        <label className="shortcuts-row" style={{ cursor: "pointer", gap: 8 }}>
+          <input type="checkbox" checked={settings.normalize_volume}
+            onChange={(e) => updateSetting("normalize_volume", e.target.checked)}
+            style={{ accentColor: colors.current }} />
+          <span style={{ fontSize: 13 }}>Normalize volume (ReplayGain)</span>
+        </label>
+      </div>
+
+      {/* Advanced — client ID override */}
+      <div className="shortcuts-group">
+        <div className="shortcuts-group-title" style={{ color: colors.current, opacity: 0.6 }}>Advanced</div>
+        <div style={{ fontSize: 12, opacity: 0.5, marginBottom: 8 }}>
+          Override the Spotify app Client ID. Leave blank to use the default.
+        </div>
+        <div className="shortcuts-row" style={{ gap: 8 }}>
+          <span style={{ fontSize: 12, opacity: 0.5, flexShrink: 0 }}>Client ID</span>
+          <input type="text" value={settings.client_id ?? ""}
+            onChange={(e) => updateSetting("client_id", e.target.value || null)}
+            placeholder="(using default)"
+            style={{
+              flex: 1, background: "rgba(255,255,255,0.05)", border: `1px solid ${colors.selectedbg}44`,
+              color: colors.normal, padding: "2px 6px", fontSize: 11, fontFamily: "inherit",
+              opacity: 0.7,
+            }} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 interface Props {
   skin: SkinData | null;
   scale: number;
@@ -301,6 +467,16 @@ export default function SettingsWindow({ skin, scale }: Props) {
               Library
             </button>
             <button
+              className={`settings-tab ${activeTab === "spotify" ? "active" : ""}`}
+              style={{
+                color: activeTab === "spotify" ? ps.current : ps.normal,
+                borderBottomColor: activeTab === "spotify" ? ps.current : "transparent",
+              }}
+              onClick={() => setActiveTab("spotify")}
+            >
+              Spotify
+            </button>
+            <button
               className={`settings-tab ${activeTab === "general" ? "active" : ""}`}
               style={{
                 color: activeTab === "general" ? ps.current : ps.normal,
@@ -315,6 +491,7 @@ export default function SettingsWindow({ skin, scale }: Props) {
             {activeTab === "skins" && <SkinBrowser playlistStyle={ps} />}
             {activeTab === "shortcuts" && <ShortcutsTab colors={ps} />}
             {activeTab === "library" && <LibraryTab colors={ps} />}
+            {activeTab === "spotify" && <SpotifyTab colors={ps} />}
             {activeTab === "general" && <GeneralTab colors={ps} />}
           </div>
         </div>

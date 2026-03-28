@@ -11,6 +11,7 @@ pub mod playlist;
 pub mod tray;
 pub mod radio_browser;
 pub mod skin;
+pub mod spotify;
 pub mod window;
 
 use std::sync::{Arc, Mutex};
@@ -87,7 +88,8 @@ pub fn run() {
                         let mut valid_count: usize = 0;
                         for (i, path) in paths.iter().enumerate() {
                             let is_url = path.starts_with("http://") || path.starts_with("https://");
-                            if is_url || std::path::Path::new(path).exists() {
+                            let is_spotify = path.starts_with("spotify:");
+                            if is_url || is_spotify || std::path::Path::new(path).exists() {
                                 pl.add_track(path);
                                 valid_count += 1;
                             } else {
@@ -187,6 +189,69 @@ pub fn run() {
         .manage(Arc::clone(&database))
         .manage(Arc::clone(&recorder_state))
         .setup(move |app| {
+            // Spotify player — created inside setup() because Session::new()
+            // requires a Tokio runtime to be active.
+            let spotify_cache_dir = dirs::config_dir()
+                .map(|c| c.join("retroamp").join("spotify_cache"));
+            let spotify_player = Arc::new(
+                crate::audio::spotify::SpotifyPlayer::new(spotify_cache_dir),
+            );
+            app.manage(Arc::clone(&spotify_player));
+
+            // Attempt to restore Spotify from saved refresh token (non-blocking).
+            // No librespot Session needed — just refresh the OAuth token for Web API.
+            {
+                let sp = Arc::clone(&spotify_player);
+                tauri::async_runtime::spawn_blocking(move || {
+                    let cache_dir = match sp.cache_dir() {
+                        Some(d) => d,
+                        None => return,
+                    };
+                    let refresh_token = match crate::spotify::auth::load_refresh_token(cache_dir) {
+                        Some(t) => t,
+                        None => { log::debug!("no saved Spotify refresh token"); return; }
+                    };
+                    log::info!("refreshing Spotify token from saved credentials...");
+                    let cfg = config::AppConfig::load();
+                    let client_id = cfg.spotify.client_id
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(crate::spotify::auth::default_client_id);
+                    match crate::spotify::auth::refresh_access_token(&client_id, &refresh_token) {
+                        Ok(result) => {
+                            // Create a playback session for audio streaming.
+                            let cache = crate::spotify::auth::create_cache(cache_dir);
+                            let session = librespot::core::session::Session::new(
+                                librespot::core::config::SessionConfig::default(), cache,
+                            );
+                            let creds = librespot::core::authentication::Credentials::with_access_token(
+                                result.access_token.clone(),
+                            );
+                            let handle = tokio::runtime::Handle::current();
+                            match handle.block_on(async { session.connect(creds, true).await }) {
+                                Ok(()) => {
+                                    log::info!("Spotify playback session connected: {}", session.username());
+                                    sp.set_playback_session(session);
+                                }
+                                Err(e) => {
+                                    log::warn!("Spotify playback session failed: {e}");
+                                }
+                            }
+
+                            sp.set_api_token(crate::audio::spotify::StoredToken {
+                                access_token: result.access_token,
+                                refresh_token: result.refresh_token.clone(),
+                                expires_at: result.expires_at,
+                            });
+                            crate::spotify::auth::save_refresh_token(cache_dir, &result.refresh_token);
+                            sp.set_user_info("Spotify User".into(), Some("premium".into()));
+                            log::info!("Spotify auto-reconnect succeeded (token + session)");
+                        }
+                        Err(e) => {
+                            log::info!("Spotify token refresh failed: {e}");
+                        }
+                    }
+                });
+            }
             // Start OS media controls (MPRIS on Linux, SMTC on Windows,
             // MPRemoteCommandCenter on macOS). Non-fatal if it fails.
             {
@@ -259,11 +324,12 @@ pub fn run() {
                 let playlist: Arc<Mutex<PlaylistManager>> =
                     Arc::clone(&*app.state::<Arc<Mutex<PlaylistManager>>>());
                 let rec_state = Arc::clone(&recorder_state);
+                let spotify = Arc::clone(&spotify_player);
                 let app_handle = app.handle().clone();
                 thread::Builder::new()
                     .name("retroamp-auto-advance".into())
                     .spawn(move || {
-                        auto_advance_loop(engine, playlist, rec_state, app_handle);
+                        auto_advance_loop(engine, playlist, rec_state, app_handle, spotify);
                     })
                     .expect("failed to spawn auto-advance thread");
             }
@@ -314,6 +380,7 @@ pub fn run() {
             let radio_layout = saved_ui.radio_browser.as_ref().unwrap_or(&default_layout);
             let library_layout = saved_ui.library_browser.as_ref().unwrap_or(&default_layout);
             let settings_layout = saved_ui.settings.as_ref().unwrap_or(&default_layout);
+            let spotify_layout = saved_ui.spotify_browser.as_ref().unwrap_or(&default_layout);
 
             let all_panels: &[(WindowId, &config::WindowLayoutEntry)] = &[
                 (WindowId::Equalizer, &saved_ui.equalizer),
@@ -321,6 +388,7 @@ pub fn run() {
                 (WindowId::RadioBrowser, radio_layout),
                 (WindowId::LibraryBrowser, library_layout),
                 (WindowId::Settings, settings_layout),
+                (WindowId::SpotifyBrowser, spotify_layout),
             ];
 
             // Derive default size from main window (computed once).
@@ -346,7 +414,7 @@ pub fn run() {
                 }
 
                 let default_w = match id {
-                    WindowId::RadioBrowser => main_w * 1.5,
+                    WindowId::RadioBrowser | WindowId::SpotifyBrowser => main_w * 1.5,
                     WindowId::Settings => 700.0,
                     _ => main_w,
                 };
@@ -465,6 +533,7 @@ pub fn run() {
                         "settings" => Some(WindowId::Settings),
                         "radiobrowser" => Some(WindowId::RadioBrowser),
                         "librarybrowser" => Some(WindowId::LibraryBrowser),
+                        "spotifybrowser" => Some(WindowId::SpotifyBrowser),
                         _ => None,
                     };
                     if let Some(id) = window_id {
@@ -648,6 +717,26 @@ pub fn run() {
             commands::play_history_track,
             // Context menu
             context_menu::show_context_menu,
+            // Spotify — auth & settings
+            spotify::commands::spotify_login,
+            spotify::commands::spotify_logout,
+            spotify::commands::spotify_status,
+            spotify::commands::get_spotify_settings,
+            spotify::commands::set_spotify_settings,
+            // Spotify — playback
+            spotify::commands::spotify_play_track,
+            spotify::commands::spotify_add_to_playlist,
+            // Spotify — browsing
+            spotify::commands::spotify_search,
+            spotify::commands::spotify_get_playlists,
+            spotify::commands::spotify_get_playlist_tracks,
+            spotify::commands::spotify_get_saved_albums,
+            spotify::commands::spotify_get_saved_tracks,
+            spotify::commands::spotify_get_album,
+            spotify::commands::spotify_get_artist,
+            spotify::commands::spotify_get_artist_top_tracks,
+            spotify::commands::spotify_get_artist_albums,
+            spotify::commands::spotify_get_recently_played,
         ])
         .run(tauri::generate_context!())
         .expect("error while running RetroAmp");
@@ -761,6 +850,7 @@ fn auto_advance_loop(
     playlist: Arc<Mutex<PlaylistManager>>,
     recorder_state: Arc<Mutex<Option<Arc<RadioRecorder>>>>,
     app_handle: tauri::AppHandle,
+    spotify_player: Arc<crate::audio::spotify::SpotifyPlayer>,
 ) {
     loop {
         match engine.try_recv_event() {
@@ -779,7 +869,7 @@ fn auto_advance_loop(
                             recorder_state: Arc::clone(&recorder_state),
                             app_handle: app_handle.clone(),
                         };
-                        match commands::create_source(&path, Some(ctx)) {
+                        match commands::create_source(&path, Some(ctx), Some(&spotify_player)) {
                             Ok(source) => {
                                 // Update metadata if not already loaded.
                                 if let Ok(meta) = source.metadata() {

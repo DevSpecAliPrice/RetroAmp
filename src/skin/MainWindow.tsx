@@ -885,6 +885,7 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
       { type: "separator" },
       { type: "item", id: "add_files", label: "Add Files..." },
       { type: "item", id: "radio_browser", label: "Radio Browser..." },
+      { type: "item", id: "spotify_browser", label: "Spotify..." },
       { type: "item", id: "media_library", label: "Media Library..." },
       { type: "separator" },
       {
@@ -909,6 +910,7 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
       if (sel) invoke("playlist_add_files", { paths: Array.isArray(sel) ? sel : [sel] });
     }
     else if (selected === "radio_browser") invoke("toggle_window", { windowId: "RadioBrowser" }).catch(console.error);
+    else if (selected === "spotify_browser") invoke("toggle_window", { windowId: "SpotifyBrowser" }).catch(console.error);
     else if (selected === "media_library") invoke("toggle_window", { windowId: "LibraryBrowser" }).catch(console.error);
     else if (selected === "skins_browse") invoke("open_settings");
     else if (selected === "preferences") invoke("open_settings");

@@ -72,7 +72,7 @@ pub fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                         if let Some(track) = pl.previous_track() {
                             let path = track.path.clone();
                             drop(pl);
-                            let _ = commands::play_path(engine, &path);
+                            let _ = commands::play_path(engine, &path, None);
                         }
                     }
                 }
@@ -81,7 +81,7 @@ pub fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                         if let Some(track) = pl.next_track() {
                             let path = track.path.clone();
                             drop(pl);
-                            let _ = commands::play_path(engine, &path);
+                            let _ = commands::play_path(engine, &path, None);
                         }
                     }
                 }

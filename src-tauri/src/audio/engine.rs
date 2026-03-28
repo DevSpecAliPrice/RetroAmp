@@ -352,8 +352,10 @@ fn audio_thread(
             activate_pending = false;
             if let Some(new_source) = pending_source.take() {
                 resampler = None;
-                let is_stream = new_source.capabilities().has_dynamic_metadata;
-                let buffer_secs = if is_stream { BUFFER_SECS_STREAM } else { BUFFER_SECS_LOCAL };
+                let caps = new_source.capabilities();
+                let is_stream = caps.has_dynamic_metadata;
+                let is_network = caps.is_network_source;
+                let buffer_secs = if is_network { BUFFER_SECS_STREAM } else { BUFFER_SECS_LOCAL };
 
                 if let Ok(meta) = new_source.metadata() {
                     let source_rate = meta.sample_rate;

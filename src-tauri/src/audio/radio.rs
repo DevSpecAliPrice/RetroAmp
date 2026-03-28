@@ -368,6 +368,7 @@ impl AudioSource for RadioSource {
             can_seek: false,
             has_duration: false,
             has_dynamic_metadata: true,
+            is_network_source: true,
         }
     }
 

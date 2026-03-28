@@ -12,6 +12,17 @@ use serde::{Deserialize, Serialize};
 /// Unique track identifier within a playlist session.
 pub type TrackId = u64;
 
+/// The type of audio source backing a track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourceType {
+    /// A local file on disk.
+    Local,
+    /// An internet radio stream (HTTP/HTTPS URL).
+    Stream,
+    /// A Spotify track (spotify:track:<id> URI).
+    Spotify,
+}
+
 /// A single track in a playlist.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Track {
@@ -32,8 +43,8 @@ pub struct Track {
     pub bitrate: Option<u32>,
     /// Whether metadata has been loaded from tags.
     pub metadata_loaded: bool,
-    /// Whether this track is a stream (URL-based) rather than a local file.
-    pub is_stream: bool,
+    /// The type of audio source (local file, stream, or Spotify).
+    pub source_type: SourceType,
     /// For radio streams, the station name to display in the playlist.
     pub station_name: Option<String>,
 }
@@ -43,7 +54,13 @@ impl Track {
     /// call `load_metadata` or let the playlist manager handle it.
     pub fn from_path(id: TrackId, path: impl Into<String>) -> Self {
         let path = path.into();
-        let is_stream = path.starts_with("http://") || path.starts_with("https://");
+        let source_type = if path.starts_with("spotify:track:") {
+            SourceType::Spotify
+        } else if path.starts_with("http://") || path.starts_with("https://") {
+            SourceType::Stream
+        } else {
+            SourceType::Local
+        };
         Self {
             id,
             path,
@@ -58,9 +75,19 @@ impl Track {
             channels: None,
             bitrate: None,
             metadata_loaded: false,
-            is_stream,
+            source_type,
             station_name: None,
         }
+    }
+
+    /// Whether this track is an internet radio stream.
+    pub fn is_stream(&self) -> bool {
+        self.source_type == SourceType::Stream
+    }
+
+    /// Whether this track is a Spotify track.
+    pub fn is_spotify(&self) -> bool {
+        self.source_type == SourceType::Spotify
     }
 
     /// The display name for the classic Winamp single-column playlist.
@@ -73,7 +100,7 @@ impl Track {
         match (&self.artist, &self.title) {
             (Some(artist), Some(title)) => format!("{artist} - {title}"),
             (None, Some(title)) => title.clone(),
-            _ if self.is_stream => self.hostname().unwrap_or_else(|| self.path.clone()),
+            _ if self.is_stream() => self.hostname().unwrap_or_else(|| self.path.clone()),
             _ => self.filename(),
         }
     }

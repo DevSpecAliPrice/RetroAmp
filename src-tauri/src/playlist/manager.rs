@@ -38,6 +38,7 @@ pub struct PlaylistEntry {
     pub is_current: bool,
     pub is_selected: bool,
     pub is_stream: bool,
+    pub source_type: String,
 }
 
 /// The playlist manager.
@@ -366,14 +367,22 @@ impl PlaylistManager {
             .tracks
             .iter()
             .enumerate()
-            .map(|(i, track)| PlaylistEntry {
-                id: track.id,
-                path: track.path.clone(),
-                display_name: track.display_name(),
-                duration: track.duration_display(),
-                is_current: self.current_index == Some(i),
-                is_selected: self.selected.contains(&track.id),
-                is_stream: track.is_stream,
+            .map(|(i, track)| {
+                let source_type_str = match track.source_type {
+                    crate::playlist::track::SourceType::Local => "local",
+                    crate::playlist::track::SourceType::Stream => "stream",
+                    crate::playlist::track::SourceType::Spotify => "spotify",
+                };
+                PlaylistEntry {
+                    id: track.id,
+                    path: track.path.clone(),
+                    display_name: track.display_name(),
+                    duration: track.duration_display(),
+                    is_current: self.current_index == Some(i),
+                    is_selected: self.selected.contains(&track.id),
+                    is_stream: track.is_stream(),
+                    source_type: source_type_str.to_string(),
+                }
             })
             .collect();
 

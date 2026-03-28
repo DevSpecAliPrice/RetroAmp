@@ -22,4 +22,5 @@ pub mod radio;
 pub mod recorder;
 pub mod resample;
 pub mod source;
+pub mod spotify;
 pub mod stream_reader;

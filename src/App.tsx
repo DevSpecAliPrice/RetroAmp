@@ -9,6 +9,7 @@ import EqualizerWindow from "./skin/EqualizerWindow";
 import SettingsWindow from "./settings/SettingsWindow";
 import RadioBrowserWindow from "./skin/RadioBrowserWindow";
 import LibraryBrowserWindow from "./skin/LibraryBrowserWindow";
+import SpotifyBrowserWindow from "./skin/SpotifyBrowserWindow";
 import TagEditorWindow from "./tageditor/TagEditorWindow";
 
 const DEFAULT_SKIN_NAME = "RetroAmp Default";
@@ -337,6 +338,8 @@ function App() {
       return <RadioBrowserWindow skin={skin} scale={scale} />;
     case "librarybrowser":
       return <LibraryBrowserWindow skin={skin} scale={scale} />;
+    case "spotifybrowser":
+      return <SpotifyBrowserWindow skin={skin} scale={scale} />;
     case "shade":
       return <MainWindow skin={skin} scale={scale} isShade />;
     default:

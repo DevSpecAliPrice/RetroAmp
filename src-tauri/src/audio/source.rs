@@ -70,6 +70,9 @@ pub struct SourceCapabilities {
     /// Whether the source provides metadata that may update during playback
     /// (e.g. ICY metadata on a radio stream).
     pub has_dynamic_metadata: bool,
+    /// Whether the source fetches audio over the network. Used by the engine
+    /// to choose a larger output buffer (guards against brief stalls).
+    pub is_network_source: bool,
 }
 
 /// The core trait that every audio source must implement.

@@ -134,7 +134,7 @@ fn handle_media_event(
                 if let Some(track) = pl.next_track() {
                     let path = track.path.clone();
                     drop(pl);
-                    if let Err(e) = commands::play_path(engine, &path) {
+                    if let Err(e) = commands::play_path(engine, &path, None) {
                         log::error!("media controls: next_track failed: {e}");
                     }
                 }
@@ -145,7 +145,7 @@ fn handle_media_event(
                 if let Some(track) = pl.previous_track() {
                     let path = track.path.clone();
                     drop(pl);
-                    if let Err(e) = commands::play_path(engine, &path) {
+                    if let Err(e) = commands::play_path(engine, &path, None) {
                         log::error!("media controls: previous_track failed: {e}");
                     }
                 }

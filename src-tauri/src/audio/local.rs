@@ -177,6 +177,7 @@ impl AudioSource for LocalFileSource {
             can_seek: true,
             has_duration: self.duration.is_some(),
             has_dynamic_metadata: false,
+            is_network_source: false,
         }
     }
 

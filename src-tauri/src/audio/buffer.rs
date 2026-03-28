@@ -154,6 +154,7 @@ impl AudioSource for BufferSource {
             can_seek: false, // Seeking in ADTS/streamed MP3 is complex; skip for now.
             has_duration: self.duration.is_some(),
             has_dynamic_metadata: false,
+            is_network_source: false,
         }
     }
 

@@ -253,6 +253,7 @@ export default function PlaylistWindow({ skin, scale }: Props) {
         const selected = await showContextMenu([
           { type: "item", id: "add_files", label: "Add Files..." },
           { type: "item", id: "radio_browser", label: "Radio Browser..." },
+          { type: "item", id: "spotify_browser", label: "Spotify..." },
           { type: "separator" },
           { type: "item", id: "load_playlist", label: "Load Playlist..." },
           { type: "item", id: "save_playlist", label: "Save Playlist...", disabled: playlist.track_count === 0 },
@@ -265,6 +266,7 @@ export default function PlaylistWindow({ skin, scale }: Props) {
         if (!selected) return;
         if (selected === "add_files") openFiles();
         else if (selected === "radio_browser") invoke("toggle_window", { windowId: "RadioBrowser" }).catch(console.error);
+        else if (selected === "spotify_browser") invoke("toggle_window", { windowId: "SpotifyBrowser" }).catch(console.error);
         else if (selected === "load_playlist") loadPlaylist();
         else if (selected === "save_playlist") savePlaylist();
         else if (selected === "remove_selected") invoke("playlist_remove_selected");

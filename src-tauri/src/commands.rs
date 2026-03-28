@@ -186,7 +186,7 @@ pub fn playlist_add_files(
     // Load metadata for local files (skip streams — they load metadata on play).
     for &id in &ids {
         if let Some(track) = pl.get_track(id) {
-            if !track.is_stream {
+            if track.source_type == crate::playlist::track::SourceType::Local {
                 let path = track.path.clone();
                 if let Ok(source) = LocalFileSource::open(&path) {
                     if let Ok(meta) = source.metadata() {
@@ -202,7 +202,7 @@ pub fn playlist_add_files(
         if let Some(track) = pl.play_index(0) {
             let path = track.path.clone();
             drop(pl);
-            play_path(&engine, &path)?;
+            play_path(&engine, &path, None)?;
             return Ok(playlist.lock().map_err(|e| e.to_string())?.state());
         }
     }
@@ -230,7 +230,7 @@ pub fn play_file(
     // Play this track.
     pl.play_track(id);
     drop(pl); // Release lock before engine call.
-    play_path(&engine, &path)?;
+    play_path(&engine, &path, None)?;
     Ok(())
 }
 
@@ -249,6 +249,7 @@ pub fn playlist_play_index(
     engine: State<'_, Arc<AudioEngine>>,
     playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
     recorder_state: State<'_, Arc<Mutex<Option<Arc<RadioRecorder>>>>>,
+    spotify: State<'_, Arc<crate::audio::spotify::SpotifyPlayer>>,
     app: AppHandle,
     index: usize,
 ) -> Result<(), String> {
@@ -259,7 +260,7 @@ pub fn playlist_play_index(
     play_path_with_recorder(&engine, &path, Some(RecorderContext {
         recorder_state: Arc::clone(&*recorder_state),
         app_handle: app,
-    }))
+    }), Some(&spotify))
 }
 
 /// Advance to the next track.
@@ -268,6 +269,7 @@ pub fn next_track(
     engine: State<'_, Arc<AudioEngine>>,
     playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
     recorder_state: State<'_, Arc<Mutex<Option<Arc<RadioRecorder>>>>>,
+    spotify: State<'_, Arc<crate::audio::spotify::SpotifyPlayer>>,
     app: AppHandle,
 ) -> Result<(), String> {
     let mut pl = playlist.lock().map_err(|e| e.to_string())?;
@@ -278,7 +280,7 @@ pub fn next_track(
             play_path_with_recorder(&engine, &path, Some(RecorderContext {
                 recorder_state: Arc::clone(&*recorder_state),
                 app_handle: app,
-            }))
+            }), Some(&spotify))
         }
         None => {
             drop(pl);
@@ -294,6 +296,7 @@ pub fn previous_track(
     engine: State<'_, Arc<AudioEngine>>,
     playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
     recorder_state: State<'_, Arc<Mutex<Option<Arc<RadioRecorder>>>>>,
+    spotify: State<'_, Arc<crate::audio::spotify::SpotifyPlayer>>,
     app: AppHandle,
 ) -> Result<(), String> {
     let mut pl = playlist.lock().map_err(|e| e.to_string())?;
@@ -304,7 +307,7 @@ pub fn previous_track(
             play_path_with_recorder(&engine, &path, Some(RecorderContext {
                 recorder_state: Arc::clone(&*recorder_state),
                 app_handle: app,
-            }))
+            }), Some(&spotify))
         }
         None => Ok(()),
     }
@@ -471,7 +474,7 @@ pub fn playlist_load(
     // Load metadata for local files.
     for &id in &ids {
         if let Some(track) = pl.get_track(id) {
-            if !track.is_stream {
+            if track.source_type == crate::playlist::track::SourceType::Local {
                 let track_path = track.path.clone();
                 if let Ok(source) = LocalFileSource::open(&track_path) {
                     if let Ok(meta) = source.metadata() {
@@ -487,7 +490,7 @@ pub fn playlist_load(
         if let Some(track) = pl.play_index(0) {
             let track_path = track.path.clone();
             drop(pl);
-            play_path(&engine, &track_path)?;
+            play_path(&engine, &track_path, None)?;
             return Ok(playlist.lock().map_err(|e| e.to_string())?.state());
         }
     }
@@ -568,6 +571,9 @@ pub fn save_window_layout(app: &AppHandle, states: &WindowStates) {
     }
     if is_visible("librarybrowser") || app.get_webview_window("librarybrowser").is_some() {
         cfg.ui.library_browser = Some(capture("librarybrowser", is_visible("librarybrowser"), true));
+    }
+    if is_visible("spotifybrowser") || app.get_webview_window("spotifybrowser").is_some() {
+        cfg.ui.spotify_browser = Some(capture("spotifybrowser", is_visible("spotifybrowser"), true));
     }
 
     let _ = cfg.save();
@@ -1012,8 +1018,12 @@ fn skins_dir() -> Option<std::path::PathBuf> {
 
 // -- Internal helpers --
 
-pub fn play_path(engine: &AudioEngine, path: &str) -> Result<(), String> {
-    let source = create_source(path, None)?;
+pub fn play_path(
+    engine: &AudioEngine,
+    path: &str,
+    spotify_player: Option<&crate::audio::spotify::SpotifyPlayer>,
+) -> Result<(), String> {
+    let source = create_source(path, None, spotify_player)?;
     engine.play(source);
     Ok(())
 }
@@ -1023,8 +1033,9 @@ pub fn play_path_with_recorder(
     engine: &AudioEngine,
     path: &str,
     recorder_ctx: Option<RecorderContext>,
+    spotify_player: Option<&crate::audio::spotify::SpotifyPlayer>,
 ) -> Result<(), String> {
-    let source = create_source(path, recorder_ctx)?;
+    let source = create_source(path, recorder_ctx, spotify_player)?;
     engine.play(source);
     Ok(())
 }
@@ -1057,15 +1068,26 @@ fn finalize_previous_recorder(recorder_state: &Mutex<Option<Arc<RadioRecorder>>>
     }
 }
 
-/// Create an AudioSource from a path — dispatches to RadioSource for URLs,
-/// LocalFileSource for local files.
+/// Check if a path is a Spotify URI.
+pub fn is_spotify_uri(s: &str) -> bool {
+    s.starts_with("spotify:track:")
+}
+
+/// Create an AudioSource from a path — dispatches to SpotifySource for
+/// spotify: URIs, RadioSource for HTTP URLs, LocalFileSource for local files.
 pub fn create_source(
     path: &str,
     recorder_ctx: Option<RecorderContext>,
+    spotify_player: Option<&crate::audio::spotify::SpotifyPlayer>,
 ) -> Result<Box<dyn AudioSource>, String> {
     // Finalize any in-progress recording before switching sources.
     if let Some(ref ctx) = recorder_ctx {
         finalize_previous_recorder(&ctx.recorder_state);
+    }
+
+    if is_spotify_uri(path) {
+        let player = spotify_player.ok_or("Spotify not available")?;
+        return player.load_track(path);
     }
 
     if is_url(path) {

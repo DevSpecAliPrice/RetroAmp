@@ -16,6 +16,7 @@ pub enum WindowId {
     Settings,
     RadioBrowser,
     LibraryBrowser,
+    SpotifyBrowser,
 }
 
 impl WindowId {
@@ -28,6 +29,7 @@ impl WindowId {
             WindowId::Settings => "settings",
             WindowId::RadioBrowser => "radiobrowser",
             WindowId::LibraryBrowser => "librarybrowser",
+            WindowId::SpotifyBrowser => "spotifybrowser",
         }
     }
 
@@ -40,6 +42,7 @@ impl WindowId {
             WindowId::Settings => "/?window=settings",
             WindowId::RadioBrowser => "/?window=radiobrowser",
             WindowId::LibraryBrowser => "/?window=librarybrowser",
+            WindowId::SpotifyBrowser => "/?window=spotifybrowser",
         }
     }
 
@@ -62,6 +65,7 @@ impl WindowId {
             WindowId::Settings => 500,
             WindowId::RadioBrowser => 300,
             WindowId::LibraryBrowser => 350,
+            WindowId::SpotifyBrowser => 350,
         }
     }
 
@@ -70,7 +74,7 @@ impl WindowId {
         match self {
             WindowId::Main | WindowId::Equalizer => false,
             WindowId::Playlist | WindowId::Settings | WindowId::RadioBrowser
-            | WindowId::LibraryBrowser => true,
+            | WindowId::LibraryBrowser | WindowId::SpotifyBrowser => true,
         }
     }
 }
@@ -107,6 +111,7 @@ impl WindowManager {
         states.insert(WindowId::Playlist, false);
         states.insert(WindowId::RadioBrowser, false);
         states.insert(WindowId::LibraryBrowser, false);
+        states.insert(WindowId::SpotifyBrowser, false);
 
         // Determine scale from screen height.
         let scale = Self::detect_scale();

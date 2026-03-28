@@ -36,6 +36,9 @@ pub struct AppConfig {
 
     #[serde(default)]
     pub general: GeneralConfig,
+
+    #[serde(default)]
+    pub spotify: SpotifyConfig,
 }
 
 /// Skin-related preferences.
@@ -149,6 +152,59 @@ pub struct GeneralConfig {
 }
 
 
+/// Spotify integration preferences.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpotifyConfig {
+    /// Spotify Developer App Client ID. Required for Web API access.
+    /// Get one at https://developer.spotify.com/dashboard
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+
+    /// Audio quality: "normal" (96kbps), "high" (160kbps), "very_high" (320kbps).
+    #[serde(default = "default_spotify_quality")]
+    pub quality: String,
+
+    /// Device name shown in Spotify Connect device list.
+    #[serde(default = "default_device_name")]
+    pub device_name: String,
+
+    /// Whether Spotify Connect is enabled (advertise as a playback device).
+    #[serde(default)]
+    pub connect_enabled: bool,
+
+    /// Whether to apply Spotify's volume normalisation (ReplayGain).
+    #[serde(default)]
+    pub normalize_volume: bool,
+}
+
+fn default_spotify_quality() -> String {
+    "very_high".to_string()
+}
+
+fn default_device_name() -> String {
+    "RetroAmp".to_string()
+}
+
+impl Default for SpotifyConfig {
+    fn default() -> Self {
+        Self {
+            client_id: None,
+            quality: default_spotify_quality(),
+            device_name: default_device_name(),
+            connect_enabled: false,
+            normalize_volume: false,
+        }
+    }
+}
+
+/// Spotify browser window preferences.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SpotifyBrowserConfig {
+    /// Active tab: "home", "search", "library".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_tab: Option<String>,
+}
+
 /// UI layout persisted across restarts — window visibility, positions, sizes.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct UiConfig {
@@ -173,6 +229,9 @@ pub struct UiConfig {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_browser: Option<WindowLayoutEntry>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spotify_browser: Option<WindowLayoutEntry>,
 }
 
 /// Saved layout for a single window.
