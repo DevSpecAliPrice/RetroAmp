@@ -309,10 +309,20 @@ export default function PlaylistWindow({ skin, scale }: Props) {
             playlist.tracks.map((track, index) => (
               <div
                 key={track.id}
+                onClick={(e) => {
+                  if (e.ctrlKey || e.metaKey) {
+                    invoke("playlist_toggle_select", { id: track.id });
+                  } else {
+                    invoke("playlist_select_track", { id: track.id });
+                  }
+                }}
                 onDoubleClick={() => playIndex(index)}
                 onContextMenu={async (e) => {
                   e.preventDefault();
                   e.stopPropagation();
+                  if (!track.is_selected) {
+                    invoke("playlist_select_track", { id: track.id });
+                  }
                   const items = [
                     { type: "item" as const, id: "play", label: "Play" },
                     { type: "separator" as const },
@@ -326,7 +336,7 @@ export default function PlaylistWindow({ skin, scale }: Props) {
                   if (sel === "play") playIndex(index);
                   else if (sel === "edit_tags") invoke("open_tag_editor", { path: track.path });
                   else if (sel === "reveal") invoke("reveal_in_file_manager", { path: track.path });
-                  else if (sel === "remove") invoke("playlist_remove_selected");
+                  else if (sel === "remove") invoke("playlist_remove_tracks", { ids: [track.id] });
                 }}
                 style={{
                   display: "flex",
@@ -337,8 +347,8 @@ export default function PlaylistWindow({ skin, scale }: Props) {
                   cursor: "default",
                   userSelect: "none",
                   whiteSpace: "nowrap",
-                  backgroundColor: track.is_current ? ps.selectedbg : "transparent",
-                  color: track.is_current ? ps.current : ps.normal,
+                  backgroundColor: track.is_current ? ps.selectedbg : track.is_selected ? ps.selectedbg : "transparent",
+                  color: track.is_current ? ps.current : track.is_selected ? ps.current : ps.normal,
                 }}
               >
                 <span style={{
@@ -409,7 +419,7 @@ export default function PlaylistWindow({ skin, scale }: Props) {
           <div
             data-action="add" title="Add Files" onClick={openFiles}
             style={{
-              position: "absolute", left: 12 * s, bottom: 1 * s,
+              position: "absolute", left: 12 * s, top: 10 * s,
               width: 25 * s, height: 18 * s, cursor: "pointer",
             }}
           />
@@ -417,7 +427,7 @@ export default function PlaylistWindow({ skin, scale }: Props) {
             data-action="remove" title="Remove Selected"
             onClick={() => invoke("playlist_remove_selected")}
             style={{
-              position: "absolute", left: 40 * s, bottom: 1 * s,
+              position: "absolute", left: 40 * s, top: 10 * s,
               width: 29 * s, height: 18 * s, cursor: "pointer",
             }}
           />
@@ -425,7 +435,7 @@ export default function PlaylistWindow({ skin, scale }: Props) {
             data-action="clear" title="Clear Playlist"
             onClick={() => invoke("playlist_clear")}
             style={{
-              position: "absolute", left: 70 * s, bottom: 1 * s,
+              position: "absolute", left: 70 * s, top: 10 * s,
               width: 29 * s, height: 18 * s, cursor: "pointer",
             }}
           />

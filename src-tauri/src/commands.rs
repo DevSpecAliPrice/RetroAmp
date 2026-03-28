@@ -17,6 +17,7 @@ use crate::audio::source::AudioSource;
 use crate::db::{Database, EqPresetEntry, SkinCatalogEntry};
 use crate::library;
 use crate::playlist::manager::{PlaylistManager, PlaylistState};
+use crate::playlist::track::TrackId;
 use crate::skin::loader::SkinContents;
 use crate::skin::scanner::SkinInfo;
 use crate::window::manager::{WindowId, WindowManager, WindowStates};
@@ -312,6 +313,28 @@ pub fn cycle_repeat(
     Ok(pl.state())
 }
 
+/// Select a single track (replaces current selection).
+#[tauri::command]
+pub fn playlist_select_track(
+    id: TrackId,
+    playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
+) -> Result<PlaylistState, String> {
+    let mut pl = playlist.lock().map_err(|e| e.to_string())?;
+    pl.select_track(id);
+    Ok(pl.state())
+}
+
+/// Toggle a track's selection (for Ctrl+click).
+#[tauri::command]
+pub fn playlist_toggle_select(
+    id: TrackId,
+    playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
+) -> Result<PlaylistState, String> {
+    let mut pl = playlist.lock().map_err(|e| e.to_string())?;
+    pl.toggle_select(id);
+    Ok(pl.state())
+}
+
 /// Remove selected tracks from the playlist.
 #[tauri::command]
 pub fn playlist_remove_selected(
@@ -319,6 +342,17 @@ pub fn playlist_remove_selected(
 ) -> Result<PlaylistState, String> {
     let mut pl = playlist.lock().map_err(|e| e.to_string())?;
     pl.remove_selected();
+    Ok(pl.state())
+}
+
+/// Remove specific tracks by ID.
+#[tauri::command]
+pub fn playlist_remove_tracks(
+    ids: Vec<TrackId>,
+    playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
+) -> Result<PlaylistState, String> {
+    let mut pl = playlist.lock().map_err(|e| e.to_string())?;
+    pl.remove_tracks(&ids);
     Ok(pl.state())
 }
 
