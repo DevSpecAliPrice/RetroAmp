@@ -407,6 +407,18 @@ impl PlaylistManager {
         self.tracks.iter().map(|t| t.path.clone()).collect()
     }
 
+    /// Build export entries for saving the playlist to a file.
+    pub fn export_entries(&self) -> Vec<crate::audio::playlist_parser::ExportEntry> {
+        self.tracks
+            .iter()
+            .map(|t| crate::audio::playlist_parser::ExportEntry {
+                path: t.path.clone(),
+                title: Some(t.display_name()),
+                duration_secs: t.duration.map(|d| d.as_secs()),
+            })
+            .collect()
+    }
+
     /// Get the current shuffle mode.
     pub fn shuffle_mode(&self) -> &ShuffleMode {
         &self.sequence.shuffle

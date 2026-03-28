@@ -126,6 +126,46 @@ fn parse_pls(content: &str) -> Vec<PlaylistEntry> {
         .collect()
 }
 
+// -- Export --
+
+/// Data needed to export a single playlist entry.
+pub struct ExportEntry {
+    pub path: String,
+    pub title: Option<String>,
+    /// Duration in whole seconds, if known.
+    pub duration_secs: Option<u64>,
+}
+
+/// Generate Extended M3U content from a list of entries.
+pub fn export_m3u(entries: &[ExportEntry]) -> String {
+    let mut out = String::from("#EXTM3U\n");
+    for entry in entries {
+        let dur = entry.duration_secs.map(|d| d as i64).unwrap_or(-1);
+        let title = entry.title.as_deref().unwrap_or("");
+        out.push_str(&format!("#EXTINF:{dur},{title}\n"));
+        out.push_str(&entry.path);
+        out.push('\n');
+    }
+    out
+}
+
+/// Generate PLS content from a list of entries.
+pub fn export_pls(entries: &[ExportEntry]) -> String {
+    let mut out = String::from("[playlist]\n");
+    out.push_str(&format!("numberofentries={}\n", entries.len()));
+    for (i, entry) in entries.iter().enumerate() {
+        let n = i + 1;
+        out.push_str(&format!("File{n}={}\n", entry.path));
+        if let Some(title) = &entry.title {
+            out.push_str(&format!("Title{n}={title}\n"));
+        }
+        let dur = entry.duration_secs.map(|d| d as i64).unwrap_or(-1);
+        out.push_str(&format!("Length{n}={dur}\n"));
+    }
+    out.push_str("Version=2\n");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,5 +213,32 @@ Length2=-1
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].url, "http://stream.example.com/radio");
         assert!(entries[0].title.is_none());
+    }
+
+    #[test]
+    fn export_m3u_roundtrip() {
+        let entries = vec![
+            ExportEntry { path: "/music/song.mp3".into(), title: Some("Artist - Song".into()), duration_secs: Some(210) },
+            ExportEntry { path: "http://stream.example.com/live".into(), title: Some("My Radio".into()), duration_secs: None },
+        ];
+        let m3u = export_m3u(&entries);
+        let parsed = parse_m3u(&m3u);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].url, "/music/song.mp3");
+        assert_eq!(parsed[0].title.as_deref(), Some("Artist - Song"));
+        assert_eq!(parsed[1].url, "http://stream.example.com/live");
+        assert_eq!(parsed[1].title.as_deref(), Some("My Radio"));
+    }
+
+    #[test]
+    fn export_pls_roundtrip() {
+        let entries = vec![
+            ExportEntry { path: "/music/song.mp3".into(), title: Some("A Song".into()), duration_secs: Some(180) },
+        ];
+        let pls = export_pls(&entries);
+        let parsed = parse_pls(&pls);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].url, "/music/song.mp3");
+        assert_eq!(parsed[0].title.as_deref(), Some("A Song"));
     }
 }

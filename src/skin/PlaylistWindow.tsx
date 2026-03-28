@@ -11,7 +11,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import type { SkinData } from "./parser";
 import { showContextMenu } from "../nativeMenu";
 
@@ -173,6 +173,29 @@ export default function PlaylistWindow({ skin, scale }: Props) {
     }
   }, []);
 
+  const loadPlaylist = useCallback(async () => {
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "Playlists", extensions: ["m3u", "m3u8", "pls"] }],
+    });
+    if (selected) {
+      const path = Array.isArray(selected) ? selected[0] : selected;
+      await invoke("playlist_load", { path });
+    }
+  }, []);
+
+  const savePlaylist = useCallback(async () => {
+    const path = await save({
+      filters: [
+        { name: "M3U Playlist", extensions: ["m3u"] },
+        { name: "PLS Playlist", extensions: ["pls"] },
+      ],
+    });
+    if (path) {
+      await invoke("playlist_save", { path });
+    }
+  }, []);
+
   const playIndex = useCallback(async (index: number) => {
     await invoke("playlist_play_index", { index });
   }, []);
@@ -230,6 +253,10 @@ export default function PlaylistWindow({ skin, scale }: Props) {
         const selected = await showContextMenu([
           { type: "item", id: "add_files", label: "Add Files..." },
           { type: "item", id: "radio_browser", label: "Radio Browser..." },
+          { type: "separator" },
+          { type: "item", id: "load_playlist", label: "Load Playlist..." },
+          { type: "item", id: "save_playlist", label: "Save Playlist...", disabled: playlist.track_count === 0 },
+          { type: "separator" },
           { type: "item", id: "remove_selected", label: "Remove Selected" },
           { type: "item", id: "clear_playlist", label: "Clear Playlist" },
           { type: "separator" },
@@ -238,6 +265,8 @@ export default function PlaylistWindow({ skin, scale }: Props) {
         if (!selected) return;
         if (selected === "add_files") openFiles();
         else if (selected === "radio_browser") invoke("toggle_window", { windowId: "RadioBrowser" }).catch(console.error);
+        else if (selected === "load_playlist") loadPlaylist();
+        else if (selected === "save_playlist") savePlaylist();
         else if (selected === "remove_selected") invoke("playlist_remove_selected");
         else if (selected === "clear_playlist") invoke("playlist_clear");
         else if (selected === "preferences") invoke("open_settings");

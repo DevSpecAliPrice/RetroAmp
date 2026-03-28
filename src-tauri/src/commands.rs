@@ -377,6 +377,107 @@ pub fn playlist_clear(
     })
 }
 
+/// Save the current playlist to a file (M3U, M3U8, or PLS based on extension).
+#[tauri::command]
+pub fn playlist_save(
+    playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
+    path: String,
+) -> Result<(), String> {
+    use crate::audio::playlist_parser;
+
+    let pl = playlist.lock().map_err(|e| e.to_string())?;
+    if pl.track_count() == 0 {
+        return Err("Playlist is empty".into());
+    }
+    let entries = pl.export_entries();
+    drop(pl);
+
+    let lower = path.to_lowercase();
+    let content = if lower.ends_with(".pls") {
+        playlist_parser::export_pls(&entries)
+    } else {
+        // Default to M3U for .m3u, .m3u8, or anything else.
+        playlist_parser::export_m3u(&entries)
+    };
+
+    std::fs::write(&path, content).map_err(|e| format!("Failed to save playlist: {e}"))
+}
+
+/// Load a playlist file, replacing the current playlist.
+#[tauri::command]
+pub fn playlist_load(
+    engine: State<'_, Arc<AudioEngine>>,
+    playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
+    path: String,
+) -> Result<PlaylistState, String> {
+    use crate::audio::playlist_parser;
+
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read playlist: {e}"))?;
+    let entries = playlist_parser::parse_playlist(&content);
+    if entries.is_empty() {
+        return Err("No entries found in playlist file".into());
+    }
+
+    let mut pl = playlist.lock().map_err(|e| e.to_string())?;
+    pl.clear();
+    engine.stop();
+
+    let mut ids = Vec::new();
+    for entry in entries {
+        // Resolve relative paths against the playlist file's directory.
+        let resolved = if !entry.url.starts_with("http://")
+            && !entry.url.starts_with("https://")
+            && !std::path::Path::new(&entry.url).is_absolute()
+        {
+            if let Some(parent) = std::path::Path::new(&path).parent() {
+                let full = parent.join(&entry.url);
+                if full.exists() {
+                    full.to_string_lossy().to_string()
+                } else {
+                    entry.url.clone()
+                }
+            } else {
+                entry.url.clone()
+            }
+        } else {
+            entry.url.clone()
+        };
+
+        let id = pl.add_track(&resolved);
+        if let Some(title) = entry.title {
+            pl.update_display_name(id, &title);
+        }
+        ids.push(id);
+    }
+
+    // Load metadata for local files.
+    for &id in &ids {
+        if let Some(track) = pl.get_track(id) {
+            if !track.is_stream {
+                let track_path = track.path.clone();
+                if let Ok(source) = LocalFileSource::open(&track_path) {
+                    if let Ok(meta) = source.metadata() {
+                        pl.update_metadata(id, &meta);
+                    }
+                }
+            }
+        }
+    }
+
+    // Auto-play the first track.
+    if !ids.is_empty() {
+        if let Some(track) = pl.play_index(0) {
+            let track_path = track.path.clone();
+            drop(pl);
+            play_path(&engine, &track_path)?;
+            return Ok(playlist.lock().map_err(|e| e.to_string())?.state());
+        }
+    }
+
+    Ok(pl.state())
+}
+
 // -- Playlist persistence --
 
 /// Save the current playlist state to the database. Called on app exit.

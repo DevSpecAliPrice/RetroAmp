@@ -550,6 +550,8 @@ pub fn run() {
             commands::playlist_remove_selected,
             commands::playlist_remove_tracks,
             commands::playlist_clear,
+            commands::playlist_save,
+            commands::playlist_load,
             commands::play_url,
             commands::playlist_add_url,
             // Radio browser
