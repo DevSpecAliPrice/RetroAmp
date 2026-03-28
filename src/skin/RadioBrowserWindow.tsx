@@ -7,6 +7,7 @@
 
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { SkinData } from "./parser";
 import { showContextMenu, type NativeMenuEntry } from "../nativeMenu";
@@ -47,6 +48,32 @@ interface EngineStatus {
   state: "Stopped" | "Playing" | "Paused";
   metadata: { title: string | null; artist: string | null } | null;
   is_stream: boolean;
+}
+
+interface CompletedTrackInfo {
+  id: number;
+  title: string | null;
+  artist: string | null;
+  station_name: string | null;
+  duration_secs: number;
+  size_bytes: number;
+  saved: boolean;
+}
+
+interface CurrentTrackInfo {
+  title: string | null;
+  artist: string | null;
+  station_name: string | null;
+  buffered_secs: number;
+  buffered_bytes: number;
+}
+
+interface RecorderStatus {
+  active: boolean;
+  has_metadata: boolean;
+  state: "idle" | "saving" | "saved" | "recording";
+  current_track: CurrentTrackInfo | null;
+  history: CompletedTrackInfo[];
 }
 
 type Tab = "favorites" | "library" | "discover";
@@ -170,20 +197,52 @@ export default function RadioBrowserWindow({ skin, scale }: Props) {
     }
   }, [tab, showHidden, loadStations]);
 
-  // Poll for currently playing stream URL.
+  // -- Recorder state --
+  const [recorder, setRecorder] = useState<RecorderStatus | null>(null);
+  const [historyExpanded, setHistoryExpanded] = useState(true);
+  const [savedFlash, setSavedFlash] = useState(false); // brief "Saved!" flash
+  const savedTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  // Poll for currently playing stream URL + recorder status.
   useEffect(() => {
     const interval = setInterval(async () => {
       try {
         const status = await invoke<EngineStatus>("get_status");
         if (status.state !== "Stopped" && status.is_stream) {
-          // We don't have the exact URL in status, but we can match by title
           setPlayingUrl("__playing__");
+          // Also poll recorder status.
+          try {
+            const rs = await invoke<RecorderStatus>("get_recorder_status");
+            setRecorder(rs.active ? rs : null);
+          } catch { /* ignore */ }
         } else {
           setPlayingUrl(null);
+          setRecorder(null);
         }
       } catch { /* ignore */ }
     }, 2000);
     return () => clearInterval(interval);
+  }, []);
+
+  // Listen for recorder events (track changes, saves).
+  useEffect(() => {
+    const unlisten = listen<{ type: string; track_id?: number; filename?: string; history_count?: number; saved_track_id?: number | null }>(
+      "radio-recorder-event",
+      (event) => {
+        // Refresh recorder status on any event.
+        invoke<RecorderStatus>("get_recorder_status")
+          .then((rs) => setRecorder(rs.active ? rs : null))
+          .catch(() => {});
+
+        // Flash "Saved!" briefly when a track was auto-saved on boundary.
+        if (event.payload.type === "TrackChanged" && event.payload.saved_track_id) {
+          setSavedFlash(true);
+          clearTimeout(savedTimerRef.current);
+          savedTimerRef.current = setTimeout(() => setSavedFlash(false), 3000);
+        }
+      },
+    );
+    return () => { unlisten.then((fn) => fn()); };
   }, []);
 
   // -- Discover tab: API search --
@@ -629,6 +688,157 @@ export default function RadioBrowserWindow({ skin, scale }: Props) {
         <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", background: ps.normalbg }}>
 
           <div style={{ padding: `${3 * s}px ${4 * s}px`, fontFamily: `"${ps.font}", Arial, sans-serif`, fontSize: smallFont, color: ps.normal, textAlign: "center", userSelect: "none", flexShrink: 0, borderBottom: `1px solid ${ps.selectedbg}` }}>RADIO BROWSER</div>
+
+          {/* Now Playing bar — visible when a radio stream is playing */}
+          {recorder && recorder.active && (
+            <div style={{
+              display: "flex", alignItems: "center", flexShrink: 0,
+              padding: `${2 * s}px ${4 * s}px`, gap: 4 * s,
+              background: ps.selectedbg,
+              borderBottom: `1px solid ${ps.normalbg}`,
+              fontFamily: `"${ps.font}", Arial, sans-serif`,
+              fontSize: smallFont, userSelect: "none",
+            }}>
+              <div style={{ flex: 1, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>
+                {recorder.current_track?.station_name && (
+                  <span style={{ color: ps.current, opacity: 0.6 }}>
+                    {recorder.current_track.station_name}
+                  </span>
+                )}
+                {recorder.current_track?.station_name && (recorder.current_track?.title || recorder.current_track?.artist) && (
+                  <span style={{ color: ps.normal, margin: `0 ${2 * s}px` }}>&mdash;</span>
+                )}
+                {(recorder.current_track?.artist || recorder.current_track?.title) && (
+                  <span style={{ color: ps.current }}>
+                    {recorder.current_track?.artist ? `${recorder.current_track.artist} - ` : ""}
+                    {recorder.current_track?.title ?? "Unknown"}
+                  </span>
+                )}
+                {!recorder.current_track?.title && !recorder.current_track?.artist && !recorder.current_track?.station_name && (
+                  <span style={{ color: ps.normal, opacity: 0.5 }}>Listening...</span>
+                )}
+              </div>
+              {/* Save / Record button */}
+              {recorder.has_metadata ? (
+                <div
+                  onClick={() => {
+                    if (recorder.state === "idle" && !savedFlash) {
+                      invoke("save_current_track").catch(console.error);
+                    }
+                  }}
+                  style={{
+                    padding: `${1 * s}px ${6 * s}px`,
+                    background: recorder.state === "idle" && !savedFlash ? ps.normalbg : "transparent",
+                    color: savedFlash ? ps.current : ps.normal,
+                    cursor: recorder.state === "idle" && !savedFlash ? "pointer" : "default",
+                    opacity: recorder.state === "saving" ? 0.5 : 1,
+                    fontSize: smallFont, flexShrink: 0,
+                  }}
+                >
+                  {savedFlash ? "Saved!" : recorder.state === "saving" ? "Saving\u2026" : "Save"}
+                </div>
+              ) : (
+                <div
+                  onClick={() => {
+                    if (recorder.state === "recording") {
+                      invoke("stop_manual_recording").catch(console.error);
+                    } else {
+                      invoke("start_manual_recording").catch(console.error);
+                    }
+                  }}
+                  style={{
+                    padding: `${1 * s}px ${6 * s}px`,
+                    background: recorder.state === "recording" ? ps.normalbg : ps.normalbg,
+                    color: recorder.state === "recording" ? ps.current : ps.normal,
+                    cursor: "pointer",
+                    fontSize: smallFont, flexShrink: 0,
+                  }}
+                >
+                  {recorder.state === "recording"
+                    ? `Stop \u00B7 ${Math.floor(recorder.current_track?.buffered_secs ?? 0)}s`
+                    : "\u23FA Record"}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Recording History — collapsible list of recently completed tracks */}
+          {recorder && recorder.active && recorder.history.length > 0 && (
+            <div style={{ flexShrink: 0, borderBottom: `1px solid ${ps.selectedbg}` }}>
+              <div
+                onClick={() => setHistoryExpanded(!historyExpanded)}
+                style={{
+                  padding: `${2 * s}px ${4 * s}px`,
+                  fontFamily: `"${ps.font}", Arial, sans-serif`,
+                  fontSize: Math.max(7, Math.round(8 * s)),
+                  color: ps.normal, opacity: 0.7,
+                  cursor: "pointer", userSelect: "none",
+                  display: "flex", justifyContent: "space-between",
+                }}
+              >
+                <span>RECORDING HISTORY ({recorder.history.length})</span>
+                <span>{historyExpanded ? "\u25B4" : "\u25BE"}</span>
+              </div>
+              {historyExpanded && (
+                <div style={{ maxHeight: 5 * ROW_HEIGHT * s, overflowY: "auto" }}>
+                  {recorder.history.map((track) => {
+                    const mins = Math.floor(track.duration_secs / 60);
+                    const secs = Math.floor(track.duration_secs % 60);
+                    const durStr = `${mins}:${secs.toString().padStart(2, "0")}`;
+                    const displayName = track.artist && track.title
+                      ? `${track.artist} - ${track.title}`
+                      : track.title ?? track.station_name ?? "Unknown";
+                    return (
+                      <div
+                        key={track.id}
+                        style={{
+                          display: "flex", alignItems: "center",
+                          padding: `0 ${4 * s}px`, gap: 4 * s,
+                          height: ROW_HEIGHT * s,
+                          fontFamily: `"${ps.font}", Arial, sans-serif`,
+                          fontSize: Math.max(7, Math.round(8 * s)),
+                          color: ps.normal, userSelect: "none",
+                        }}
+                      >
+                        <div style={{ flex: 1, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>
+                          {displayName}
+                        </div>
+                        <span style={{ opacity: 0.5, flexShrink: 0 }}>{durStr}</span>
+                        <span
+                          onClick={() => {
+                            invoke("play_history_track", { trackId: track.id }).catch(console.error);
+                          }}
+                          style={{
+                            cursor: "pointer",
+                            color: ps.current,
+                            opacity: 0.8,
+                            flexShrink: 0,
+                          }}
+                        >
+                          {"\u25B6"}
+                        </span>
+                        <span
+                          onClick={() => {
+                            if (!track.saved) {
+                              invoke("save_history_track", { trackId: track.id }).catch(console.error);
+                            }
+                          }}
+                          style={{
+                            cursor: track.saved ? "default" : "pointer",
+                            color: track.saved ? ps.normal : ps.current,
+                            opacity: track.saved ? 0.4 : 0.8,
+                            flexShrink: 0,
+                          }}
+                        >
+                          {track.saved ? "Saved" : "Save"}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Tabs */}
           <div style={{

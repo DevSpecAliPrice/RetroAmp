@@ -126,7 +126,15 @@ impl LocalFileSource {
             _ => None,
         };
 
-        let metadata = build_metadata(&all_tags, &all_visuals, sample_rate, channels, duration, bitrate);
+        let mut metadata = build_metadata(&all_tags, &all_visuals, sample_rate, channels, duration, bitrate);
+
+        // Fall back to the filename as title when no tags are embedded (e.g. WAV).
+        if metadata.title.is_none() {
+            metadata.title = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string());
+        }
 
         // Create the decoder.
         let decoder = symphonia::default::get_codecs()

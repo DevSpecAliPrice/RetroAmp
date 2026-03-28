@@ -9,6 +9,7 @@
 //!   - `error`: Error types for the audio subsystem
 
 pub mod adts;
+pub mod buffer;
 pub mod engine;
 pub mod eq;
 pub mod error;
@@ -18,6 +19,7 @@ pub mod local;
 pub mod playlist_parser;
 pub mod output;
 pub mod radio;
+pub mod recorder;
 pub mod resample;
 pub mod source;
 pub mod stream_reader;

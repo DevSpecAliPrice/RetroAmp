@@ -364,33 +364,46 @@ fn audio_thread(
 
                     // Reopen output if sample rate changed or buffer sizing changed
                     // (local ↔ stream).
-                    if source_rate != current_rate || is_stream != current_is_stream {
+                    //
+                    // Only reconfigure the output to "standard" rates (≥ 32 kHz).
+                    // Switching to unusual rates like 22050 Hz causes audible pops
+                    // from the hardware/PipeWire resetting. For non-standard rates
+                    // we keep the current output rate and resample instead.
+                    let rate_is_standard = source_rate >= 32000;
+                    let need_rate_change = source_rate != current_rate && rate_is_standard;
+                    let need_buffer_change = is_stream != current_is_stream;
+
+                    if need_rate_change || need_buffer_change {
+                        // Fill remaining output buffer with silence before
+                        // tearing down the CPAL stream — prevents pops from
+                        // abrupt mid-sample cutoff on rate changes.
+                        output.flush_with_silence();
+
+                        let target_rate = if rate_is_standard { source_rate } else { current_rate };
                         eprintln!("[retroamp] reconfiguring output (rate or buffer change)");
-                        match output_manager.open_at_rate(source_rate, meta.channels, buffer_secs) {
+                        match output_manager.open_at_rate(target_rate, meta.channels, buffer_secs) {
                             Ok(new_output) => {
                                 output = new_output;
-                                current_rate = source_rate;
+                                current_rate = target_rate;
                                 current_channels = output.config().channels;
                                 current_is_stream = is_stream;
                                 eq.reconfigure(current_rate, current_channels);
                                 eprintln!(
-                                    "[retroamp] output reconfigured to {source_rate}Hz, buffer {:.0}ms",
+                                    "[retroamp] output reconfigured to {target_rate}Hz, buffer {:.0}ms",
                                     buffer_secs * 1000.0
                                 );
                                 log::info!(
-                                    "output reconfigured to {source_rate}Hz, buffer {:.0}ms",
+                                    "output reconfigured to {target_rate}Hz, buffer {:.0}ms",
                                     buffer_secs * 1000.0
                                 );
                             }
                             Err(ref e) => {
                                 eprintln!("[retroamp] reconfigure failed: {e}, falling back to resampler");
                                 log::info!(
-                                    "device doesn't support {source_rate}Hz, \
+                                    "device doesn't support {target_rate}Hz, \
                                      resampling to {current_rate}Hz"
                                 );
-                                // Still update stream status even if rate reconfig failed,
-                                // so the buffer is resized on next successful reconfig.
-                                if is_stream != current_is_stream {
+                                if need_buffer_change {
                                     match output_manager.open_at_rate(current_rate, current_channels, buffer_secs) {
                                         Ok(new_output) => {
                                             output = new_output;
@@ -403,16 +416,20 @@ fn audio_thread(
                                         Err(_) => {}
                                     }
                                 }
-                                match AudioResampler::new(source_rate, current_rate, meta.channels) {
-                                    Ok(r) => {
-                                        eprintln!("[retroamp] resampler created: {source_rate}Hz → {current_rate}Hz");
-                                        resampler = Some(r);
-                                    }
-                                    Err(e) => {
-                                        eprintln!("[retroamp] resampler FAILED: {e}");
-                                        log::error!("failed to create resampler: {e}");
-                                    }
-                                }
+                            }
+                        }
+                    }
+
+                    // Create resampler if the source rate doesn't match the output.
+                    if source_rate != current_rate {
+                        match AudioResampler::new(source_rate, current_rate, meta.channels) {
+                            Ok(r) => {
+                                eprintln!("[retroamp] resampler: {source_rate}Hz → {current_rate}Hz");
+                                resampler = Some(r);
+                            }
+                            Err(e) => {
+                                eprintln!("[retroamp] resampler FAILED: {e}");
+                                log::error!("failed to create resampler: {e}");
                             }
                         }
                     }

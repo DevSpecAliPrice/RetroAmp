@@ -19,6 +19,7 @@ use ringbuf::{
 use crate::audio::error::AudioError;
 use crate::audio::icy::{IcyMetadata, IcyReader};
 use crate::audio::playlist_parser;
+use crate::audio::recorder::RadioRecorder;
 
 /// Default ring buffer size: 256 KB ≈ 16 seconds at 128 kbps.
 const DEFAULT_BUFFER_SIZE: usize = 256 * 1024;
@@ -57,6 +58,8 @@ pub struct StreamReader {
     pub connected: Arc<AtomicBool>,
     /// Whether the reader thread is still running (false = gave up or exited).
     pub reader_alive: Arc<AtomicBool>,
+    /// Radio recorder for track buffering/saving.
+    pub recorder: Option<Arc<RadioRecorder>>,
     /// Reader thread handle.
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -71,10 +74,22 @@ impl StreamReader {
     /// If the URL points to a playlist file (PLS/M3U), the playlist is
     /// parsed and the first stream URL is followed automatically.
     pub fn connect(url: &str) -> Result<Self, AudioError> {
-        Self::connect_inner(url, 0)
+        Self::connect_inner(url, 0, None)
     }
 
-    fn connect_inner(url: &str, playlist_depth: usize) -> Result<Self, AudioError> {
+    /// Connect with a recorder for track buffering/saving.
+    pub fn connect_with_recorder(
+        url: &str,
+        recorder: Arc<RadioRecorder>,
+    ) -> Result<Self, AudioError> {
+        Self::connect_inner(url, 0, Some(recorder))
+    }
+
+    fn connect_inner(
+        url: &str,
+        playlist_depth: usize,
+        recorder: Option<Arc<RadioRecorder>>,
+    ) -> Result<Self, AudioError> {
         let response = ureq::get(url)
             .header("Icy-MetaData", "1")
             .header("User-Agent", "RetroAmp/0.1")
@@ -126,7 +141,7 @@ impl StreamReader {
             log::info!(
                 "[radio] resolved playlist to: {stream_url} (depth {playlist_depth})"
             );
-            return Self::connect_inner(&stream_url, playlist_depth + 1);
+            return Self::connect_inner(&stream_url, playlist_depth + 1, recorder);
         }
 
         let metaint: Option<usize> = header_str(headers, "icy-metaint")
@@ -177,11 +192,15 @@ impl StreamReader {
             let url = url.to_string();
             let icy_metadata = Arc::clone(&icy_metadata);
             let metaint = stream_info.metaint;
+            let recorder_clone = recorder.clone();
 
             thread::Builder::new()
                 .name("radio-reader".into())
                 .spawn(move || {
-                    reader_thread_main(reader, producer, stop, connected, url, icy_metadata, metaint);
+                    reader_thread_main(
+                        reader, producer, stop, connected, url,
+                        icy_metadata, metaint, recorder_clone,
+                    );
                     // Signal that the reader thread has exited — unblocks
                     // StreamBufReader if it's waiting for data.
                     reader_alive.store(false, Ordering::Relaxed);
@@ -196,6 +215,7 @@ impl StreamReader {
             stop,
             connected,
             reader_alive,
+            recorder,
             thread: Some(thread),
         })
     }
@@ -238,6 +258,7 @@ fn reader_thread_main(
     url: String,
     icy_metadata: Arc<Mutex<IcyMetadata>>,
     metaint: Option<usize>,
+    recorder: Option<Arc<RadioRecorder>>,
 ) {
     let mut buf = [0u8; 8192];
     let mut reconnect_attempts = 0u32;
@@ -267,6 +288,19 @@ fn reader_thread_main(
             }
             Ok(n) => {
                 reconnect_attempts = 0;
+
+                // Recording tap — copy bytes to recorder buffer.
+                // Uses try_lock() to never block the reader thread.
+                if let Some(ref recorder) = recorder {
+                    recorder.push_bytes(&buf[..n]);
+
+                    // Check for track boundary (metadata title change).
+                    if let Ok(meta) = icy_metadata.try_lock() {
+                        if let Some(ref title) = meta.stream_title {
+                            recorder.check_track_boundary(title);
+                        }
+                    }
+                }
 
                 // Push bytes to ring buffer with back-pressure.
                 let mut offset = 0;

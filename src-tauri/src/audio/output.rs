@@ -56,6 +56,17 @@ impl AudioOutput {
     pub fn free_space(&self) -> usize {
         self.producer.vacant_len()
     }
+
+    /// Fill remaining output buffer with silence to prevent pops when the
+    /// stream is about to be dropped/reconfigured. The CPAL callback will
+    /// play this silence before the stream is torn down.
+    pub fn flush_with_silence(&mut self) {
+        let free = self.producer.vacant_len();
+        if free > 0 {
+            let silence = vec![0.0f32; free];
+            self.producer.push_slice(&silence);
+        }
+    }
 }
 
 /// Manages the output device. Lives on the audio thread and can reconfigure

@@ -28,6 +28,7 @@ use symphonia::core::probe::Hint;
 use crate::audio::adts::{self, AdtsFrameReader};
 use crate::audio::error::AudioError;
 use crate::audio::icy::{self, IcyMetadata};
+use crate::audio::recorder::RadioRecorder;
 use crate::audio::source::{
     AudioBuffer, AudioSource, SourceCapabilities, SourceState, TrackMetadata,
 };
@@ -84,6 +85,8 @@ pub struct RadioSource {
     reader_alive: Arc<AtomicBool>,
     _reader: StreamReader,
 
+    recorder: Option<Arc<RadioRecorder>>,
+
     sample_buf: Option<SampleBuffer<f32>>,
     consecutive_empty: u32,
 }
@@ -94,7 +97,32 @@ impl RadioSource {
     }
 
     pub fn connect_with_name(url: &str, display_name: Option<&str>) -> Result<Self, AudioError> {
-        let mut reader = StreamReader::connect(url)?;
+        Self::connect_inner(url, display_name, None)
+    }
+
+    /// Connect with a recorder for track buffering/saving.
+    pub fn connect_with_name_and_recorder(
+        url: &str,
+        display_name: Option<&str>,
+        recorder: Arc<RadioRecorder>,
+    ) -> Result<Self, AudioError> {
+        Self::connect_inner(url, display_name, Some(recorder))
+    }
+
+    /// Get the recorder, if one was provided during connect.
+    pub fn recorder(&self) -> Option<Arc<RadioRecorder>> {
+        self.recorder.clone()
+    }
+
+    fn connect_inner(
+        url: &str,
+        display_name: Option<&str>,
+        recorder: Option<Arc<RadioRecorder>>,
+    ) -> Result<Self, AudioError> {
+        let mut reader = match &recorder {
+            Some(rec) => StreamReader::connect_with_recorder(url, Arc::clone(rec))?,
+            None => StreamReader::connect(url)?,
+        };
 
         let consumer = reader
             .take_consumer()
@@ -152,6 +180,18 @@ impl RadioSource {
         };
 
         let content_type_str = stream_info.content_type.clone();
+        let is_adts = adts_header.is_some();
+
+        // Inform the recorder of the true stream format (after ADTS detection).
+        if let Some(ref recorder) = recorder {
+            recorder.set_stream_info(
+                &content_type_str,
+                is_adts,
+                stream_info.bitrate,
+                stream_info.station_name.as_deref(),
+                stream_info.metaint.is_some(),
+            );
+        }
 
         let (pipeline, sample_rate, channels) = if let Some(ref hdr) = adts_header {
             build_adts_pipeline(
@@ -196,6 +236,7 @@ impl RadioSource {
             connected,
             reader_alive,
             _reader: reader,
+            recorder,
             sample_buf: None,
             consecutive_empty: 0,
         })
@@ -223,8 +264,6 @@ fn try_decode(
     sample_buf: &mut Option<SampleBuffer<f32>>,
     elapsed: &mut Duration,
     consecutive_empty: &mut u32,
-    sample_rate: u32,
-    channels: u16,
 ) -> Option<AudioBuffer> {
     let decoded = match decoder.decode(packet) {
         Ok(d) => d,
@@ -244,6 +283,11 @@ fn try_decode(
         return None;
     }
 
+    // Use the actual decoded rate/channels — for HE-AAC with SBR, the
+    // decoder may output at double the ADTS base rate.
+    let actual_rate = spec.rate;
+    let actual_channels = spec.channels.count() as u16;
+
     let sbuf = sample_buf.get_or_insert_with(|| {
         SampleBuffer::<f32>::new(num_frames as u64, spec)
     });
@@ -255,13 +299,13 @@ fn try_decode(
     sbuf.copy_interleaved_ref(decoded);
     let samples = sbuf.samples().to_vec();
 
-    *elapsed += Duration::from_secs_f64(num_frames as f64 / sample_rate as f64);
+    *elapsed += Duration::from_secs_f64(num_frames as f64 / actual_rate as f64);
     *consecutive_empty = 0;
 
     Some(AudioBuffer {
         samples,
-        sample_rate,
-        channels,
+        sample_rate: actual_rate,
+        channels: actual_channels,
     })
 }
 
@@ -363,8 +407,6 @@ impl AudioSource for RadioSource {
                                 &mut self.sample_buf,
                                 &mut self.elapsed,
                                 &mut self.consecutive_empty,
-                                self.sample_rate,
-                                self.channels,
                             ) {
                                 return Ok(Some(buf));
                             }
@@ -424,8 +466,6 @@ impl AudioSource for RadioSource {
                             &mut self.sample_buf,
                             &mut self.elapsed,
                             &mut self.consecutive_empty,
-                            self.sample_rate,
-                            self.channels,
                         ) {
                             return Ok(Some(buf));
                         }
@@ -473,6 +513,20 @@ fn build_adts_pipeline(
 ) -> Result<(DecodePipeline, u32, u16), AudioError> {
     let sample_rate = hdr.sample_rate;
     let channels = hdr.channels as u16;
+
+    // Note: HE-AAC (AAC+) uses SBR which ideally doubles the output rate.
+    // However, Symphonia's AAC decoder does NOT implement SBR — it decodes
+    // only the base AAC-LC layer and outputs at the ADTS base rate. Using
+    // the base rate here is correct; the audio will play but without the
+    // SBR high-frequency enhancement.
+    if content_type.to_lowercase().contains("aacp") && sample_rate <= 24000 {
+        log::info!(
+            "[radio] HE-AAC stream at {}Hz (SBR not supported by decoder, \
+             playing base layer only)",
+            sample_rate,
+        );
+    }
+
     let asc = adts::build_audio_specific_config(hdr);
 
     let mut params = CodecParameters::new();

@@ -33,6 +33,9 @@ pub struct AppConfig {
 
     #[serde(default)]
     pub radio: RadioConfig,
+
+    #[serde(default)]
+    pub general: GeneralConfig,
 }
 
 /// Skin-related preferences.
@@ -134,6 +137,15 @@ pub struct RadioConfig {
     /// Per-column widths (unscaled pixels). Only present for columns the user has resized.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub column_widths: HashMap<String, f64>,
+}
+
+/// General application preferences.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GeneralConfig {
+    /// Download folder for saved radio recordings.
+    /// Falls back to the OS music directory if absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_dir: Option<String>,
 }
 
 

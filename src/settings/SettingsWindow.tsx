@@ -149,6 +149,45 @@ function LibraryTab({ colors }: { colors: ColorProps }) {
   );
 }
 
+function GeneralTab({ colors }: { colors: ColorProps }) {
+  const [downloadDir, setDownloadDir] = useState("");
+
+  useEffect(() => {
+    invoke<string>("get_download_dir").then(setDownloadDir).catch(() => {});
+  }, []);
+
+  const pickFolder = useCallback(async () => {
+    const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
+    const selected = await openDialog({ directory: true, multiple: false });
+    if (selected && typeof selected === "string") {
+      await invoke("set_download_dir", { path: selected });
+      setDownloadDir(selected);
+    }
+  }, []);
+
+  return (
+    <div className="shortcuts-tab">
+      <div className="shortcuts-group">
+        <div className="shortcuts-group-title" style={{ color: colors.current }}>Downloads</div>
+        <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
+          Saved radio tracks are stored in this folder.
+        </div>
+        <div className="shortcuts-row" style={{ justifyContent: "space-between" }}>
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, fontSize: 12 }}>
+            {downloadDir || "Loading..."}
+          </span>
+          <span
+            onClick={pickFolder}
+            style={{ cursor: "pointer", padding: "2px 8px", color: colors.current, opacity: 0.7, fontSize: 12 }}
+          >
+            Browse
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 interface Props {
   skin: SkinData | null;
   scale: number;
@@ -276,11 +315,7 @@ export default function SettingsWindow({ skin, scale }: Props) {
             {activeTab === "skins" && <SkinBrowser playlistStyle={ps} />}
             {activeTab === "shortcuts" && <ShortcutsTab colors={ps} />}
             {activeTab === "library" && <LibraryTab colors={ps} />}
-            {activeTab === "general" && (
-              <div className="settings-placeholder" style={{ color: ps.normal }}>
-                General settings coming soon.
-              </div>
-            )}
+            {activeTab === "general" && <GeneralTab colors={ps} />}
           </div>
         </div>
 

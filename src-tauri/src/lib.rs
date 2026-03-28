@@ -23,6 +23,7 @@ use serde::Serialize;
 
 use audio::engine::{AudioEngine, EngineEvent};
 use audio::eq::EqSettings;
+use audio::recorder::RadioRecorder;
 use db::Database;
 use playlist::manager::PlaylistManager;
 use window::manager::{WindowId, WindowManager};
@@ -168,22 +169,12 @@ pub fn run() {
         }
     }
 
-    // Spawn the auto-advance listener. When the engine signals that a track
-    // has finished, this thread advances the playlist and feeds the next
-    // track to the engine.
-    {
-        let engine = Arc::clone(&engine);
-        let playlist = Arc::clone(&playlist_manager);
-        thread::Builder::new()
-            .name("retroamp-auto-advance".into())
-            .spawn(move || {
-                auto_advance_loop(engine, playlist);
-            })
-            .expect("failed to spawn auto-advance thread");
-    }
-
     // Capture scale before moving window_manager into Tauri state.
     let initial_scale = window_manager.scale() as f64;
+
+    // Recorder state shared between commands and auto-advance.
+    let recorder_state: Arc<Mutex<Option<Arc<RadioRecorder>>>> =
+        Arc::new(Mutex::new(None));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -194,6 +185,7 @@ pub fn run() {
         .manage(Mutex::new(window_manager))
         .manage(Mutex::new(commands::SkinCache::new()))
         .manage(Arc::clone(&database))
+        .manage(Arc::clone(&recorder_state))
         .setup(move |app| {
             // Start OS media controls (MPRIS on Linux, SMTC on Windows,
             // MPRemoteCommandCenter on macOS). Non-fatal if it fails.
@@ -256,6 +248,24 @@ pub fn run() {
                         }
                     })
                     .ok();
+            }
+
+            // Spawn the auto-advance listener. When the engine signals that a
+            // track has finished, this thread advances the playlist and feeds
+            // the next track to the engine — with recorder support for streams.
+            {
+                let engine: Arc<AudioEngine> =
+                    Arc::clone(&*app.state::<Arc<AudioEngine>>());
+                let playlist: Arc<Mutex<PlaylistManager>> =
+                    Arc::clone(&*app.state::<Arc<Mutex<PlaylistManager>>>());
+                let rec_state = Arc::clone(&recorder_state);
+                let app_handle = app.handle().clone();
+                thread::Builder::new()
+                    .name("retroamp-auto-advance".into())
+                    .spawn(move || {
+                        auto_advance_loop(engine, playlist, rec_state, app_handle);
+                    })
+                    .expect("failed to spawn auto-advance thread");
             }
 
             // Create the main window programmatically (same code path as
@@ -627,6 +637,15 @@ pub fn run() {
             commands::read_track_tags,
             commands::write_track_tags,
             commands::open_tag_editor,
+            // Radio recorder
+            commands::get_recorder_status,
+            commands::save_current_track,
+            commands::save_history_track,
+            commands::start_manual_recording,
+            commands::stop_manual_recording,
+            commands::get_download_dir,
+            commands::set_download_dir,
+            commands::play_history_track,
             // Context menu
             context_menu::show_context_menu,
         ])
@@ -737,7 +756,12 @@ fn sync_skin_catalog(db: Arc<Mutex<Database>>, app: tauri::AppHandle) {
 }
 
 /// Polls the engine for TrackFinished events and advances the playlist.
-fn auto_advance_loop(engine: Arc<AudioEngine>, playlist: Arc<Mutex<PlaylistManager>>) {
+fn auto_advance_loop(
+    engine: Arc<AudioEngine>,
+    playlist: Arc<Mutex<PlaylistManager>>,
+    recorder_state: Arc<Mutex<Option<Arc<RadioRecorder>>>>,
+    app_handle: tauri::AppHandle,
+) {
     loop {
         match engine.try_recv_event() {
             Some(EngineEvent::TrackFinished) => {
@@ -751,7 +775,11 @@ fn auto_advance_loop(engine: Arc<AudioEngine>, playlist: Arc<Mutex<PlaylistManag
                         let path = track.path.clone();
                         drop(pl); // Release lock before engine call.
 
-                        match commands::create_source(&path) {
+                        let ctx = commands::RecorderContext {
+                            recorder_state: Arc::clone(&recorder_state),
+                            app_handle: app_handle.clone(),
+                        };
+                        match commands::create_source(&path, Some(ctx)) {
                             Ok(source) => {
                                 // Update metadata if not already loaded.
                                 if let Ok(meta) = source.metadata() {

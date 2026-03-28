@@ -12,7 +12,9 @@ use crate::audio::engine::{AudioEngine, EngineStatus};
 use crate::audio::eq::EqSettings;
 use crate::audio::fft::FftData;
 use crate::audio::local::LocalFileSource;
+use crate::audio::buffer::BufferSource;
 use crate::audio::radio::RadioSource;
+use crate::audio::recorder::{RadioRecorder, RecorderStatus};
 use crate::audio::source::AudioSource;
 use crate::db::{Database, EqPresetEntry, SkinCatalogEntry};
 use crate::library;
@@ -246,13 +248,18 @@ pub fn get_playlist(
 pub fn playlist_play_index(
     engine: State<'_, Arc<AudioEngine>>,
     playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
+    recorder_state: State<'_, Arc<Mutex<Option<Arc<RadioRecorder>>>>>,
+    app: AppHandle,
     index: usize,
 ) -> Result<(), String> {
     let mut pl = playlist.lock().map_err(|e| e.to_string())?;
     let track = pl.play_index(index).ok_or("invalid index")?;
     let path = track.path.clone();
     drop(pl);
-    play_path(&engine, &path)
+    play_path_with_recorder(&engine, &path, Some(RecorderContext {
+        recorder_state: Arc::clone(&*recorder_state),
+        app_handle: app,
+    }))
 }
 
 /// Advance to the next track.
@@ -260,13 +267,18 @@ pub fn playlist_play_index(
 pub fn next_track(
     engine: State<'_, Arc<AudioEngine>>,
     playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
+    recorder_state: State<'_, Arc<Mutex<Option<Arc<RadioRecorder>>>>>,
+    app: AppHandle,
 ) -> Result<(), String> {
     let mut pl = playlist.lock().map_err(|e| e.to_string())?;
     match pl.next_track() {
         Some(track) => {
             let path = track.path.clone();
             drop(pl);
-            play_path(&engine, &path)
+            play_path_with_recorder(&engine, &path, Some(RecorderContext {
+                recorder_state: Arc::clone(&*recorder_state),
+                app_handle: app,
+            }))
         }
         None => {
             drop(pl);
@@ -281,13 +293,18 @@ pub fn next_track(
 pub fn previous_track(
     engine: State<'_, Arc<AudioEngine>>,
     playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
+    recorder_state: State<'_, Arc<Mutex<Option<Arc<RadioRecorder>>>>>,
+    app: AppHandle,
 ) -> Result<(), String> {
     let mut pl = playlist.lock().map_err(|e| e.to_string())?;
     match pl.previous_track() {
         Some(track) => {
             let path = track.path.clone();
             drop(pl);
-            play_path(&engine, &path)
+            play_path_with_recorder(&engine, &path, Some(RecorderContext {
+                recorder_state: Arc::clone(&*recorder_state),
+                app_handle: app,
+            }))
         }
         None => Ok(()),
     }
@@ -996,18 +1013,93 @@ fn skins_dir() -> Option<std::path::PathBuf> {
 // -- Internal helpers --
 
 pub fn play_path(engine: &AudioEngine, path: &str) -> Result<(), String> {
-    let source = create_source(path)?;
+    let source = create_source(path, None)?;
     engine.play(source);
     Ok(())
 }
 
+/// Play a path, wiring up a recorder for stream URLs.
+pub fn play_path_with_recorder(
+    engine: &AudioEngine,
+    path: &str,
+    recorder_ctx: Option<RecorderContext>,
+) -> Result<(), String> {
+    let source = create_source(path, recorder_ctx)?;
+    engine.play(source);
+    Ok(())
+}
+
+/// Context needed to wire a recorder into a radio source.
+pub struct RecorderContext {
+    pub recorder_state: Arc<Mutex<Option<Arc<RadioRecorder>>>>,
+    pub app_handle: tauri::AppHandle,
+}
+
+/// If there's an active recorder with a pending save or manual recording,
+/// finalize it before replacing it. This ensures recordings aren't lost
+/// when switching stations, playing a local file, etc.
+fn finalize_previous_recorder(recorder_state: &Mutex<Option<Arc<RadioRecorder>>>) {
+    if let Ok(rs) = recorder_state.lock() {
+        if let Some(ref recorder) = *rs {
+            // If user requested a save or was manually recording, finalize now.
+            let is_saving = recorder.is_save_pending();
+            let is_recording = recorder.is_manual_recording();
+            if is_saving || is_recording {
+                if is_recording {
+                    // Auto-save manual recordings.
+                    recorder.stop_manual_recording();
+                } else {
+                    // Save whatever we have of the current track.
+                    recorder.finalize_for_save();
+                }
+            }
+        }
+    }
+}
+
 /// Create an AudioSource from a path — dispatches to RadioSource for URLs,
 /// LocalFileSource for local files.
-pub fn create_source(path: &str) -> Result<Box<dyn AudioSource>, String> {
+pub fn create_source(
+    path: &str,
+    recorder_ctx: Option<RecorderContext>,
+) -> Result<Box<dyn AudioSource>, String> {
+    // Finalize any in-progress recording before switching sources.
+    if let Some(ref ctx) = recorder_ctx {
+        finalize_previous_recorder(&ctx.recorder_state);
+    }
+
     if is_url(path) {
-        RadioSource::connect(path)
-            .map(|s| Box::new(s) as Box<dyn AudioSource>)
-            .map_err(|e| e.to_string())
+        if let Some(ctx) = recorder_ctx {
+            // Create a recorder and wire it into the radio source.
+            let recorder = Arc::new(RadioRecorder::new());
+            let (tx, rx) = std::sync::mpsc::channel();
+            recorder.set_event_tx(tx);
+
+            let app_clone = ctx.app_handle.clone();
+            std::thread::Builder::new()
+                .name("recorder-events".into())
+                .spawn(move || {
+                    use tauri::Emitter;
+                    while let Ok(event) = rx.recv() {
+                        let _ = app_clone.emit("radio-recorder-event", &event);
+                    }
+                })
+                .ok();
+
+            let source = RadioSource::connect_with_name_and_recorder(
+                path, None, Arc::clone(&recorder),
+            ).map_err(|e| e.to_string())?;
+
+            if let Ok(mut rs) = ctx.recorder_state.lock() {
+                *rs = Some(recorder);
+            }
+
+            Ok(Box::new(source) as Box<dyn AudioSource>)
+        } else {
+            RadioSource::connect(path)
+                .map(|s| Box::new(s) as Box<dyn AudioSource>)
+                .map_err(|e| e.to_string())
+        }
     } else {
         LocalFileSource::open(path)
             .map(|s| Box::new(s) as Box<dyn AudioSource>)
@@ -1025,6 +1117,8 @@ pub fn is_url(s: &str) -> bool {
 pub fn play_url(
     engine: State<'_, Arc<AudioEngine>>,
     playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
+    recorder_state: State<'_, Arc<Mutex<Option<Arc<RadioRecorder>>>>>,
+    app: AppHandle,
     url: String,
     name: Option<String>,
 ) -> Result<(), String> {
@@ -1038,8 +1132,40 @@ pub fn play_url(
     pl.play_track(id);
     drop(pl);
 
-    let source = RadioSource::connect_with_name(&url, name.as_deref())
-        .map_err(|e| e.to_string())?;
+    // Finalize any in-progress recording before switching sources.
+    finalize_previous_recorder(&recorder_state);
+
+    // Create a recorder and wire it into the radio source.
+    let recorder = Arc::new(RadioRecorder::new());
+
+    // Set up the event channel so recorder events reach the frontend.
+    let (tx, rx) = std::sync::mpsc::channel();
+    recorder.set_event_tx(tx);
+
+    // Spawn a listener thread that forwards recorder events as Tauri events.
+    {
+        let app_clone = app.clone();
+        std::thread::Builder::new()
+            .name("recorder-events".into())
+            .spawn(move || {
+                while let Ok(event) = rx.recv() {
+                    let _ = app_clone.emit("radio-recorder-event", &event);
+                }
+            })
+            .ok();
+    }
+
+    let source = RadioSource::connect_with_name_and_recorder(
+        &url,
+        name.as_deref(),
+        Arc::clone(&recorder),
+    )
+    .map_err(|e| e.to_string())?;
+
+    // Store the recorder in managed state so commands can access it.
+    if let Ok(mut rs) = recorder_state.lock() {
+        *rs = Some(Arc::clone(&recorder));
+    }
 
     // Update playlist metadata with stream info.
     if let Ok(meta) = source.metadata() {
@@ -1605,5 +1731,121 @@ pub fn open_tag_editor(app: AppHandle, path: String) -> Result<(), String> {
     if let Some(win) = app.get_webview_window("tageditor") {
         win.show().map_err(|e| e.to_string())?;
     }
+    Ok(())
+}
+
+// -- Radio recorder commands --
+
+/// Get the current recorder status (recording state, current track, history).
+#[tauri::command]
+pub fn get_recorder_status(
+    recorder_state: State<'_, Arc<Mutex<Option<Arc<RadioRecorder>>>>>,
+) -> RecorderStatus {
+    match recorder_state.lock().ok().and_then(|rs| rs.clone()) {
+        Some(recorder) => recorder.status(),
+        None => RecorderStatus {
+            active: false,
+            has_metadata: false,
+            state: crate::audio::recorder::RecordingState::Idle,
+            current_track: None,
+            history: Vec::new(),
+        },
+    }
+}
+
+/// Request saving the currently playing track (will save when track boundary is detected).
+#[tauri::command]
+pub fn save_current_track(
+    recorder_state: State<'_, Arc<Mutex<Option<Arc<RadioRecorder>>>>>,
+) -> Result<(), String> {
+    let recorder = recorder_state
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone()
+        .ok_or("no active recorder")?;
+    recorder.request_save();
+    Ok(())
+}
+
+/// Save a specific track from the recording history.
+#[tauri::command]
+pub fn save_history_track(
+    recorder_state: State<'_, Arc<Mutex<Option<Arc<RadioRecorder>>>>>,
+    track_id: u64,
+) -> Result<(), String> {
+    let recorder = recorder_state
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone()
+        .ok_or("no active recorder")?;
+    recorder.save_from_history(track_id);
+    Ok(())
+}
+
+/// Start manual recording (for streams without metadata).
+#[tauri::command]
+pub fn start_manual_recording(
+    recorder_state: State<'_, Arc<Mutex<Option<Arc<RadioRecorder>>>>>,
+) -> Result<(), String> {
+    let recorder = recorder_state
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone()
+        .ok_or("no active recorder")?;
+    recorder.start_manual_recording();
+    Ok(())
+}
+
+/// Stop manual recording and push to history.
+#[tauri::command]
+pub fn stop_manual_recording(
+    recorder_state: State<'_, Arc<Mutex<Option<Arc<RadioRecorder>>>>>,
+) -> Result<(), String> {
+    let recorder = recorder_state
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone()
+        .ok_or("no active recorder")?;
+    recorder.stop_manual_recording();
+    Ok(())
+}
+
+/// Get the configured download directory for radio recordings.
+#[tauri::command]
+pub fn get_download_dir() -> String {
+    crate::audio::recorder::get_download_dir()
+        .to_string_lossy()
+        .to_string()
+}
+
+/// Set the download directory for radio recordings.
+#[tauri::command]
+pub fn set_download_dir(path: String) -> Result<(), String> {
+    let mut cfg = crate::config::AppConfig::load();
+    cfg.general.download_dir = Some(path);
+    cfg.save().map_err(|e| format!("{e}"))
+}
+
+/// Play a track from the recording history buffer.
+#[tauri::command]
+pub fn play_history_track(
+    engine: State<'_, Arc<AudioEngine>>,
+    recorder_state: State<'_, Arc<Mutex<Option<Arc<RadioRecorder>>>>>,
+    track_id: u64,
+) -> Result<(), String> {
+    let recorder = recorder_state
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone()
+        .ok_or("no active recorder")?;
+
+    let (data, content_type, is_adts, bitrate, meta) = recorder
+        .get_track_data(track_id)
+        .ok_or("track not found in history")?;
+
+    let source = BufferSource::from_track_data(data, &content_type, is_adts, bitrate, meta)
+        .map_err(|e| e.to_string())?;
+
+    engine.play(Box::new(source));
     Ok(())
 }
