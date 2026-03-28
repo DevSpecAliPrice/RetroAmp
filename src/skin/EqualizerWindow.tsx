@@ -434,7 +434,7 @@ export default function EqualizerWindow({ skin, scale }: Props) {
           onMouseDown={(e) => {
             e.stopPropagation();
             setPressed("close");
-            invoke("toggle_window", { windowId: "Equalizer" });
+            invoke("toggle_window", { windowId: "Equalizer" }).catch(console.error);
           }}
         />
       </div>

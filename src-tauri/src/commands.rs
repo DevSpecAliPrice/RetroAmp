@@ -431,109 +431,32 @@ pub async fn toggle_window(
     window_manager: State<'_, Mutex<WindowManager>>,
     window_id: WindowId,
 ) -> Result<WindowStates, String> {
-    let (should_show, label, url, width, height, resizable) = {
-        let mut wm = window_manager.lock().map_err(|e| e.to_string())?;
-        let should_show = wm.toggle(window_id);
-        (
-            should_show,
-            window_id.label().to_string(),
-            window_id.url_path().to_string(),
-            window_id.native_width(),
-            window_id.native_height(),
-            window_id.resizable(),
-        )
-    };
+    let label = window_id.label().to_string();
+
+    // All windows are pre-created at startup (hidden).  We only show/hide
+    // them here — never create or destroy.  On Wayland, creating a WebView
+    // while existing WebViews are active corrupts GTK's pointer-event state
+    // and permanently breaks dragging/close/corner-resize.
+    let win = app
+        .get_webview_window(&label)
+        .ok_or_else(|| format!("window '{label}' not found — was it pre-created at startup?"))?;
+
+    let currently_visible = win.is_visible().unwrap_or(false);
+    let should_show = !currently_visible;
 
     eprintln!("[retroamp] toggle_window: id={window_id:?} label={label} should_show={should_show}");
 
-    // Try to find an existing window with this label.
-    if let Some(existing) = app.get_webview_window(&label) {
-        if should_show {
-            existing.show().map_err(|e| e.to_string())?;
-            existing.set_focus().map_err(|e| e.to_string())?;
-        } else {
-            existing.hide().map_err(|e| e.to_string())?;
-        }
-    } else if should_show {
-        // Check for saved layout for this window.
-        let saved = {
-            let cfg = crate::config::AppConfig::load();
-            match window_id {
-                WindowId::Equalizer => cfg.ui.equalizer,
-                WindowId::Playlist => cfg.ui.playlist,
-                WindowId::RadioBrowser => cfg.ui.radio_browser.unwrap_or_default(),
-                WindowId::Settings => cfg.ui.settings.unwrap_or_default(),
-                _ => Default::default(),
-            }
-        };
-
-        // Derive panel size from the main window's actual logical dimensions
-        // so all panels share exactly the same width. We convert the main
-        // window's physical inner_size back to logical using its scale_factor.
-        let (main_w, main_h) = app
-            .get_webview_window("main")
-            .and_then(|win| {
-                let size = win.inner_size().ok()?;
-                let sf = win.scale_factor().ok().unwrap_or(1.0);
-                Some((size.width as f64 / sf, size.height as f64 / sf))
-            })
-            .unwrap_or_else(|| {
-                let wm = window_manager.lock().unwrap();
-                let s = wm.scale() as f64;
-                (width as f64 * s, height as f64 * s)
-            });
-
-        // Use saved size for resizable windows, otherwise derive from main.
-        let default_w = match window_id {
-            WindowId::Playlist => main_w,
-            WindowId::RadioBrowser => main_w * 1.5,
-            WindowId::Settings => 700.0,
-            _ => main_w,
-        };
-        let w = if resizable { saved.width.unwrap_or(default_w) } else { main_w };
-        let h = if resizable {
-            saved.height.unwrap_or(main_h * 2.0)
-        } else {
-            main_h
-        };
-
-        eprintln!("[retroamp] creating window: label={label} size={w}x{h} (main={main_w}x{main_h})");
-
-        // On Wayland, non-resizable toplevel windows get a compositor-enforced
-        // minimum size. Work around this by always creating resizable windows
-        // and clamping with min/max for ones that shouldn't resize.
-        let mut builder = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
-            .title(format!("RetroAmp — {}", label))
-            .inner_size(w, h)
-            .decorations(false)
-            .resizable(true)
-            .visible(true)
-            .skip_taskbar(true); // Don't show separate taskbar entry.
-
-        // Clamp non-resizable panels so they can't actually be resized.
-        if !resizable {
-            builder = builder.min_inner_size(w, h).max_inner_size(w, h);
-        }
-
-        // Apply saved position (works on X11/Windows/macOS, ignored on Wayland).
-        if let (Some(x), Some(y)) = (saved.x, saved.y) {
-            builder = builder.position(x as f64, y as f64);
-        }
-
-        // Set the main window as parent so closing main closes everything.
-        if let Some(main_win) = app.get_webview_window("main") {
-            builder = builder.parent(&main_win)
-                .map_err(|e| format!("failed to set parent window: {e}"))?;
-        }
-
-        builder.build()
-            .map_err(|e| {
-                eprintln!("[retroamp] window creation failed: {e}");
-                e.to_string()
-            })?;
+    {
+        let mut wm = window_manager.lock().map_err(|e| e.to_string())?;
+        wm.set_visible(window_id, should_show);
     }
 
-    // Snapshot the state and release the lock before doing I/O.
+    if should_show {
+        win.show().map_err(|e| e.to_string())?;
+    } else {
+        win.hide().map_err(|e| e.to_string())?;
+    }
+
     let states = {
         let wm = window_manager.lock().map_err(|e| e.to_string())?;
         wm.get_states()
@@ -543,11 +466,16 @@ pub async fn toggle_window(
 }
 
 /// Get the current state of all windows.
+/// Cross-checks internal state against actual window existence so that
+/// indicators (PL/EQ buttons) stay accurate even after compositor-initiated
+/// window destruction or failed creation.
 #[tauri::command]
 pub fn get_window_states(
+    app: AppHandle,
     window_manager: State<'_, Mutex<WindowManager>>,
 ) -> Result<WindowStates, String> {
-    let wm = window_manager.lock().map_err(|e| e.to_string())?;
+    let mut wm = window_manager.lock().map_err(|e| e.to_string())?;
+    wm.reconcile(|id| app.get_webview_window(id.label()).is_some());
     Ok(wm.get_states())
 }
 
@@ -638,56 +566,19 @@ pub async fn exit_shade(app: AppHandle) -> Result<(), String> {
 
 // -- Settings command --
 
-/// Open the settings/preferences window (or focus it if already open).
+/// Open the settings/preferences window.  The window is pre-created at
+/// startup — this just shows it.
 #[tauri::command]
-pub async fn open_settings(
+pub fn open_settings(
     app: AppHandle,
     window_manager: State<'_, Mutex<WindowManager>>,
 ) -> Result<(), String> {
-    // Mark visible in the WindowManager so toggle_window works correctly.
     if let Ok(mut wm) = window_manager.lock() {
         wm.set_visible(WindowId::Settings, true);
     }
-
-    // If already open, just focus it.
-    if let Some(existing) = app.get_webview_window("settings") {
-        existing.show().map_err(|e| e.to_string())?;
-        existing.set_focus().map_err(|e| e.to_string())?;
-        return Ok(());
+    if let Some(win) = app.get_webview_window("settings") {
+        win.show().map_err(|e| e.to_string())?;
     }
-
-    // Load saved layout for position/size.
-    let saved = {
-        let cfg = crate::config::AppConfig::load();
-        cfg.ui.settings.unwrap_or_default()
-    };
-
-    let w = saved.width.unwrap_or(700.0);
-    let h = saved.height.unwrap_or(500.0);
-
-    let mut builder = WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App("/?window=settings".into()))
-        .title("RetroAmp Preferences")
-        .inner_size(w, h)
-        .min_inner_size(500.0, 400.0)
-        .decorations(false)
-        .resizable(true)
-        .visible(true)
-        .skip_taskbar(true);
-
-    // Apply saved position.
-    if let (Some(x), Some(y)) = (saved.x, saved.y) {
-        builder = builder.position(x as f64, y as f64);
-    }
-
-    // Set the main window as parent so closing main closes everything.
-    if let Some(main_win) = app.get_webview_window("main") {
-        builder = builder.parent(&main_win)
-            .map_err(|e| format!("failed to set parent window: {e}"))?;
-    }
-
-    builder.build()
-        .map_err(|e| e.to_string())?;
-
     Ok(())
 }
 
@@ -1569,30 +1460,15 @@ pub fn write_track_tags(
 }
 
 /// Open the tag editor window for a specific track.
+/// The window is pre-created at startup — this emits a "load-tags" event
+/// with the file path and shows the window.
 #[tauri::command]
-pub async fn open_tag_editor(app: AppHandle, path: String) -> Result<(), String> {
-    let label = "tageditor";
+pub fn open_tag_editor(app: AppHandle, path: String) -> Result<(), String> {
+    // Emit event so the already-mounted TagEditorWindow loads the new file.
+    app.emit("load-tags", path).map_err(|e| e.to_string())?;
 
-    // Close existing tag editor if open (one at a time).
-    if let Some(existing) = app.get_webview_window(label) {
-        let _ = existing.close();
+    if let Some(win) = app.get_webview_window("tageditor") {
+        win.show().map_err(|e| e.to_string())?;
     }
-
-    // Percent-encode the path for the URL query parameter.
-    use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
-    let encoded_path = utf8_percent_encode(&path, NON_ALPHANUMERIC).to_string();
-    let url = format!("/?window=tageditor&path={encoded_path}");
-
-    let builder =
-        WebviewWindowBuilder::new(&app, label, WebviewUrl::App(url.into()))
-            .title("RetroAmp \u{2014} Tag Editor")
-            .inner_size(550.0, 500.0)
-            .min_inner_size(450.0, 400.0)
-            .decorations(false)
-            .resizable(true)
-            .visible(true)
-            .skip_taskbar(true);
-
-    builder.build().map_err(|e| e.to_string())?;
     Ok(())
 }

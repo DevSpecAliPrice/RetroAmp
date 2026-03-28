@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { SkinData } from "../skin/parser";
 import "./tageditor.css";
@@ -102,14 +103,17 @@ export default function TagEditorWindow({ skin, scale }: Props) {
     backgroundSize: dir === "repeat-x" ? "auto 100%" : "100% auto",
   });
 
-  // Read path from URL query param on mount.
+  // Read path from URL query param (startup) or "load-tags" event (runtime).
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const path = params.get("path");
     if (path) {
-      const decoded = decodeURIComponent(path);
-      setTrackPath(decoded);
+      setTrackPath(decodeURIComponent(path));
     }
+    const unlisten = listen<string>("load-tags", (event) => {
+      setTrackPath(event.payload);
+    });
+    return () => { unlisten.then((fn) => fn()); };
   }, []);
 
   // Load tags when path is set.
@@ -174,7 +178,7 @@ export default function TagEditorWindow({ skin, scale }: Props) {
   }, [trackPath, initial, current, rating, initialRating]);
 
   const handleCancel = useCallback(() => {
-    getCurrentWindow().close();
+    getCurrentWindow().hide();
   }, []);
 
   const inputStyle = (field?: keyof TagValues) => ({

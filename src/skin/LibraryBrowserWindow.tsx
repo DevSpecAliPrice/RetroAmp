@@ -664,7 +664,7 @@ export default function LibraryBrowserWindow({ skin, scale }: Props) {
         <div style={{ flex: 1, ...bgTile("PL_TOP_TILE_SELECTED", "repeat-x") }} />
         <div style={{ width: 25 * s, height: 20 * s, flexShrink: 0, position: "relative", ...bg("PL_TOP_RIGHT_SELECTED") }}>
           <div data-action="close" style={{ position: "absolute", right: 3 * s, top: 3 * s, width: 9 * s, height: 9 * s, cursor: "pointer" }}
-            onClick={() => invoke("toggle_window", { windowId: "LibraryBrowser" })} />
+            onClick={() => invoke("toggle_window", { windowId: "LibraryBrowser" }).catch(console.error)} />
         </div>
       </div>
 

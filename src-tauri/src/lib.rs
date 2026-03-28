@@ -293,44 +293,59 @@ pub fn run() {
                 );
             }
 
-            // Restore previously-open panel windows.
+            // Pre-create ALL panel windows at startup.  On Wayland,
+            // creating a new WebView while existing WebViews are active
+            // corrupts GTK's internal pointer-event state, permanently
+            // breaking startDragging/close/corner-resize for every window.
+            // By creating all windows during setup (when the GTK main loop
+            // is in a clean state with no active WebViews) we avoid this.
+            // Windows that were not visible at last close are created hidden.
             let default_layout = config::WindowLayoutEntry::default();
             let radio_layout = saved_ui.radio_browser.as_ref().unwrap_or(&default_layout);
             let library_layout = saved_ui.library_browser.as_ref().unwrap_or(&default_layout);
-            let panels_to_restore: Vec<(WindowId, &config::WindowLayoutEntry)> = [
+            let settings_layout = saved_ui.settings.as_ref().unwrap_or(&default_layout);
+
+            let all_panels: &[(WindowId, &config::WindowLayoutEntry)] = &[
                 (WindowId::Equalizer, &saved_ui.equalizer),
                 (WindowId::Playlist, &saved_ui.playlist),
                 (WindowId::RadioBrowser, radio_layout),
                 (WindowId::LibraryBrowser, library_layout),
-            ]
-            .into_iter()
-            .filter(|(_, entry)| entry.visible == Some(true))
-            .collect();
+                (WindowId::Settings, settings_layout),
+            ];
 
-            for (id, entry) in panels_to_restore {
+            // Derive default size from main window (computed once).
+            let (main_w, main_h) = app
+                .get_webview_window("main")
+                .and_then(|win| {
+                    let size = win.inner_size().ok()?;
+                    let sf = win.scale_factor().ok().unwrap_or(1.0);
+                    Some((size.width as f64 / sf, size.height as f64 / sf))
+                })
+                .unwrap_or((w, h));
+
+            for &(id, entry) in all_panels {
                 let label = id.label();
                 let url = id.url_path();
                 let resizable = id.resizable();
+                let was_visible = entry.visible == Some(true);
 
-                // Mark visible in the window manager.
-                if let Ok(mut wm) = app.state::<std::sync::Mutex<WindowManager>>().lock() {
-                    wm.set_visible(id, true);
+                if was_visible {
+                    if let Ok(mut wm) = app.state::<std::sync::Mutex<WindowManager>>().lock() {
+                        wm.set_visible(id, true);
+                    }
                 }
 
-                // Derive default size from main window.
-                let (main_w, main_h) = app
-                    .get_webview_window("main")
-                    .and_then(|win| {
-                        let size = win.inner_size().ok()?;
-                        let sf = win.scale_factor().ok().unwrap_or(1.0);
-                        Some((size.width as f64 / sf, size.height as f64 / sf))
-                    })
-                    .unwrap_or((w, h));
-
-                let default_w = main_w;
+                let default_w = match id {
+                    WindowId::RadioBrowser => main_w * 1.5,
+                    WindowId::Settings => 700.0,
+                    _ => main_w,
+                };
                 let win_w = if resizable { entry.width.unwrap_or(default_w) } else { main_w };
                 let win_h = if resizable {
-                    entry.height.unwrap_or(main_h * 2.0)
+                    match id {
+                        WindowId::Settings => entry.height.unwrap_or(500.0),
+                        _ => entry.height.unwrap_or(main_h * 2.0),
+                    }
                 } else {
                     main_h
                 };
@@ -344,7 +359,7 @@ pub fn run() {
                 .inner_size(win_w, win_h)
                 .decorations(false)
                 .resizable(true)
-                .visible(true)
+                .visible(was_visible)
                 .skip_taskbar(true);
 
                 if !resizable {
@@ -352,24 +367,68 @@ pub fn run() {
                         .min_inner_size(win_w, win_h)
                         .max_inner_size(win_w, win_h);
                 }
+                if id == WindowId::Settings {
+                    builder = builder.min_inner_size(500.0, 400.0);
+                }
 
                 if let (Some(x), Some(y)) = (entry.x, entry.y) {
                     builder = builder.position(x as f64, y as f64);
                 }
 
-                // parent() takes ownership and may fail — handle both paths.
-                let build_result = if let Some(main_win) = app.get_webview_window("main") {
-                    match builder.parent(&main_win) {
-                        Ok(b) => b.build(),
-                        Err(_) => { continue; }
-                    }
-                } else {
-                    builder.build()
-                };
+                if let Some(main_win) = app.get_webview_window("main") {
+                    builder = match builder.parent(&main_win) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            eprintln!("[retroamp] failed to set parent for {label}: {e}");
+                            continue;
+                        }
+                    };
+                }
 
-                match build_result {
-                    Ok(_) => eprintln!("[retroamp] restored window: {label} ({win_w}x{win_h})"),
-                    Err(e) => eprintln!("[retroamp] failed to restore {label}: {e}"),
+                match builder.build() {
+                    Ok(_) => eprintln!("[retroamp] pre-created window: {label} ({win_w}x{win_h}) visible={was_visible}"),
+                    Err(e) => eprintln!("[retroamp] failed to create {label}: {e}"),
+                }
+            }
+
+            // Pre-create the tag editor window (hidden, no file loaded).
+            {
+                let mut builder = tauri::WebviewWindowBuilder::new(
+                    app,
+                    "tageditor",
+                    tauri::WebviewUrl::App("/?window=tageditor".into()),
+                )
+                .title("RetroAmp \u{2014} Tag Editor")
+                .inner_size(550.0, 500.0)
+                .min_inner_size(450.0, 400.0)
+                .decorations(false)
+                .resizable(true)
+                .visible(false)
+                .skip_taskbar(true);
+
+                if let Some(main_win) = app.get_webview_window("main") {
+                    builder = match builder.parent(&main_win) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            eprintln!("[retroamp] tag editor parent failed: {e}");
+                            // parent() consumed builder — rebuild without parent
+                            tauri::WebviewWindowBuilder::new(
+                                app, "tageditor",
+                                tauri::WebviewUrl::App("/?window=tageditor".into()),
+                            )
+                            .title("RetroAmp \u{2014} Tag Editor")
+                            .inner_size(550.0, 500.0)
+                            .min_inner_size(450.0, 400.0)
+                            .decorations(false)
+                            .resizable(true)
+                            .visible(false)
+                            .skip_taskbar(true)
+                        }
+                    };
+                }
+                match builder.build() {
+                    Ok(_) => eprintln!("[retroamp] pre-created tag editor (hidden)"),
+                    Err(e) => eprintln!("[retroamp] failed to create tag editor: {e}"),
                 }
             }
 
@@ -382,9 +441,33 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // Save window layout and playlist state before the main window closes.
-            if let tauri::WindowEvent::CloseRequested { .. } = event {
-                if window.label() == "main" {
+            // For secondary windows, intercept close and hide instead —
+            // windows are pre-created at startup and must not be destroyed.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let label = window.label();
+                if label != "main" && label != "shade" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                    // Update WindowManager state.
+                    let window_id = match label {
+                        "playlist" => Some(WindowId::Playlist),
+                        "equalizer" => Some(WindowId::Equalizer),
+                        "settings" => Some(WindowId::Settings),
+                        "radiobrowser" => Some(WindowId::RadioBrowser),
+                        "librarybrowser" => Some(WindowId::LibraryBrowser),
+                        _ => None,
+                    };
+                    if let Some(id) = window_id {
+                        if let Some(wm) = window.try_state::<Mutex<WindowManager>>() {
+                            if let Ok(mut wm) = wm.lock() {
+                                wm.set_visible(id, false);
+                            }
+                        }
+                    }
+                    return;
+                }
+
+                if label == "main" {
                     if let Some(wm) = window.try_state::<Mutex<WindowManager>>() {
                         if let Ok(wm) = wm.lock() {
                             let states = wm.get_states();
@@ -392,7 +475,6 @@ pub fn run() {
                             commands::save_window_layout(window.app_handle(), &states);
                         }
                     }
-                    // Save playlist to database.
                     let db = Arc::clone(&*window.state::<Arc<Mutex<Database>>>());
                     let pl = Arc::clone(&*window.state::<Arc<Mutex<PlaylistManager>>>());
                     commands::save_playlist_state(&db, &pl);
@@ -404,9 +486,7 @@ pub fn run() {
 
                 if label == "main" {
                     // Main window closed — exit the entire application.
-                    // Child windows are destroyed automatically by the parent
-                    // relationship, but we also need to stop the audio engine
-                    // and exit the process.
+                    // Child windows are destroyed by the parent relationship.
                     std::process::exit(0);
                 }
 
@@ -430,7 +510,11 @@ pub fn run() {
                 };
                 if let Some(id) = window_id {
                     if let Some(wm) = window.try_state::<Mutex<WindowManager>>() {
-                        if let Ok(mut wm) = wm.lock() {
+                        // Use try_lock to avoid deadlock if toggle_window
+                        // holds the lock on the same thread.  If we can't
+                        // acquire it, that's OK — toggle_window or the
+                        // reconcile pass in get_window_states will fix it.
+                        if let Ok(mut wm) = wm.try_lock() {
                             wm.set_visible(id, false);
                         }
                     }

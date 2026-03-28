@@ -184,6 +184,21 @@ impl WindowManager {
         new_state
     }
 
+    /// Reconcile internal visibility state with reality.  If we think a
+    /// window is visible but it no longer exists (e.g. the compositor
+    /// destroyed it), mark it as hidden so indicators stay accurate.
+    pub fn reconcile(&mut self, window_exists: impl Fn(&WindowId) -> bool) {
+        for (id, visible) in self.states.iter_mut() {
+            if *id == WindowId::Main {
+                continue; // never touch main
+            }
+            if *visible && !window_exists(id) {
+                eprintln!("[retroamp] reconcile: {:?} marked visible but window gone — fixing", id);
+                *visible = false;
+            }
+        }
+    }
+
     /// Get the state of all windows (for the frontend to render button states).
     pub fn get_states(&self) -> WindowStates {
         let windows = self

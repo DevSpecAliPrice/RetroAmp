@@ -237,7 +237,7 @@ export default function PlaylistWindow({ skin, scale }: Props) {
         ], e.clientX, e.clientY);
         if (!selected) return;
         if (selected === "add_files") openFiles();
-        else if (selected === "radio_browser") invoke("toggle_window", { windowId: "RadioBrowser" });
+        else if (selected === "radio_browser") invoke("toggle_window", { windowId: "RadioBrowser" }).catch(console.error);
         else if (selected === "remove_selected") invoke("playlist_remove_selected");
         else if (selected === "clear_playlist") invoke("playlist_clear");
         else if (selected === "preferences") invoke("open_settings");
@@ -272,7 +272,7 @@ export default function PlaylistWindow({ skin, scale }: Props) {
               position: "absolute", right: 3 * s, top: 3 * s,
               width: 9 * s, height: 9 * s, cursor: "pointer",
             }}
-            onClick={() => invoke("toggle_window", { windowId: "Playlist" })}
+            onClick={() => invoke("toggle_window", { windowId: "Playlist" }).catch(console.error)}
           />
         </div>
       </div>

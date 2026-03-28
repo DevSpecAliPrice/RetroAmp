@@ -595,7 +595,7 @@ export default function RadioBrowserWindow({ skin, scale }: Props) {
               position: "absolute", right: 3 * s, top: 3 * s,
               width: 9 * s, height: 9 * s, cursor: "pointer",
             }}
-            onClick={() => invoke("toggle_window", { windowId: "RadioBrowser" })}
+            onClick={() => invoke("toggle_window", { windowId: "RadioBrowser" }).catch(console.error)}
           />
         </div>
       </div>

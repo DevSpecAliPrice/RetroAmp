@@ -606,6 +606,14 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
   useEffect(() => {
     const onMouseMove = (e: MouseEvent) => {
       if (!dragging.current) return;
+      // If no buttons are held, the mouseup was lost (e.g. focus moved to
+      // another Tauri window).  Reset the drag to prevent the slider from
+      // tracking the cursor indefinitely.
+      if (e.buttons === 0) {
+        dragging.current = null;
+        setPressed(null);
+        return;
+      }
       const rect = canvasRef.current?.getBoundingClientRect();
       if (!rect) return;
       const x = Math.round((e.clientX - rect.left) * (W / rect.width));
@@ -756,10 +764,10 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
         });
       } else if (hit(REGIONS.pl)) {
         setPressed("pl");
-        invoke("toggle_window", { windowId: "Playlist" });
+        invoke("toggle_window", { windowId: "Playlist" }).catch(console.error);
       } else if (hit(REGIONS.eq)) {
         setPressed("eq");
-        invoke("toggle_window", { windowId: "Equalizer" });
+        invoke("toggle_window", { windowId: "Equalizer" }).catch(console.error);
       }
     },
     [status, playlist, applySlider, isShade, canvasH],
@@ -893,15 +901,15 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
     const selected = await showContextMenu(items, e.clientX, e.clientY);
     if (!selected) return;
 
-    if (selected === "toggle_playlist") invoke("toggle_window", { windowId: "Playlist" });
-    else if (selected === "toggle_equalizer") invoke("toggle_window", { windowId: "Equalizer" });
+    if (selected === "toggle_playlist") invoke("toggle_window", { windowId: "Playlist" }).catch(console.error);
+    else if (selected === "toggle_equalizer") invoke("toggle_window", { windowId: "Equalizer" }).catch(console.error);
     else if (selected === "add_files") {
       const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
       const sel = await openDialog({ multiple: true, filters: [{ name: "Audio", extensions: ["mp3", "flac", "ogg", "wav", "aac", "m4a", "m3u", "m3u8", "pls"] }] });
       if (sel) invoke("playlist_add_files", { paths: Array.isArray(sel) ? sel : [sel] });
     }
-    else if (selected === "radio_browser") invoke("toggle_window", { windowId: "RadioBrowser" });
-    else if (selected === "media_library") invoke("toggle_window", { windowId: "LibraryBrowser" });
+    else if (selected === "radio_browser") invoke("toggle_window", { windowId: "RadioBrowser" }).catch(console.error);
+    else if (selected === "media_library") invoke("toggle_window", { windowId: "LibraryBrowser" }).catch(console.error);
     else if (selected === "skins_browse") invoke("open_settings");
     else if (selected === "preferences") invoke("open_settings");
     else if (selected.startsWith("skin:")) onSkinChange?.(selected.slice(5));
