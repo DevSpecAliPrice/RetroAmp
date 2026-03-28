@@ -18,12 +18,19 @@ use ringbuf::{
 
 use crate::audio::error::AudioError;
 use crate::audio::icy::{IcyMetadata, IcyReader};
+use crate::audio::playlist_parser;
 
 /// Default ring buffer size: 256 KB ≈ 16 seconds at 128 kbps.
 const DEFAULT_BUFFER_SIZE: usize = 256 * 1024;
 
 /// Maximum number of reconnection attempts before giving up.
 const MAX_RECONNECT_ATTEMPTS: usize = 20;
+
+/// Maximum depth when resolving playlist URLs (PLS/M3U pointing to more playlists).
+const MAX_PLAYLIST_DEPTH: usize = 5;
+
+/// Maximum size (in bytes) for reading a playlist response body.
+const MAX_PLAYLIST_BODY: usize = 64 * 1024;
 
 /// Information extracted from the HTTP response headers.
 #[derive(Debug, Clone)]
@@ -48,6 +55,8 @@ pub struct StreamReader {
     stop: Arc<AtomicBool>,
     /// Whether the reader thread is currently connected.
     pub connected: Arc<AtomicBool>,
+    /// Whether the reader thread is still running (false = gave up or exited).
+    pub reader_alive: Arc<AtomicBool>,
     /// Reader thread handle.
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -58,13 +67,21 @@ impl StreamReader {
     /// This is called on the main thread (in a Tauri command handler).
     /// It makes the initial HTTP connection, extracts headers, and spawns
     /// the background reader thread.
+    ///
+    /// If the URL points to a playlist file (PLS/M3U), the playlist is
+    /// parsed and the first stream URL is followed automatically.
     pub fn connect(url: &str) -> Result<Self, AudioError> {
+        Self::connect_inner(url, 0)
+    }
+
+    fn connect_inner(url: &str, playlist_depth: usize) -> Result<Self, AudioError> {
         let response = ureq::get(url)
             .header("Icy-MetaData", "1")
             .header("User-Agent", "RetroAmp/0.1")
             .config()
             .timeout_connect(Some(Duration::from_secs(15)))
-            .timeout_recv_response(Some(Duration::from_secs(15)))
+            // No timeout_recv_response — ureq 3 applies it as a deadline from
+            // request start, which kills the body read on streaming connections.
             .timeout_recv_body(None)
             .build()
             .call()
@@ -75,6 +92,42 @@ impl StreamReader {
 
         let content_type = header_str(headers, "content-type")
             .unwrap_or_else(|| "audio/mpeg".to_string());
+
+        // Detect playlist responses and resolve to the actual stream URL.
+        if is_playlist_content_type(&content_type)
+            || playlist_parser::is_playlist_path(url)
+        {
+            if playlist_depth >= MAX_PLAYLIST_DEPTH {
+                return Err(AudioError::ConnectionFailed(
+                    "too many playlist redirects".into(),
+                ));
+            }
+
+            // Read the playlist body (with size limit).
+            let mut body = String::new();
+            response
+                .into_body()
+                .into_reader()
+                .take(MAX_PLAYLIST_BODY as u64)
+                .read_to_string(&mut body)
+                .map_err(|e| AudioError::ConnectionFailed(format!("reading playlist: {e}")))?;
+
+            let entries = playlist_parser::parse_playlist(&body);
+            let stream_url = entries
+                .into_iter()
+                .find(|e| e.url.starts_with("http://") || e.url.starts_with("https://"))
+                .map(|e| e.url)
+                .ok_or_else(|| {
+                    AudioError::ConnectionFailed(
+                        "playlist contained no playable stream URLs".into(),
+                    )
+                })?;
+
+            log::info!(
+                "[radio] resolved playlist to: {stream_url} (depth {playlist_depth})"
+            );
+            return Self::connect_inner(&stream_url, playlist_depth + 1);
+        }
 
         let metaint: Option<usize> = header_str(headers, "icy-metaint")
             .and_then(|v| v.parse().ok());
@@ -103,6 +156,7 @@ impl StreamReader {
         let icy_metadata = Arc::new(Mutex::new(IcyMetadata::default()));
         let stop = Arc::new(AtomicBool::new(false));
         let connected = Arc::new(AtomicBool::new(true));
+        let reader_alive = Arc::new(AtomicBool::new(true));
 
         // Wrap the response body, optionally with ICY metadata stripping.
         let reader: Box<dyn Read + Send> = if let Some(mi) = metaint {
@@ -119,6 +173,7 @@ impl StreamReader {
         let thread = {
             let stop = Arc::clone(&stop);
             let connected = Arc::clone(&connected);
+            let reader_alive = Arc::clone(&reader_alive);
             let url = url.to_string();
             let icy_metadata = Arc::clone(&icy_metadata);
             let metaint = stream_info.metaint;
@@ -127,6 +182,9 @@ impl StreamReader {
                 .name("radio-reader".into())
                 .spawn(move || {
                     reader_thread_main(reader, producer, stop, connected, url, icy_metadata, metaint);
+                    // Signal that the reader thread has exited — unblocks
+                    // StreamBufReader if it's waiting for data.
+                    reader_alive.store(false, Ordering::Relaxed);
                 })
                 .map_err(|e| AudioError::Network(format!("failed to spawn reader thread: {e}")))?
         };
@@ -137,6 +195,7 @@ impl StreamReader {
             stream_info,
             stop,
             connected,
+            reader_alive,
             thread: Some(thread),
         })
     }
@@ -302,7 +361,6 @@ fn make_stream_request(
         .header("User-Agent", "RetroAmp/0.1")
         .config()
         .timeout_connect(Some(Duration::from_secs(15)))
-        .timeout_recv_response(Some(Duration::from_secs(15)))
         .timeout_recv_body(None)
         .build()
         .call()
@@ -334,6 +392,19 @@ fn header_str(headers: &ureq::http::HeaderMap, name: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// Check if a Content-Type header indicates a playlist format.
+fn is_playlist_content_type(content_type: &str) -> bool {
+    let ct = content_type.to_lowercase();
+    ct.contains("audio/x-scpls")              // PLS
+        || ct.contains("application/pls+xml")  // PLS (alt)
+        || ct.contains("audio/x-mpegurl")      // M3U
+        || ct.contains("audio/mpegurl")         // M3U (alt)
+        || ct.contains("application/x-mpegurl") // M3U (alt)
+        || ct.contains("application/vnd.apple.mpegurl") // HLS/M3U8
+        || ct.contains("audio/x-ms-wax")       // Windows Media redirector
+        || ct.contains("video/x-ms-asf")       // ASX redirector
+}
+
 /// A `MediaSource` adapter over the ring buffer consumer for the audio thread.
 ///
 /// When the buffer is empty (network stall), blocks until data arrives or the
@@ -349,6 +420,9 @@ pub struct StreamBufReader {
     /// Shared stop flag — set when the `StreamReader` (and its owning
     /// `RadioSource`) is being dropped. Only then is EOF returned.
     stop: Arc<AtomicBool>,
+    /// Whether the reader thread is still running. When false and the buffer
+    /// is empty, we return EOF instead of blocking forever.
+    reader_alive: Arc<AtomicBool>,
 }
 
 // Safety: StreamBufReader is only accessed from the audio thread. The Mutex
@@ -356,10 +430,15 @@ pub struct StreamBufReader {
 unsafe impl Sync for StreamBufReader {}
 
 impl StreamBufReader {
-    pub fn new(consumer: ringbuf::HeapCons<u8>, stop: Arc<AtomicBool>) -> Self {
+    pub fn new(
+        consumer: ringbuf::HeapCons<u8>,
+        stop: Arc<AtomicBool>,
+        reader_alive: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             consumer: Mutex::new(consumer),
             stop,
+            reader_alive,
         }
     }
 }
@@ -380,6 +459,12 @@ impl Read for StreamBufReader {
         loop {
             if self.stop.load(Ordering::Relaxed) {
                 return Ok(0); // True EOF — source is being torn down.
+            }
+            // If the reader thread has exited (gave up reconnecting) and the
+            // buffer is drained, return EOF. Without this, the audio thread
+            // would block here forever.
+            if !self.reader_alive.load(Ordering::Relaxed) {
+                return Ok(0);
             }
             drop(consumer);
             thread::sleep(Duration::from_millis(5));

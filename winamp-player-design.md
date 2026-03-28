@@ -5,7 +5,7 @@
 
 ## Overview
 
-**RetroAmp** is an open-source, cross-platform desktop audio player that faithfully recreates the Winamp 2.x experience — complete with replaceable `.wsz` skins, a spectrum analyser, 10-band equalizer, Milkdrop visualiser, and playlist editor — built on modern open-source tooling. It extends the Winamp model with a full library management layer inspired by Strawberry, including tag editing, ratings, smart playlists, and MusicBrainz integration. Future-proofed to support Spotify and internet radio as additional audio sources.
+**RetroAmp** is an open-source, cross-platform desktop audio player that faithfully recreates the Winamp 2.x experience — complete with replaceable `.wsz` skins, a spectrum analyser, 10-band equalizer, Milkdrop visualiser, and playlist editor — built on modern open-source tooling. It extends the Winamp model with a full library management layer inspired by Strawberry, including tag editing, ratings, smart playlists, and MusicBrainz integration. Future-proofed to support Spotify, YouTube Music, and internet radio as additional audio sources.
 
 ---
 
@@ -53,7 +53,7 @@ The extracted modules become first-class source code within the RetroAmp reposit
 - The Rust audio engine is the **sole audio pipeline** — all sources (local files, internet radio, Spotify) decode and output through it. This guarantees consistent behaviour: gapless playback, ReplayGain, EQ, and visualisation data work identically regardless of source.
 
 ### Source Abstraction
-- A common Rust trait (`AudioSource`) defined from day one — local file playback is the first implementation, but the interface is designed so that internet radio, Spotify, and any future source slot in without touching the audio pipeline, EQ, visualisation, or UI layers.
+- A common Rust trait (`AudioSource`) defined from day one — local file playback is the first implementation, but the interface is designed so that internet radio, Spotify, YouTube Music, and any future source slot in without touching the audio pipeline, EQ, visualisation, or UI layers.
 
 ### Media Library
 - **SQLite** via Tauri's plugin — track metadata, play counts, library indexing
@@ -213,9 +213,9 @@ The experience of adding skins should be frictionless:
 │ Create/  │ Tracks   │ .wsz     │   │Source Router │ │
 │ show/    │ Sequence │ parser   │   │(AudioSource  │ │
 │ hide     │ Queue    │ parser   │   │ trait)       │ │
-│ persist  │ Auto-    │          │   ├───┬─────┬────┤ │
-│ state    │ advance  │          │   │Loc│Spot │Rad │ │
-│          │          │          │   └─┬─┴─────┴──┬─┘ │
+│ persist  │ Auto-    │          │   ├──┬────┬───┬──┤ │
+│ state    │ advance  │          │   │Lo│Spo │YTM│Ra│ │
+│          │          │          │   └─┬┴────┴───┴─┬┘ │
 │          │          │          │     ▼          ▼    │
 │          │          │          │   Symphonia→EQ→FFT  │
 │          │          │          │     ▼               │
@@ -251,9 +251,9 @@ User clicks PL button in Main Window
 
 ### Design Principles
 
-**Rust audio engine is the sole pipeline.** Every audio source — local files, internet radio, Spotify — decodes through Symphonia and outputs through CPAL. The EQ, FFT analysis, gapless playback, and ReplayGain all live in this pipeline and work identically regardless of source. There is no parallel Web Audio path.
+**Rust audio engine is the sole pipeline.** Every audio source — local files, internet radio, Spotify, YouTube Music — decodes through Symphonia and outputs through CPAL. The EQ, FFT analysis, gapless playback, and ReplayGain all live in this pipeline and work identically regardless of source. There is no parallel Web Audio path.
 
-**Source abstraction from day one.** All sources implement a common `AudioSource` trait that provides: track metadata, decoded PCM frames, seek capability, and stream state. The audio engine consumes this trait, not concrete source types. Adding a new source means implementing the trait — nothing else in the stack changes.
+**Source abstraction from day one.** All sources implement a common `AudioSource` trait that provides: track metadata, decoded PCM frames, seek capability, and stream state. The audio engine consumes this trait, not concrete source types. Adding a new source means implementing the trait — nothing else in the stack changes. This has already been validated by local files and internet radio using the same pipeline identically.
 
 **FFT data flows from Rust to WebView.** The Rust audio engine computes FFT on the decoded PCM stream and pushes frequency data to the frontend via Tauri events. The WebView receives this as typed arrays and feeds it to both the in-skin spectrum analyser and Butterchurn simultaneously. One FFT computation in Rust, multiple visual consumers in the WebView.
 
@@ -312,12 +312,20 @@ Components are grouped by the phase in which they are built. Phase 1 is the foun
 | Cover art fetching | Low–Medium | MusicBrainz / Last.fm / Discogs |
 | Last.fm / ListenBrainz scrobbling | Low | Simple HTTP API |
 
-### Phase 4 — Spotify
+### Phase 4 — Streaming Services (Spotify & YouTube Music)
 
 | Component | Effort | Notes |
 |---|---|---|
-| Spotify `AudioSource` (librespot) | High | Implements `AudioSource` trait; decodes through same Rust pipeline |
-| Spotify Web API integration | Medium | OAuth, library browsing, search, playlist sync |
+| **Spotify (Premium)** | | |
+| Spotify `AudioSource` (librespot) | High | Custom `Sink` impl pipes decoded PCM into the audio engine via ring buffer |
+| Spotify OAuth2 + session management | Medium | OAuth2 PKCE flow via `librespot-oauth`; cached credentials for re-auth |
+| Spotify Web API integration | Medium | Library browsing, search, playlist sync — separate from audio path |
+| Spotify Connect (optional) | Medium | mDNS discovery via `librespot-discovery`; RetroAmp appears as a Spotify Connect device |
+| **YouTube Music** | | |
+| YouTube audio extraction | High | Extract audio stream URLs from YouTube; HTTP stream → Symphonia decode → pipeline |
+| YouTube Music search & matching | Medium | Match tracks by ISRC or title+artist search; score and rank results |
+| Source match caching | Low | Cache matched YouTube video IDs in SQLite to avoid repeated searches |
+| YouTube Music library browsing | Medium | Browse playlists, albums, artists from YouTube Music |
 
 ### Phase 5 — Milkdrop & CD Ripping
 
@@ -419,31 +427,121 @@ Internet radio streams are HTTP audio streams (MP3, AAC, or Ogg Vorbis delivered
 
 ---
 
-## Spotify Integration
+## Streaming Services
 
-Two distinct integration paths with different tradeoffs:
+RetroAmp treats Spotify and YouTube Music as **separate, independent audio sources** — not competing implementations of the same feature. They serve different audiences and use cases: Spotify provides high-quality streams for Premium subscribers with official library/playlist access, while YouTube Music provides free access to a massive catalogue with no account required. Both implement the `AudioSource` trait and pipe raw PCM through the same Rust audio engine, so EQ, FFT visualisation, and all playback features work identically regardless of source.
 
-### Option A: Spotify Connect via librespot
+### Spotify (Premium) — via librespot
 
-**librespot** is an open-source Spotify client library written in Rust (MIT licensed) used by most open-source Spotify clients. It makes your app appear as a playback target in Spotify's "Connect to a device" list.
+**librespot** (github.com/librespot-org/librespot) is an open-source Spotify Connect implementation written in Rust (MIT licensed). It handles authentication, protocol negotiation, audio chunk fetching from Spotify's CDN, decryption (AES-CTR), and decoding (Symphonia for OGG Vorbis/MP3/FLAC) — outputting raw PCM samples. Available as a cargo crate (`librespot` on crates.io, v0.8.0+).
 
-- Requires Spotify Premium
-- Slots naturally into a Tauri/Rust backend
-- Operates in a **legal grey area** — Spotify doesn't officially sanction third-party clients using their streaming infrastructure. This is a known risk accepted by the open-source community, but worth understanding.
+**How it integrates with RetroAmp's audio engine:**
 
-### Option B: Spotify Web API (Official)
+librespot's playback module defines a `Sink` trait:
 
-OAuth login gives access to search, browse, user library, and playback control. However, **audio streaming is not available** — you can only control playback on official Spotify apps/devices.
+```rust
+pub trait Sink {
+    fn start(&mut self) -> SinkResult<()>;
+    fn stop(&mut self) -> SinkResult<()>;
+    fn write(&mut self, packet: AudioPacket, converter: &mut Converter) -> SinkResult<()>;
+}
+```
 
-Useful for: pulling playlist data, showing what's currently playing, controlling a phone that's doing the actual playback.
+The `write()` method receives decoded PCM as `AudioPacket::Samples(Vec<f64>)` — interleaved stereo at 44100Hz. The `Converter` transforms these to F32 (or S16/S32). RetroAmp implements a custom `Sink` that writes converted samples into a ring buffer. On the other side, a `SpotifySource` struct implementing `AudioSource` reads from that ring buffer and feeds the audio engine. This means librespot's decoded audio flows through the same EQ → FFT → CPAL pipeline as local files.
 
-### Recommended Approach
+```
+librespot Player → Custom Sink → Ring Buffer → SpotifySource (AudioSource) → EQ → FFT → CPAL
+```
 
-Combine both: **Web API for metadata and library browsing, librespot for audio streaming.** This is the pattern used by most open-source Spotify clients (e.g. Spotifyd, Auryo).
+The `Player::new` constructor accepts a `FnOnce() -> Box<dyn Sink>` closure — no need to register with librespot's built-in backend system. RetroAmp provides its own sink directly, with no rodio/ALSA/PulseAudio dependencies pulled in.
 
-In RetroAmp's architecture, librespot implements the `AudioSource` trait — it provides decoded PCM frames that flow through the same Rust audio pipeline as local files and internet radio. The EQ, FFT analysis, gapless transitions, and visualisations all work identically. The Web API integration is a separate concern: OAuth login, library browsing, search, and playlist sync feed into the UI layer, while the audio path goes through the source abstraction.
+**Dependency configuration:**
 
-The Winamp UI maps onto Spotify naturally — the playlist editor becomes the queue, the main display shows track info, and a simple panel handles library browsing and search.
+```toml
+librespot = { version = "0.8", default-features = false, features = ["native-tls"] }
+```
+
+This pulls in core, playback, audio, metadata, and oauth without any system audio backends. Only the features RetroAmp actually needs.
+
+**Sub-crates used:**
+
+| Crate | Purpose in RetroAmp |
+|---|---|
+| `librespot-core` | Session management, Spotify protocol, authentication |
+| `librespot-oauth` | OAuth2 PKCE flow — opens browser, local HTTP callback, token exchange |
+| `librespot-audio` | Fetches + decrypts audio chunks from Spotify CDN |
+| `librespot-playback` | Decodes audio, provides Sink trait, normalisation, sample conversion |
+| `librespot-metadata` | Track/album/artist/playlist metadata from Spotify API |
+| `librespot-discovery` | mDNS/Zeroconf for Spotify Connect device advertisement (optional) |
+| `librespot-connect` | Spotify Connect remote control protocol (optional) |
+
+**Authentication:** OAuth2 with PKCE via `librespot-oauth`. Opens the user's browser to Spotify's login page, runs a local HTTP server on a callback URL, exchanges the authorisation code for access + refresh tokens. Credentials are cached via librespot's `Cache` system for subsequent sessions — users authenticate once.
+
+**Spotify Connect (optional but valuable):** Using `librespot-discovery` and `librespot-connect`, RetroAmp can advertise itself as a Spotify Connect device. This means users can open the Spotify app on their phone and select RetroAmp as a playback target — a compelling feature that no YouTube-only approach can offer.
+
+**Spotify Web API:** Used separately from the audio path for library browsing, search, and playlist management in the UI. OAuth tokens from the librespot auth flow can be reused for Web API calls.
+
+**Requirements:** Spotify Premium account.
+
+**Audio quality:** Up to 320kbps OGG Vorbis (Premium), decoded to lossless PCM before entering the pipeline.
+
+### YouTube Music — via Audio Extraction
+
+YouTube Music provides free access to a vast music catalogue without requiring any account. The approach: use YouTube's infrastructure for audio, with metadata sourced from YouTube Music's search and browsing APIs.
+
+**How it works:**
+
+1. **Search & match:** Given a track (from a playlist, search result, or queue), search YouTube by ISRC code (if available) or by `"{track name} {artist names}"`. Rank results using a scoring algorithm that weights artist name matches, title matches, and official content flags.
+2. **Stream extraction:** For the matched video, extract the audio stream URL. This follows the same approach as established tools like yt-dlp, NewPipe, and youtube-dl — parsing YouTube's player response to obtain direct audio stream URLs.
+3. **HTTP streaming:** The extracted URL points to an audio stream (typically Opus or AAC). This is fetched via HTTP and decoded through Symphonia, following the same pattern as the existing internet radio `AudioSource` — HTTP audio stream → ring buffer → Symphonia decode → pipeline.
+4. **Source caching:** Matched YouTube video IDs are cached in SQLite keyed by track metadata (title + artist + duration). Repeat plays of the same track skip the search-and-match step entirely.
+
+```
+YouTube Search → Match & Rank → Extract Stream URL → HTTP Fetch → Ring Buffer → Symphonia → EQ → FFT → CPAL
+```
+
+**The audio extraction approach is architecturally identical to internet radio streaming** — both are HTTP audio streams decoded by Symphonia. The additional complexity is in the search/matching layer and stream URL extraction, not in the audio pipeline.
+
+**Matching algorithm:**
+
+The matching quality is critical — playing the wrong track is worse than no result. The recommended approach, informed by Spotube and OuterTune:
+
+1. **ISRC first:** If the track has an International Standard Recording Code, search YouTube with it directly. ISRC is a unique identifier per recording and produces precise matches.
+2. **Title + artist fallback:** Search with `"{track name} {comma-separated artist names}"`. Score results:
+   - +3 points: track name found in video title
+   - +1 point per artist name found in video title or channel name
+   - +1 point: title contains "official audio", "official video", or "official music video"
+   - +2 bonus: has both the official flag AND track name match
+3. **Duration sanity check:** Reject matches where the video duration differs from the expected track duration by more than 10 seconds (filters out remixes, extended versions, compilations).
+
+**Legal position:**
+
+YouTube audio streams are **not DRM-protected** — they are publicly accessible via HTTP. Extracting them does not circumvent any technical protection measure, which is the critical distinction under DMCA Section 1201. This is the same legal territory occupied by yt-dlp, youtube-dl, NewPipe, FreeTube, and Invidious — all of which have operated for years without successful legal action.
+
+The youtube-dl DMCA takedown on GitHub (2020) was **reversed** after the EFF intervened, establishing that the tool does not violate Section 1201. YouTube has not pursued further legal action against extraction tools, likely because the legal ground is weak (no DRM circumvention) and the PR would be bad.
+
+Extracting audio does violate YouTube's Terms of Service, which is a civil contract matter — significantly weaker than a DMCA claim and not a criminal matter. Multiple high-profile open-source projects (yt-dlp with 100k+ GitHub stars, NewPipe, FreeTube) have operated in this space for years without legal consequence.
+
+**Audio quality:** Typically ~128kbps AAC or ~160kbps Opus from YouTube. Lower than Spotify Premium (320kbps OGG Vorbis) but acceptable for casual listening.
+
+**No account required:** YouTube Music search and audio extraction work without authentication for most content.
+
+### Why Both, Not Either/Or
+
+These are genuinely different use cases, not redundant implementations:
+
+| | Spotify | YouTube Music |
+|---|---|---|
+| **Audience** | Premium subscribers | Everyone (free) |
+| **Audio quality** | Up to 320kbps OGG Vorbis | ~128-160kbps AAC/Opus |
+| **Library/playlists** | Full Spotify library sync | YouTube Music browsing |
+| **Spotify Connect** | Yes — phone as remote | Not applicable |
+| **Account required** | Yes (Premium) | No |
+| **Matching accuracy** | Exact (it is Spotify) | Heuristic (search + rank) |
+| **Legal risk** | Grey area (reverse-engineered protocol) | Low (no DRM, established precedent) |
+| **Catalogue** | Spotify's catalogue | YouTube's catalogue (wider, includes unofficial uploads) |
+
+A user with Spotify Premium gets native integration with their existing library, playlists, and high-quality audio. A user without Spotify — or who wants access to content not on Spotify (live recordings, remixes, niche uploads) — uses YouTube Music. Both produce raw PCM that flows through the same audio pipeline.
 
 ---
 
@@ -460,8 +558,8 @@ A new `AudioSource` implementation for HTTP streams. The Rust audio engine alrea
 ### Phase 3: Library Management & Tag Editing
 Tag editing, ratings, library browser, smart playlists, cover art, scrobbling, MusicBrainz lookup. The Strawberry-equivalent layer that turns a player into a proper music manager. The window manager already handles the new drawers (library browser, tag editor). The skin colour derivation system already provides theming.
 
-### Phase 4: Spotify
-A Spotify `AudioSource` implementation via librespot, plus Web API integration for library browsing and search. The audio flows through the same Rust pipeline — same EQ, same visualiser, same gapless behaviour. Most complex due to legal nuance and Premium account requirement, but architecturally straightforward because the source abstraction is already proven.
+### Phase 4: Streaming Services (Spotify & YouTube Music)
+Two new `AudioSource` implementations serving different audiences. **Spotify** via librespot: a custom `Sink` implementation pipes decoded PCM (44100Hz stereo f64) through a ring buffer into the audio engine. OAuth2 PKCE for authentication, Web API for library/playlist browsing, and optionally Spotify Connect so RetroAmp appears as a playback device. Requires Premium. **YouTube Music** via audio extraction: search and match tracks by ISRC or title+artist, extract audio stream URLs (same approach as yt-dlp/NewPipe), fetch via HTTP, and decode through Symphonia — architecturally identical to the internet radio source. No account required. Both paths produce raw PCM through the same EQ → FFT → CPAL pipeline. These are independent features that can be built in any order.
 
 ### Phase 5: Milkdrop & CD Ripping
 Butterchurn integration in its own Tauri window, consuming the FFT data the Rust engine already produces. Preset browser with folder watching. CD ripping via cdparanoia + FFmpeg as Tauri shell commands. Milkdrop is deferred not because it is architecturally complex — the FFT bridge exists from Phase 1 — but because it is a large, independent feature that benefits from a stable player.
@@ -661,6 +759,22 @@ Include a clear statement in the README and About screen that RetroAmp is an ind
 
 > *RetroAmp is an independent open-source project and is not affiliated with, endorsed by, or connected to Winamp or Radionomy. Winamp is a trademark of Radionomy. RetroAmp supports the Winamp `.wsz` skin format for compatibility with community-created skins.*
 
+### Spotify Integration (librespot)
+
+librespot is a reverse-engineered implementation of the Spotify Connect protocol. It decrypts Spotify's audio streams (AES-CTR encrypted OGG Vorbis). This **does** involve circumventing a technical protection measure, which places it in a legal grey area under DMCA Section 1201. However, librespot has been actively developed and published on GitHub and crates.io for years (MIT licensed) without successful legal action from Spotify. The open-source community widely accepts this risk — projects like spotifyd, ncspot, and psst all depend on librespot.
+
+**Mitigation:** librespot is an external dependency, not RetroAmp's own code. If Spotify were to take action against the librespot project, the dependency could be removed without affecting the rest of RetroAmp's architecture. The `AudioSource` trait ensures clean separation.
+
+### YouTube Audio Extraction
+
+YouTube audio streams are **not DRM-protected**. They are delivered as standard HTTP responses (Opus or AAC in WebM/MP4 containers) with no encryption. Extracting them does not circumvent any technical protection measure, which is the critical test under DMCA Section 1201.
+
+**Precedent:** The youtube-dl DMCA takedown on GitHub (October 2020) was **reversed** in November 2020 after the Electronic Frontier Foundation (EFF) intervened, arguing that youtube-dl does not violate Section 1201 because it does not circumvent any access control. Since then, yt-dlp (youtube-dl's successor, 100k+ GitHub stars), NewPipe, FreeTube, and Invidious have all continued to operate without legal action from Google/YouTube.
+
+Extracting audio does violate YouTube's Terms of Service, which is a civil contract matter — not a criminal or statutory claim. ToS violations are significantly weaker legal ground than DMCA claims. YouTube has not pursued legal action against extraction tools, likely because the legal basis is weak and the public relations consequences would be unfavourable.
+
+**Risk level:** Low. The legal position is well-established by years of precedent across multiple high-profile projects.
+
 ### Summary
 
 | Area | Status | Action required |
@@ -672,6 +786,8 @@ Include a clear statement in the README and About screen that RetroAmp is an ind
 | Webamp code | MIT licensed | Keep license notice in source ✓ |
 | Winamp trademark in marketing | Descriptive use only | ✓ as long as not passing off |
 | Affiliation disclaimer | Best practice | Add to README and About screen |
+| librespot / Spotify audio | Grey area (DRM circumvention) | Accept community-established risk; isolate as removable dependency |
+| YouTube audio extraction | Low risk (no DRM, strong precedent) | ToS violation only; well-established by yt-dlp, NewPipe, etc. |
 
 ---
 
@@ -683,7 +799,11 @@ Include a clear statement in the README and About screen that RetroAmp is an ind
 | Webamp | github.com/captbaritone/webamp | Forked for skin parser + sprite renderer |
 | Winamp Skin Museum | skins.webamp.org | ~65,000 skins for testing |
 | Radio Browser | radio-browser.info | Open station directory API |
-| librespot | github.com/librespot-org/librespot | Rust Spotify client library |
+| librespot | github.com/librespot-org/librespot | Rust Spotify Connect library (MIT); also on crates.io as `librespot` |
+| Spotify Web API | developer.spotify.com | Official API for library/playlist/search metadata |
+| Spotube | github.com/KRTirtho/spotube | Reference: Spotify metadata + YouTube audio architecture (Flutter/Dart) |
+| OuterTune | github.com/DD3Boh/OuterTune | Reference: YouTube Music frontend (Kotlin/Android) |
+| yt-dlp | github.com/yt-dlp/yt-dlp | Reference: YouTube audio extraction (Python) |
 | Symphonia | github.com/pdeljanov/Symphonia | Rust audio decoder (primary audio pipeline) |
 | CPAL | github.com/RustAudio/cpal | Cross-platform audio output |
 | rustfft | github.com/ejmahler/RustFFT | FFT computation for spectrum/visualisation data |

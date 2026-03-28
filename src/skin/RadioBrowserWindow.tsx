@@ -258,24 +258,34 @@ export default function RadioBrowserWindow({ skin, scale }: Props) {
   // -- Actions --
 
   const playStation = useCallback(async (url: string, name: string) => {
-    showStatus(`Connecting to ${name}...`);
+    showStatus(`Connecting to ${name}...`, 30000);
     try {
       await invoke("play_url", { url, name });
       setStatusMsg(null);
     } catch (e) {
       console.error("[radio] play failed:", e);
       const msg = String(e);
-      if (msg.includes("unsupported") || msg.includes("no suitable")) {
-        showStatus("Unsupported stream format");
+      let display: string;
+      if (msg.includes("unsupported codec") || msg.includes("no decoder")) {
+        display = "Unsupported codec — this stream uses a format RetroAmp can't decode";
+      } else if (msg.includes("unsupported") || msg.includes("no suitable")) {
+        display = "Unsupported stream format";
       } else if (msg.includes("timed out")) {
-        showStatus("Connection timed out");
-      } else if (msg.includes("probe") || msg.includes("decode")) {
-        showStatus("Could not decode stream");
+        display = "Connection timed out — server did not respond";
+      } else if (msg.includes("no playable stream URLs")) {
+        display = "Playlist contained no playable stream URLs";
+      } else if (msg.includes("too many playlist redirects")) {
+        display = "Too many playlist redirects";
+      } else if (msg.includes("identify stream format") || msg.includes("probe")) {
+        display = "Could not identify stream format";
+      } else if (msg.includes("decode")) {
+        display = "Could not decode stream";
       } else if (msg.includes("onnect")) {
-        showStatus("Connection failed");
+        display = "Connection failed — server may be offline";
       } else {
-        showStatus("Failed to play station");
+        display = "Failed to play station";
       }
+      showStatus(display, 6000);
     }
   }, [showStatus]);
 
@@ -315,11 +325,22 @@ export default function RadioBrowserWindow({ skin, scale }: Props) {
   const playUrl = useCallback(async () => {
     const url = urlInput.trim();
     if (!url) return;
+    showStatus("Connecting...", 30000);
     try {
       await invoke("play_url", { url });
       setUrlInput("");
-    } catch {
-      showStatus("Failed to play URL");
+      setStatusMsg(null);
+    } catch (e) {
+      const msg = String(e);
+      if (msg.includes("timed out")) {
+        showStatus("Connection timed out", 6000);
+      } else if (msg.includes("unsupported") || msg.includes("no decoder")) {
+        showStatus("Unsupported stream format", 6000);
+      } else if (msg.includes("onnect")) {
+        showStatus("Connection failed — server may be offline", 6000);
+      } else {
+        showStatus("Failed to play URL", 6000);
+      }
     }
   }, [urlInput, showStatus]);
 

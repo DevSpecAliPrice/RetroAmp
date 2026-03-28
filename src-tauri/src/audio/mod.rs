@@ -8,6 +8,7 @@
 //!   - `output`: CPAL audio output
 //!   - `error`: Error types for the audio subsystem
 
+pub mod adts;
 pub mod engine;
 pub mod eq;
 pub mod error;
