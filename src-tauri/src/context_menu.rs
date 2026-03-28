@@ -95,6 +95,14 @@ pub fn show_context_menu(
 ) -> Result<(), String> {
     let menu = build_menu(&window, &items).map_err(|e| e.to_string())?;
 
+    // On Wayland, popups must be parented to the focused (topmost) surface.
+    // Child/transient windows (EQ, Playlist, etc.) may not be considered
+    // "topmost" by GTK even when the user just clicked inside them, because
+    // focus transfer can be asynchronous.  Explicitly requesting focus avoids
+    // the "Tried to map a popup with a non-top most parent" GTK warning that
+    // can stall the event loop and freeze the UI.
+    let _ = window.set_focus();
+
     // When the user clicks a menu item, emit a Tauri event with the item ID.
     // This works regardless of whether popup_at() blocks (X11) or not (GTK3/Wayland).
     let emitter = window.clone();
