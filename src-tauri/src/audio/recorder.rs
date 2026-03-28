@@ -269,11 +269,11 @@ impl RadioRecorder {
             return false;
         }
 
-        let title_changed = {
+        let (title_changed, is_first_title) = {
             if let Ok(last) = self.last_title.try_lock() {
                 match &*last {
-                    Some(prev) => prev != new_title,
-                    None => true, // First title seen.
+                    Some(prev) => (prev != new_title, false),
+                    None => (true, true), // First title seen.
                 }
             } else {
                 return false; // Lock contended, skip.
@@ -284,13 +284,29 @@ impl RadioRecorder {
             return false;
         }
 
-        // Mark that we've seen at least one title change.
-        self.has_metadata.store(true, Ordering::Relaxed);
-
         // Update last known title.
         if let Ok(mut last) = self.last_title.try_lock() {
             *last = Some(new_title.to_string());
         }
+
+        if is_first_title {
+            // First title seen (None → "something"). This is just the station's
+            // initial metadata — don't treat it as a track boundary or evidence
+            // of real song metadata. Stations that send a static tag like
+            // "BEEP ADSWIZ" will never progress past this point.
+            // Update the current buffer's title so it has a name, but don't
+            // finalize or set has_metadata.
+            if let Ok(mut current) = self.current.try_lock() {
+                if let Some(ref mut buf) = *current {
+                    buf.title = Some(new_title.to_string());
+                }
+            }
+            return false;
+        }
+
+        // Second+ title change — real track boundary. This station sends
+        // actual song metadata.
+        self.has_metadata.store(true, Ordering::Relaxed);
 
         // Finalize the current buffer and start a new one.
         self.finalize_current(Some(new_title));
