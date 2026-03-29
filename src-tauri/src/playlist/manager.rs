@@ -416,6 +416,22 @@ impl PlaylistManager {
         self.tracks.iter().map(|t| t.path.clone()).collect()
     }
 
+    /// Export tracks with metadata for playlist persistence.
+    /// Includes title/artist/album/duration for Spotify tracks that can't
+    /// re-read metadata from file tags on restore.
+    pub fn export_for_persistence(&self) -> Vec<crate::db::PlaylistTrackEntry> {
+        self.tracks
+            .iter()
+            .map(|t| crate::db::PlaylistTrackEntry {
+                path: t.path.clone(),
+                title: t.title.clone(),
+                artist: t.artist.clone(),
+                album: t.album.clone(),
+                duration_ms: t.duration.map(|d| d.as_millis() as i64),
+            })
+            .collect()
+    }
+
     /// Build export entries for saving the playlist to a file.
     pub fn export_entries(&self) -> Vec<crate::audio::playlist_parser::ExportEntry> {
         self.tracks

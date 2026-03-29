@@ -80,17 +80,35 @@ pub fn run() {
         use crate::playlist::sequence::{ShuffleMode, RepeatMode};
         if let Ok(db) = database.lock() {
             match db.restore_playlist() {
-                Ok((paths, current_index, shuffle, repeat)) if !paths.is_empty() => {
+                Ok((tracks, current_index, shuffle, repeat)) if !tracks.is_empty() => {
                     if let Ok(mut pl) = playlist_manager.lock() {
                         // Only add tracks whose files still exist (skip stale entries).
                         // Streams (URLs) are always kept.
                         let mut index_offset: usize = 0;
                         let mut valid_count: usize = 0;
-                        for (i, path) in paths.iter().enumerate() {
+                        for (i, entry) in tracks.iter().enumerate() {
+                            let path = &entry.path;
                             let is_url = path.starts_with("http://") || path.starts_with("https://");
                             let is_spotify = path.starts_with("spotify:");
                             if is_url || is_spotify || std::path::Path::new(path).exists() {
-                                pl.add_track(path);
+                                let id = pl.add_track(path);
+                                // Restore saved metadata (especially for Spotify tracks).
+                                if entry.title.is_some() || entry.artist.is_some() {
+                                    let meta = crate::audio::source::TrackMetadata {
+                                        title: entry.title.clone(),
+                                        artist: entry.artist.clone(),
+                                        album: entry.album.clone(),
+                                        duration: entry.duration_ms.map(|ms| std::time::Duration::from_millis(ms as u64)),
+                                        sample_rate: 44100,
+                                        channels: 2,
+                                        bitrate: None,
+                                        genre: None,
+                                        year: None,
+                                        track_number: None,
+                                        cover_art: None,
+                                    };
+                                    pl.update_metadata(id, &meta);
+                                }
                                 valid_count += 1;
                             } else {
                                 // Track before current_index was skipped — adjust.
@@ -146,7 +164,7 @@ pub fn run() {
                         let Ok(pl) = pl_clone.lock() else { return };
                         let state = pl.state();
                         state.tracks.iter()
-                            .filter(|t| !t.is_stream)
+                            .filter(|t| t.source_type == "local")
                             .map(|t| (t.id, t.path.clone()))
                             .collect()
                     };
@@ -729,12 +747,11 @@ pub fn run() {
             // Spotify — browsing
             spotify::commands::spotify_search,
             spotify::commands::spotify_get_playlists,
-            spotify::commands::spotify_get_playlist_tracks,
+            spotify::commands::spotify_get_playlist_items,
             spotify::commands::spotify_get_saved_albums,
             spotify::commands::spotify_get_saved_tracks,
             spotify::commands::spotify_get_album,
             spotify::commands::spotify_get_artist,
-            spotify::commands::spotify_get_artist_top_tracks,
             spotify::commands::spotify_get_artist_albums,
             spotify::commands::spotify_get_recently_played,
         ])

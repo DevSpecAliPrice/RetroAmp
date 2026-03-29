@@ -258,7 +258,7 @@ pub async fn spotify_get_playlists(
 
 /// Get tracks from a playlist.
 #[tauri::command]
-pub async fn spotify_get_playlist_tracks(
+pub async fn spotify_get_playlist_items(
     spotify: State<'_, Arc<SpotifyPlayer>>,
     playlist_id: String,
     limit: usize,
@@ -266,7 +266,7 @@ pub async fn spotify_get_playlist_tracks(
 ) -> Result<Paged<PlaylistTrackItem>, String> {
     let token = spotify.api_access_token().ok_or("Spotify not connected")?;
     tauri::async_runtime::spawn_blocking(move || {
-        crate::spotify::api::get_playlist_tracks(&token, &playlist_id, limit, offset)
+        crate::spotify::api::get_playlist_items(&token, &playlist_id, limit, offset)
     })
     .await
     .map_err(|e| format!("Playlist tracks task failed: {e}"))?
@@ -328,20 +328,6 @@ pub async fn spotify_get_artist(
     })
     .await
     .map_err(|e| format!("Artist task failed: {e}"))?
-}
-
-/// Get an artist's top tracks.
-#[tauri::command]
-pub async fn spotify_get_artist_top_tracks(
-    spotify: State<'_, Arc<SpotifyPlayer>>,
-    artist_id: String,
-) -> Result<Vec<ApiTrack>, String> {
-    let token = spotify.api_access_token().ok_or("Spotify not connected")?;
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::spotify::api::get_artist_top_tracks(&token, &artist_id)
-    })
-    .await
-    .map_err(|e| format!("Artist top tracks task failed: {e}"))?
 }
 
 /// Get an artist's albums.

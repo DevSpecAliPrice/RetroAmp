@@ -89,6 +89,9 @@ pub struct SpotifySource {
     position_ms: Arc<AtomicU64>,
     _duration_ms: Arc<AtomicU64>,
     sink_active: Arc<AtomicBool>,
+    /// Reference to the Player so we can drop it when the source is dropped.
+    /// This stops librespot from continuing to write to the ring buffer.
+    _player: Arc<Player>,
     state: SourceState,
     /// Count of consecutive empty reads (for underrun detection).
     consecutive_empty: u32,
@@ -329,6 +332,10 @@ impl SpotifyPlayer {
     /// Load a Spotify track and return an AudioSource that produces its audio.
     /// Uses the pre-connected playback session (created during login).
     pub fn load_track(&self, track_uri: &str) -> Result<Box<dyn AudioSource>, String> {
+        // Drop the previous Player first — it holds a Sink that writes to the
+        // old ring buffer, and would keep running in the background otherwise.
+        if let Ok(mut g) = self.player.lock() { *g = None; }
+
         let session = self.playback_session()
             .ok_or("Spotify playback session not available — please log in again")?;
 
@@ -344,8 +351,10 @@ impl SpotifyPlayer {
         let position_ms = Arc::clone(&self.position_ms);
         let duration_ms = Arc::clone(&self.duration_ms);
 
-        // Reset state for the new track.
-        self.sink_active.store(false, Ordering::Release);
+        // Reset state for the new track. Start with sink_active=true so that
+        // SpotifySource doesn't signal end-of-track before librespot starts
+        // writing. The sink's stop() will set it to false when the track ends.
+        self.sink_active.store(true, Ordering::Release);
         self.position_ms.store(0, Ordering::Release);
         self.duration_ms.store(u64::MAX, Ordering::Release);
 
@@ -434,7 +443,9 @@ impl SpotifyPlayer {
         // Tell librespot to load and start playing the track.
         player.load(uri, true, 0);
 
-        // Store the player reference.
+        // Store the player reference and also pass it to SpotifySource so the
+        // Player is dropped when the engine drops the source (stops playback).
+        let player_clone = Arc::clone(&player);
         if let Ok(mut guard) = self.player.lock() {
             *guard = Some(player);
         }
@@ -446,6 +457,7 @@ impl SpotifyPlayer {
             position_ms,
             _duration_ms: duration_ms,
             sink_active,
+            _player: player_clone,
             state: SourceState::Ready,
             consecutive_empty: 0,
         }))

@@ -155,7 +155,7 @@ export default function SpotifyBrowserWindow({ skin, scale }: Props) {
       setSearchLoading(true);
       try {
         const results = await invoke<SearchResults>("spotify_search", {
-          query: searchQuery, types: "track,album,artist,playlist", limit: 20,
+          query: searchQuery, types: "track,album,artist,playlist", limit: 10,
         });
         setSearchResults(results);
       } catch (e) { console.error("Search failed:", e); }
@@ -202,7 +202,6 @@ export default function SpotifyBrowserWindow({ skin, scale }: Props) {
   // --- Detail view data ---
   const [detailAlbum, setDetailAlbum] = useState<ApiAlbum | null>(null);
   const [detailArtist, setDetailArtist] = useState<ApiArtist | null>(null);
-  const [detailArtistTopTracks, setDetailArtistTopTracks] = useState<ApiTrack[]>([]);
   const [detailArtistAlbums, setDetailArtistAlbums] = useState<ApiAlbumRef[]>([]);
   const [detailPlaylistTracks, setDetailPlaylistTracks] = useState<PlaylistTrackItem[]>([]);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -216,15 +215,13 @@ export default function SpotifyBrowserWindow({ skin, scale }: Props) {
     } else if (currentDetail.type === "artist") {
       Promise.all([
         invoke<ApiArtist>("spotify_get_artist", { artistId: currentDetail.id }),
-        invoke<ApiTrack[]>("spotify_get_artist_top_tracks", { artistId: currentDetail.id }),
         invoke<Paged<ApiAlbumRef>>("spotify_get_artist_albums", { artistId: currentDetail.id, limit: 20, offset: 0 }),
-      ]).then(([artist, topTracks, albums]) => {
+      ]).then(([artist, albums]) => {
         setDetailArtist(artist);
-        setDetailArtistTopTracks(topTracks);
-        setDetailArtistAlbums(albums.items);
+        setDetailArtistAlbums(nn(albums.items));
       }).catch(() => {}).finally(() => setDetailLoading(false));
     } else if (currentDetail.type === "playlist") {
-      invoke<Paged<PlaylistTrackItem>>("spotify_get_playlist_tracks", {
+      invoke<Paged<PlaylistTrackItem>>("spotify_get_playlist_items", {
         playlistId: currentDetail.id, limit: 100, offset: 0,
       }).then((r) => setDetailPlaylistTracks(r.items))
         .catch(() => {}).finally(() => setDetailLoading(false));
@@ -405,16 +402,16 @@ export default function SpotifyBrowserWindow({ skin, scale }: Props) {
       {searchResults && (
         <>
           {searchResults.tracks && searchResults.tracks.items.length > 0 && (
-            <><SectionTitle>Tracks</SectionTitle>{searchResults.tracks.items.slice(0, 5).map((t, i) => renderTrackRow(t, i))}</>
+            <><SectionTitle>Tracks</SectionTitle>{searchResults.tracks.items.map((t, i) => renderTrackRow(t, i))}</>
           )}
           {searchResults.albums && searchResults.albums.items.length > 0 && (
-            <><SectionTitle>Albums</SectionTitle>{searchResults.albums.items.slice(0, 5).map((a) => renderAlbumRow(a, a.id ?? a.name))}</>
+            <><SectionTitle>Albums</SectionTitle>{searchResults.albums.items.map((a) => renderAlbumRow(a, a.id ?? a.name))}</>
           )}
           {searchResults.artists && searchResults.artists.items.length > 0 && (
-            <><SectionTitle>Artists</SectionTitle>{searchResults.artists.items.slice(0, 5).map(renderArtistRow)}</>
+            <><SectionTitle>Artists</SectionTitle>{searchResults.artists.items.map(renderArtistRow)}</>
           )}
           {searchResults.playlists && searchResults.playlists.items.length > 0 && (
-            <><SectionTitle>Playlists</SectionTitle>{searchResults.playlists.items.slice(0, 5).map(renderPlaylistRow)}</>
+            <><SectionTitle>Playlists</SectionTitle>{searchResults.playlists.items.map(renderPlaylistRow)}</>
           )}
         </>
       )}
@@ -462,7 +459,7 @@ export default function SpotifyBrowserWindow({ skin, scale }: Props) {
             </div>
           </div>
         </div>
-        {detailAlbum.tracks?.items.map((t, i) => {
+        {(detailAlbum.tracks?.items ?? []).map((t, i) => {
           const track: ApiTrack = {
             ...t, popularity: 0, album: { id: detailAlbum.id, name: detailAlbum.name, images: detailAlbum.images, artists: detailAlbum.artists, album_type: detailAlbum.album_type, release_date: detailAlbum.release_date, total_tracks: detailAlbum.total_tracks, uri: detailAlbum.uri },
             is_local: false,
@@ -486,9 +483,6 @@ export default function SpotifyBrowserWindow({ skin, scale }: Props) {
             {detailArtist.followers && <div style={{ fontSize: Math.round(8 * s), opacity: 0.6 }}>{detailArtist.followers.total.toLocaleString()} followers</div>}
           </div>
         </div>
-        {detailArtistTopTracks.length > 0 && (
-          <><SectionTitle>Top Tracks</SectionTitle>{detailArtistTopTracks.map((t, i) => renderTrackRow(t, i))}</>
-        )}
         {detailArtistAlbums.length > 0 && (
           <><SectionTitle>Albums</SectionTitle>{detailArtistAlbums.map((a) => renderAlbumRow(a, a.id ?? a.name))}</>
         )}

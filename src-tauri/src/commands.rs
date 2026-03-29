@@ -506,14 +506,15 @@ pub fn save_playlist_state(
     playlist: &Arc<Mutex<PlaylistManager>>,
 ) {
     let Ok(pl) = playlist.lock() else { return };
-    let paths = pl.track_paths();
     let current_index = pl.current_index();
     let shuffle = format!("{:?}", pl.shuffle_mode());
     let repeat = format!("{:?}", pl.repeat_mode());
+    // Build track entries with metadata for persistence.
+    let tracks: Vec<crate::db::PlaylistTrackEntry> = pl.export_for_persistence();
     drop(pl);
 
     if let Ok(db) = database.lock() {
-        if let Err(e) = db.save_playlist(&paths, current_index, &shuffle, &repeat) {
+        if let Err(e) = db.save_playlist(&tracks, current_index, &shuffle, &repeat) {
             log::warn!("failed to save playlist state: {e}");
         }
     }

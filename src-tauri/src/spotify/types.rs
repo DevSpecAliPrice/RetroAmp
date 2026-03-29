@@ -11,8 +11,12 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Spotify's offset-based paging object.
+/// Uses a custom deserializer for `items` that filters out null entries
+/// (Spotify returns nulls for unavailable content).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(bound(deserialize = "T: serde::Deserialize<'de>"))]
 pub struct Paged<T> {
+    #[serde(deserialize_with = "deserialize_filter_nulls")]
     pub items: Vec<T>,
     #[serde(default)]
     pub total: usize,
@@ -23,6 +27,17 @@ pub struct Paged<T> {
     #[serde(default)]
     pub next: Option<String>,
 }
+
+/// Deserialise a JSON array, silently dropping null entries.
+fn deserialize_filter_nulls<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    let items: Vec<Option<T>> = Vec::deserialize(deserializer)?;
+    Ok(items.into_iter().flatten().collect())
+}
+
 
 /// Cursor-based paging object (used by recently-played).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -218,13 +233,15 @@ pub struct PlaylistTrackRef {
     pub total: u32,
 }
 
-/// Playlist track item (wraps a track with added_at info).
+/// Playlist item (wraps a track with added_at info).
+/// Feb 2026: field renamed from "track" to "item" in API responses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlaylistTrackItem {
     #[serde(default)]
     pub added_at: Option<String>,
     /// The track. Can be null for deleted/unavailable tracks.
-    #[serde(rename = "track")]
+    /// Accepts both "track" (old API) and "item" (new API) field names.
+    #[serde(alias = "track", alias = "item")]
     pub track: Option<ApiTrack>,
 }
 
@@ -289,8 +306,4 @@ pub struct RecentlyPlayedItem {
 // Wrapper responses (for endpoints that wrap the paging object)
 // ---------------------------------------------------------------------------
 
-/// Response from GET /v1/artists/{id}/top-tracks
-#[derive(Debug, Clone, Deserialize)]
-pub struct ArtistTopTracksResponse {
-    pub tracks: Vec<ApiTrack>,
-}
+// Note: GET /artists/{id}/top-tracks was removed in the Feb 2026 API changes.

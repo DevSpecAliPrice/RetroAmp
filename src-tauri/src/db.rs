@@ -56,6 +56,16 @@ pub struct SkinCatalogEntry {
     pub use_count: i64,
 }
 
+/// A track entry for playlist persistence, including metadata for
+/// non-local sources (Spotify) that can't be re-read from file tags.
+pub struct PlaylistTrackEntry {
+    pub path: String,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub duration_ms: Option<i64>,
+}
+
 pub struct Database {
     conn: Connection,
 }
@@ -209,6 +219,19 @@ impl Database {
         );
         let _ = self.conn.execute_batch(
             "ALTER TABLE radio_stations ADD COLUMN source TEXT NOT NULL DEFAULT 'user';",
+        );
+        // Add metadata columns to playlist_tracks for Spotify track persistence.
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE playlist_tracks ADD COLUMN title TEXT;",
+        );
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE playlist_tracks ADD COLUMN artist TEXT;",
+        );
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE playlist_tracks ADD COLUMN album TEXT;",
+        );
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE playlist_tracks ADD COLUMN duration_ms INTEGER;",
         );
     }
 
@@ -698,7 +721,7 @@ impl Database {
     /// Replaces any previously saved state.
     pub fn save_playlist(
         &self,
-        paths: &[String],
+        tracks: &[PlaylistTrackEntry],
         current_index: Option<usize>,
         shuffle: &str,
         repeat: &str,
@@ -710,10 +733,10 @@ impl Database {
         {
             let mut stmt = self
                 .conn
-                .prepare("INSERT INTO playlist_tracks (position, path) VALUES (?1, ?2)")
+                .prepare("INSERT INTO playlist_tracks (position, path, title, artist, album, duration_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")
                 .map_err(|e| format!("prepare error: {e}"))?;
-            for (i, path) in paths.iter().enumerate() {
-                stmt.execute(params![i as i64, path])
+            for (i, track) in tracks.iter().enumerate() {
+                stmt.execute(params![i as i64, track.path, track.title, track.artist, track.album, track.duration_ms])
                     .map_err(|e| format!("failed to save playlist track: {e}"))?;
             }
         }
@@ -733,19 +756,27 @@ impl Database {
         Ok(())
     }
 
-    /// Restore the saved playlist. Returns (paths, current_index, shuffle, repeat).
-    pub fn restore_playlist(&self) -> Result<(Vec<String>, Option<usize>, String, String), String> {
-        let mut paths = Vec::new();
+    /// Restore the saved playlist. Returns (tracks, current_index, shuffle, repeat).
+    pub fn restore_playlist(&self) -> Result<(Vec<PlaylistTrackEntry>, Option<usize>, String, String), String> {
+        let mut tracks = Vec::new();
         {
             let mut stmt = self
                 .conn
-                .prepare("SELECT path FROM playlist_tracks ORDER BY position")
+                .prepare("SELECT path, title, artist, album, duration_ms FROM playlist_tracks ORDER BY position")
                 .map_err(|e| format!("query error: {e}"))?;
             let rows = stmt
-                .query_map([], |row| row.get::<_, String>(0))
+                .query_map([], |row| {
+                    Ok(PlaylistTrackEntry {
+                        path: row.get(0)?,
+                        title: row.get(1)?,
+                        artist: row.get(2)?,
+                        album: row.get(3)?,
+                        duration_ms: row.get(4)?,
+                    })
+                })
                 .map_err(|e| format!("query error: {e}"))?;
             for row in rows {
-                paths.push(row.map_err(|e| format!("row error: {e}"))?);
+                tracks.push(row.map_err(|e| format!("row error: {e}"))?);
             }
         }
 
@@ -763,7 +794,7 @@ impl Database {
             )
             .unwrap_or((None, "Off".to_string(), "Off".to_string()));
 
-        Ok((paths, current_index, shuffle, repeat))
+        Ok((tracks, current_index, shuffle, repeat))
     }
 
     /// Get the set of all paths that already have thumbnails cached.
