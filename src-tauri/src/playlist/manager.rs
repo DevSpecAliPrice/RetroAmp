@@ -372,6 +372,7 @@ impl PlaylistManager {
                     crate::playlist::track::SourceType::Local => "local",
                     crate::playlist::track::SourceType::Stream => "stream",
                     crate::playlist::track::SourceType::Spotify => "spotify",
+                    crate::playlist::track::SourceType::YouTube => "youtube",
                 };
                 PlaylistEntry {
                     id: track.id,

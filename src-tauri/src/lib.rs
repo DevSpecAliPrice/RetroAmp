@@ -13,6 +13,7 @@ pub mod radio_browser;
 pub mod skin;
 pub mod spotify;
 pub mod window;
+pub mod youtube;
 
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -90,7 +91,8 @@ pub fn run() {
                             let path = &entry.path;
                             let is_url = path.starts_with("http://") || path.starts_with("https://");
                             let is_spotify = path.starts_with("spotify:");
-                            if is_url || is_spotify || std::path::Path::new(path).exists() {
+                            let is_youtube = path.starts_with("youtube:");
+                            if is_url || is_spotify || is_youtube || std::path::Path::new(path).exists() {
                                 let id = pl.add_track(path);
                                 // Restore saved metadata (especially for Spotify tracks).
                                 if entry.title.is_some() || entry.artist.is_some() {
@@ -270,6 +272,12 @@ pub fn run() {
                     }
                 });
             }
+            // Check for yt-dlp updates in the background (non-blocking).
+            // Downloads or updates the managed yt-dlp binary if needed.
+            tauri::async_runtime::spawn_blocking(|| {
+                crate::youtube::ytdlp::check_for_update();
+            });
+
             // Start OS media controls (MPRIS on Linux, SMTC on Windows,
             // MPRemoteCommandCenter on macOS). Non-fatal if it fails.
             {
@@ -399,6 +407,7 @@ pub fn run() {
             let library_layout = saved_ui.library_browser.as_ref().unwrap_or(&default_layout);
             let settings_layout = saved_ui.settings.as_ref().unwrap_or(&default_layout);
             let spotify_layout = saved_ui.spotify_browser.as_ref().unwrap_or(&default_layout);
+            let youtube_layout = saved_ui.youtube_browser.as_ref().unwrap_or(&default_layout);
 
             let all_panels: &[(WindowId, &config::WindowLayoutEntry)] = &[
                 (WindowId::Equalizer, &saved_ui.equalizer),
@@ -407,6 +416,7 @@ pub fn run() {
                 (WindowId::LibraryBrowser, library_layout),
                 (WindowId::Settings, settings_layout),
                 (WindowId::SpotifyBrowser, spotify_layout),
+                (WindowId::YouTubeBrowser, youtube_layout),
             ];
 
             // Derive default size from main window (computed once).
@@ -432,7 +442,7 @@ pub fn run() {
                 }
 
                 let default_w = match id {
-                    WindowId::RadioBrowser | WindowId::SpotifyBrowser => main_w * 1.5,
+                    WindowId::RadioBrowser | WindowId::SpotifyBrowser | WindowId::YouTubeBrowser => main_w * 1.5,
                     WindowId::Settings => 700.0,
                     _ => main_w,
                 };
@@ -552,6 +562,7 @@ pub fn run() {
                         "radiobrowser" => Some(WindowId::RadioBrowser),
                         "librarybrowser" => Some(WindowId::LibraryBrowser),
                         "spotifybrowser" => Some(WindowId::SpotifyBrowser),
+                        "youtubebrowser" => Some(WindowId::YouTubeBrowser),
                         _ => None,
                     };
                     if let Some(id) = window_id {
@@ -754,6 +765,18 @@ pub fn run() {
             spotify::commands::spotify_get_artist,
             spotify::commands::spotify_get_artist_albums,
             spotify::commands::spotify_get_recently_played,
+            // YouTube
+            youtube::commands::youtube_play_track,
+            youtube::commands::youtube_add_to_playlist,
+            youtube::commands::youtube_search,
+            youtube::commands::youtube_search_songs,
+            youtube::commands::youtube_search_suggestions,
+            youtube::commands::youtube_get_album,
+            youtube::commands::youtube_get_artist,
+            youtube::commands::youtube_get_playlist,
+            youtube::commands::youtube_auth_status,
+            youtube::commands::youtube_login,
+            youtube::commands::youtube_logout,
         ])
         .run(tauri::generate_context!())
         .expect("error while running RetroAmp");
@@ -880,13 +903,14 @@ fn auto_advance_loop(
                 match pl.next_track() {
                     Some(track) => {
                         let path = track.path.clone();
+                        let track_meta = track.to_source_metadata();
                         drop(pl); // Release lock before engine call.
 
                         let ctx = commands::RecorderContext {
                             recorder_state: Arc::clone(&recorder_state),
                             app_handle: app_handle.clone(),
                         };
-                        match commands::create_source(&path, Some(ctx), Some(&spotify_player)) {
+                        match commands::create_source(&path, Some(ctx), Some(&spotify_player), Some(track_meta)) {
                             Ok(source) => {
                                 // Update metadata if not already loaded.
                                 if let Ok(meta) = source.metadata() {

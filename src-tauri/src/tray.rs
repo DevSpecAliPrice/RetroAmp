@@ -71,8 +71,9 @@ pub fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                     if let Ok(mut pl) = playlist.lock() {
                         if let Some(track) = pl.previous_track() {
                             let path = track.path.clone();
+                            let meta = track.to_source_metadata();
                             drop(pl);
-                            let _ = commands::play_path(engine, &path, None);
+                            let _ = commands::play_path(engine, &path, None, Some(meta));
                         }
                     }
                 }
@@ -80,8 +81,9 @@ pub fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                     if let Ok(mut pl) = playlist.lock() {
                         if let Some(track) = pl.next_track() {
                             let path = track.path.clone();
+                            let meta = track.to_source_metadata();
                             drop(pl);
-                            let _ = commands::play_path(engine, &path, None);
+                            let _ = commands::play_path(engine, &path, None, Some(meta));
                         }
                     }
                 }

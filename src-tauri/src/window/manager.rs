@@ -17,6 +17,7 @@ pub enum WindowId {
     RadioBrowser,
     LibraryBrowser,
     SpotifyBrowser,
+    YouTubeBrowser,
 }
 
 impl WindowId {
@@ -30,6 +31,7 @@ impl WindowId {
             WindowId::RadioBrowser => "radiobrowser",
             WindowId::LibraryBrowser => "librarybrowser",
             WindowId::SpotifyBrowser => "spotifybrowser",
+            WindowId::YouTubeBrowser => "youtubebrowser",
         }
     }
 
@@ -43,6 +45,7 @@ impl WindowId {
             WindowId::RadioBrowser => "/?window=radiobrowser",
             WindowId::LibraryBrowser => "/?window=librarybrowser",
             WindowId::SpotifyBrowser => "/?window=spotifybrowser",
+            WindowId::YouTubeBrowser => "/?window=youtubebrowser",
         }
     }
 
@@ -66,6 +69,7 @@ impl WindowId {
             WindowId::RadioBrowser => 300,
             WindowId::LibraryBrowser => 350,
             WindowId::SpotifyBrowser => 350,
+            WindowId::YouTubeBrowser => 350,
         }
     }
 
@@ -74,7 +78,8 @@ impl WindowId {
         match self {
             WindowId::Main | WindowId::Equalizer => false,
             WindowId::Playlist | WindowId::Settings | WindowId::RadioBrowser
-            | WindowId::LibraryBrowser | WindowId::SpotifyBrowser => true,
+            | WindowId::LibraryBrowser | WindowId::SpotifyBrowser
+            | WindowId::YouTubeBrowser => true,
         }
     }
 }

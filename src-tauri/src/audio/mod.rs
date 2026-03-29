@@ -24,3 +24,4 @@ pub mod resample;
 pub mod source;
 pub mod spotify;
 pub mod stream_reader;
+pub mod youtube;

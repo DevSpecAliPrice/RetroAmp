@@ -133,8 +133,9 @@ fn handle_media_event(
             if let Ok(mut pl) = playlist.lock() {
                 if let Some(track) = pl.next_track() {
                     let path = track.path.clone();
+                    let meta = track.to_source_metadata();
                     drop(pl);
-                    if let Err(e) = commands::play_path(engine, &path, None) {
+                    if let Err(e) = commands::play_path(engine, &path, None, Some(meta)) {
                         log::error!("media controls: next_track failed: {e}");
                     }
                 }
@@ -144,8 +145,9 @@ fn handle_media_event(
             if let Ok(mut pl) = playlist.lock() {
                 if let Some(track) = pl.previous_track() {
                     let path = track.path.clone();
+                    let meta = track.to_source_metadata();
                     drop(pl);
-                    if let Err(e) = commands::play_path(engine, &path, None) {
+                    if let Err(e) = commands::play_path(engine, &path, None, Some(meta)) {
                         log::error!("media controls: previous_track failed: {e}");
                     }
                 }

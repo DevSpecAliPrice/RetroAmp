@@ -232,6 +232,9 @@ pub struct UiConfig {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spotify_browser: Option<WindowLayoutEntry>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub youtube_browser: Option<WindowLayoutEntry>,
 }
 
 /// Saved layout for a single window.

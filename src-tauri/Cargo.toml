@@ -37,6 +37,7 @@ symphonia = { version = "0.5", features = [
     "wav",
     "pcm",
     "alac",
+    "mkv",
 ] }
 
 # Cross-platform audio output
@@ -68,6 +69,10 @@ percent-encoding = "2"
 souvlaki = { version = "0.8", default-features = false, features = ["use_zbus"] }
 librespot = { git = "https://github.com/librespot-org/librespot", default-features = false, features = ["native-tls"] }
 tokio = { version = "1", features = ["rt"] }
+rusty_ytdl = { version = "0.7", default-features = false }
+ytmapi-rs = { version = "0.3", features = ["reqwest"] }
+reqwest = { version = "0.13", default-features = false, features = ["cookies"] }
+chrono = { version = "0.4", default-features = false, features = ["now"] }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

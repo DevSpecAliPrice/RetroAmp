@@ -21,6 +21,8 @@ pub enum SourceType {
     Stream,
     /// A Spotify track (spotify:track:<id> URI).
     Spotify,
+    /// A YouTube track (youtube:<video_id>).
+    YouTube,
 }
 
 /// A single track in a playlist.
@@ -56,6 +58,8 @@ impl Track {
         let path = path.into();
         let source_type = if path.starts_with("spotify:track:") {
             SourceType::Spotify
+        } else if path.starts_with("youtube:") {
+            SourceType::YouTube
         } else if path.starts_with("http://") || path.starts_with("https://") {
             SourceType::Stream
         } else {
@@ -120,6 +124,25 @@ impl Track {
         let after_scheme = self.path.find("://").map(|i| &self.path[i + 3..])?;
         let host = after_scheme.split('/').next()?;
         Some(host.to_string())
+    }
+
+    /// Convert playlist track metadata into an `AudioSource`-level `TrackMetadata`.
+    /// Used to pre-populate metadata when creating sources for YouTube/Spotify
+    /// tracks that already have metadata from the browser UI.
+    pub fn to_source_metadata(&self) -> crate::audio::source::TrackMetadata {
+        crate::audio::source::TrackMetadata {
+            title: self.title.clone(),
+            artist: self.artist.clone(),
+            album: self.album.clone(),
+            duration: self.duration,
+            sample_rate: self.sample_rate.unwrap_or(44100),
+            channels: self.channels.unwrap_or(2),
+            bitrate: self.bitrate,
+            genre: self.genre.clone(),
+            year: self.year,
+            track_number: self.track_number,
+            cover_art: None,
+        }
     }
 
     /// Duration formatted as "M:SS" for the playlist display.

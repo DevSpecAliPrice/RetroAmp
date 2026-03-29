@@ -183,11 +183,13 @@ pub fn spotify_play_track(
     });
 
     pl.play_track(id);
-    let path = pl.current_track().map(|t| t.path.clone())
+    let track = pl.current_track()
         .ok_or("track not found after adding")?;
+    let path = track.path.clone();
+    let meta = track.to_source_metadata();
     drop(pl);
 
-    crate::commands::play_path(&engine, &path, Some(&spotify))?;
+    crate::commands::play_path(&engine, &path, Some(&spotify), Some(meta))?;
     Ok(())
 }
 

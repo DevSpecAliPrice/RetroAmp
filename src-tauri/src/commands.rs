@@ -15,7 +15,7 @@ use crate::audio::local::LocalFileSource;
 use crate::audio::buffer::BufferSource;
 use crate::audio::radio::RadioSource;
 use crate::audio::recorder::{RadioRecorder, RecorderStatus};
-use crate::audio::source::AudioSource;
+use crate::audio::source::{AudioSource, TrackMetadata};
 use crate::db::{Database, EqPresetEntry, SkinCatalogEntry};
 use crate::library;
 use crate::playlist::manager::{PlaylistManager, PlaylistState};
@@ -201,8 +201,9 @@ pub fn playlist_add_files(
     if was_empty && !ids.is_empty() {
         if let Some(track) = pl.play_index(0) {
             let path = track.path.clone();
+            let meta = track.to_source_metadata();
             drop(pl);
-            play_path(&engine, &path, None)?;
+            play_path(&engine, &path, None, Some(meta))?;
             return Ok(playlist.lock().map_err(|e| e.to_string())?.state());
         }
     }
@@ -230,7 +231,7 @@ pub fn play_file(
     // Play this track.
     pl.play_track(id);
     drop(pl); // Release lock before engine call.
-    play_path(&engine, &path, None)?;
+    play_path(&engine, &path, None, None)?;
     Ok(())
 }
 
@@ -256,11 +257,12 @@ pub fn playlist_play_index(
     let mut pl = playlist.lock().map_err(|e| e.to_string())?;
     let track = pl.play_index(index).ok_or("invalid index")?;
     let path = track.path.clone();
+    let meta = track.to_source_metadata();
     drop(pl);
     play_path_with_recorder(&engine, &path, Some(RecorderContext {
         recorder_state: Arc::clone(&*recorder_state),
         app_handle: app,
-    }), Some(&spotify))
+    }), Some(&spotify), Some(meta))
 }
 
 /// Advance to the next track.
@@ -276,11 +278,12 @@ pub fn next_track(
     match pl.next_track() {
         Some(track) => {
             let path = track.path.clone();
+            let meta = track.to_source_metadata();
             drop(pl);
             play_path_with_recorder(&engine, &path, Some(RecorderContext {
                 recorder_state: Arc::clone(&*recorder_state),
                 app_handle: app,
-            }), Some(&spotify))
+            }), Some(&spotify), Some(meta))
         }
         None => {
             drop(pl);
@@ -303,11 +306,12 @@ pub fn previous_track(
     match pl.previous_track() {
         Some(track) => {
             let path = track.path.clone();
+            let meta = track.to_source_metadata();
             drop(pl);
             play_path_with_recorder(&engine, &path, Some(RecorderContext {
                 recorder_state: Arc::clone(&*recorder_state),
                 app_handle: app,
-            }), Some(&spotify))
+            }), Some(&spotify), Some(meta))
         }
         None => Ok(()),
     }
@@ -489,8 +493,9 @@ pub fn playlist_load(
     if !ids.is_empty() {
         if let Some(track) = pl.play_index(0) {
             let track_path = track.path.clone();
+            let meta = track.to_source_metadata();
             drop(pl);
-            play_path(&engine, &track_path, None)?;
+            play_path(&engine, &track_path, None, Some(meta))?;
             return Ok(playlist.lock().map_err(|e| e.to_string())?.state());
         }
     }
@@ -575,6 +580,9 @@ pub fn save_window_layout(app: &AppHandle, states: &WindowStates) {
     }
     if is_visible("spotifybrowser") || app.get_webview_window("spotifybrowser").is_some() {
         cfg.ui.spotify_browser = Some(capture("spotifybrowser", is_visible("spotifybrowser"), true));
+    }
+    if is_visible("youtubebrowser") || app.get_webview_window("youtubebrowser").is_some() {
+        cfg.ui.youtube_browser = Some(capture("youtubebrowser", is_visible("youtubebrowser"), true));
     }
 
     let _ = cfg.save();
@@ -1023,8 +1031,9 @@ pub fn play_path(
     engine: &AudioEngine,
     path: &str,
     spotify_player: Option<&crate::audio::spotify::SpotifyPlayer>,
+    track_meta: Option<TrackMetadata>,
 ) -> Result<(), String> {
-    let source = create_source(path, None, spotify_player)?;
+    let source = create_source(path, None, spotify_player, track_meta)?;
     engine.play(source);
     Ok(())
 }
@@ -1035,8 +1044,9 @@ pub fn play_path_with_recorder(
     path: &str,
     recorder_ctx: Option<RecorderContext>,
     spotify_player: Option<&crate::audio::spotify::SpotifyPlayer>,
+    track_meta: Option<TrackMetadata>,
 ) -> Result<(), String> {
-    let source = create_source(path, recorder_ctx, spotify_player)?;
+    let source = create_source(path, recorder_ctx, spotify_player, track_meta)?;
     engine.play(source);
     Ok(())
 }
@@ -1074,16 +1084,42 @@ pub fn is_spotify_uri(s: &str) -> bool {
     s.starts_with("spotify:track:")
 }
 
+/// Check if a path is a YouTube URI.
+pub fn is_youtube_uri(s: &str) -> bool {
+    s.starts_with("youtube:")
+}
+
 /// Create an AudioSource from a path — dispatches to SpotifySource for
 /// spotify: URIs, RadioSource for HTTP URLs, LocalFileSource for local files.
 pub fn create_source(
     path: &str,
     recorder_ctx: Option<RecorderContext>,
     spotify_player: Option<&crate::audio::spotify::SpotifyPlayer>,
+    track_meta: Option<TrackMetadata>,
 ) -> Result<Box<dyn AudioSource>, String> {
     // Finalize any in-progress recording before switching sources.
     if let Some(ref ctx) = recorder_ctx {
         finalize_previous_recorder(&ctx.recorder_state);
+    }
+
+    if is_youtube_uri(path) {
+        let video_id = &path["youtube:".len()..];
+        let metadata = track_meta.unwrap_or(TrackMetadata {
+            title: None,
+            artist: None,
+            album: None,
+            duration: None,
+            sample_rate: 44100,
+            channels: 2,
+            bitrate: None,
+            genre: None,
+            year: None,
+            track_number: None,
+            cover_art: None,
+        });
+        return crate::audio::youtube::YouTubeSource::new(video_id, metadata)
+            .map(|s| Box::new(s) as Box<dyn AudioSource>)
+            .map_err(|e| e.to_string());
     }
 
     if is_spotify_uri(path) {
