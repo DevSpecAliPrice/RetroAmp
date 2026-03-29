@@ -789,6 +789,30 @@ Extracting audio does violate YouTube's Terms of Service, which is a civil contr
 | librespot / Spotify audio | Grey area (DRM circumvention) | Accept community-established risk; isolate as removable dependency |
 | YouTube audio extraction | Low risk (no DRM, strong precedent) | ToS violation only; well-established by yt-dlp, NewPipe, etc. |
 
+### Spotify Web API Restrictions (February 2026)
+
+Spotify made major API changes in February 2026 that affect Development Mode apps:
+
+- **Search limit reduced** from 50 to 10 results per page
+- **40 endpoints removed** including artist top tracks, new releases, browse categories, batch fetches
+- **Playlist endpoint renamed** from `/tracks` to `/items`; only returns content for owned/collaborative playlists
+- **Response fields removed** including `popularity`, `followers`, `available_markets`, `label`
+- **Development Mode limited to 5 users** (was 25), requires Premium account for app owner
+- **Extended Quota Mode requires** registered business entity, 250K+ MAU, live launched service
+
+RetroAmp currently operates in Development Mode. The 5-user limit is acceptable for development and personal use. YouTube Music (Phase 4b, planned) provides the unrestricted streaming path for general users.
+
+### Spotify Brand Guidelines
+
+Any integration displaying Spotify content must comply with Spotify's design guidelines (developer.spotify.com/documentation/design):
+
+- Spotify logo/icon required on screens showing Spotify data
+- Content must link back to the Spotify app
+- Artwork displayed unmodified; metadata presented as-is
+- Explicit content badges required
+- Spotify content must not be mixed alongside competing service content
+- App name must not include "Spotify" (but "for Spotify" suffix is permitted)
+
 ---
 
 ## Key References
