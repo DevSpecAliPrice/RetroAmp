@@ -137,7 +137,7 @@ impl LocalFileSource {
         }
 
         // Create the decoder.
-        let decoder = symphonia::default::get_codecs()
+        let decoder = crate::audio::get_codecs()
             .make(&codec_params, &DecoderOptions::default())
             .map_err(|e| {
                 AudioError::UnsupportedFormat(format!(

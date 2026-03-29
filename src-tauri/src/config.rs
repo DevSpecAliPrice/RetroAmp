@@ -39,6 +39,9 @@ pub struct AppConfig {
 
     #[serde(default)]
     pub spotify: SpotifyConfig,
+
+    #[serde(default)]
+    pub youtube: YouTubeConfig,
 }
 
 /// Skin-related preferences.
@@ -193,6 +196,42 @@ impl Default for SpotifyConfig {
             device_name: default_device_name(),
             connect_enabled: false,
             normalize_volume: false,
+        }
+    }
+}
+
+/// YouTube Music integration preferences.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct YouTubeConfig {
+    /// Audio quality preference. Controls the yt-dlp format selector:
+    /// - "low":    worst audio (~48 kbps)
+    /// - "medium": ~128 kbps (default)
+    /// - "high":   best audio (~256 kbps)
+    #[serde(default = "default_youtube_quality")]
+    pub quality: String,
+
+    /// Saved YouTube Music browser cookie for authenticated access.
+    /// When present, the API client uses this to access personal library,
+    /// liked songs, history, etc. Set to None for anonymous mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cookie: Option<String>,
+
+    /// Optional override for the yt-dlp binary path.
+    /// If unset, RetroAmp uses the managed binary or system PATH.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ytdlp_path: Option<String>,
+}
+
+fn default_youtube_quality() -> String {
+    "high".to_string()
+}
+
+impl Default for YouTubeConfig {
+    fn default() -> Self {
+        Self {
+            quality: default_youtube_quality(),
+            cookie: None,
+            ytdlp_path: None,
         }
     }
 }

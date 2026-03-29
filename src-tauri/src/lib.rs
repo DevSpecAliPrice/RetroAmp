@@ -272,10 +272,24 @@ pub fn run() {
                     }
                 });
             }
-            // Check for yt-dlp updates in the background (non-blocking).
-            // Downloads or updates the managed yt-dlp binary if needed.
-            tauri::async_runtime::spawn_blocking(|| {
-                crate::youtube::ytdlp::check_for_update();
+            // YouTube startup tasks (non-blocking):
+            // 1. Check for yt-dlp updates and download if needed
+            // 2. Restore authenticated YouTube Music session from saved cookie
+            tauri::async_runtime::spawn(async {
+                // yt-dlp update check (blocking I/O, run in spawn_blocking).
+                let _ = tauri::async_runtime::spawn_blocking(|| {
+                    crate::youtube::ytdlp::check_for_update();
+                }).await;
+
+                // Restore YouTube Music cookie session if saved.
+                let cfg = crate::config::AppConfig::load();
+                if let Some(ref cookie) = cfg.youtube.cookie {
+                    log::info!("[youtube] restoring authenticated session from saved cookie...");
+                    match crate::youtube::api::login_with_cookie(cookie).await {
+                        Ok(()) => log::info!("[youtube] authenticated session restored"),
+                        Err(e) => log::warn!("[youtube] cookie restore failed: {e}"),
+                    }
+                }
             });
 
             // Start OS media controls (MPRIS on Linux, SMTC on Windows,
@@ -774,6 +788,10 @@ pub fn run() {
             youtube::commands::youtube_get_album,
             youtube::commands::youtube_get_artist,
             youtube::commands::youtube_get_playlist,
+            youtube::commands::get_youtube_settings,
+            youtube::commands::set_youtube_settings,
+            youtube::commands::youtube_save_cookie,
+            youtube::commands::youtube_clear_cookie,
             youtube::commands::youtube_auth_status,
             youtube::commands::youtube_login,
             youtube::commands::youtube_logout,

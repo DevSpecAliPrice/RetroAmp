@@ -191,7 +191,7 @@ impl YouTubeSource {
             .map(|ch| ch.count() as u16)
             .unwrap_or(2);
 
-        let decoder = symphonia::default::get_codecs()
+        let decoder = crate::audio::get_codecs()
             .make(&codec_params, &DecoderOptions::default())
             .map_err(|e| {
                 AudioError::UnsupportedFormat(format!(
@@ -283,23 +283,28 @@ impl AudioSource for YouTubeSource {
                     match self.pipeline.decoder.decode(&packet) {
                         Ok(decoded) => {
                             let spec = *decoded.spec();
-                            let num_frames = decoded.capacity();
-                            if num_frames == 0 {
+                            let frames = decoded.frames();
+                            if frames == 0 {
                                 continue;
                             }
 
+                            // Allocate SampleBuffer based on capacity (avoids
+                            // reallocation), but track position using actual
+                            // decoded frames (important for Opus where capacity
+                            // is the max frame size, not the actual count).
+                            let capacity = decoded.capacity();
                             let sbuf = self.sample_buf.get_or_insert_with(|| {
-                                SampleBuffer::<f32>::new(num_frames as u64, spec)
+                                SampleBuffer::<f32>::new(capacity as u64, spec)
                             });
-                            if sbuf.capacity() < num_frames {
+                            if sbuf.capacity() < capacity {
                                 self.sample_buf =
-                                    Some(SampleBuffer::<f32>::new(num_frames as u64, spec));
+                                    Some(SampleBuffer::<f32>::new(capacity as u64, spec));
                             }
                             let sbuf = self.sample_buf.as_mut().unwrap();
                             sbuf.copy_interleaved_ref(decoded);
                             let samples = sbuf.samples().to_vec();
 
-                            self.position_samples += num_frames as u64;
+                            self.position_samples += frames as u64;
                             self.consecutive_empty = 0;
 
                             return Ok(Some(AudioBuffer {
@@ -388,14 +393,28 @@ fn make_silence(sample_rate: u32, channels: u16) -> AudioBuffer {
 /// yt-dlp handles all anti-bot measures (PO tokens, signature deobfuscation).
 ///
 /// Uses the yt-dlp binary manager to find or auto-download yt-dlp.
+/// Reads audio quality preference from config.
 fn resolve_with_ytdlp(url: &str) -> Result<(String, Option<f64>, String), String> {
-    let ytdlp = crate::youtube::ytdlp::ensure_available()?;
+    let cfg = crate::config::AppConfig::load();
+
+    // Use configured yt-dlp path override, or auto-detect/download.
+    let ytdlp = match &cfg.youtube.ytdlp_path {
+        Some(p) if !p.is_empty() => std::path::PathBuf::from(p),
+        _ => crate::youtube::ytdlp::ensure_available()?,
+    };
+
+    // Map quality setting to yt-dlp format selector.
+    // With Opus support (via libopus), we can now prefer WebM/Opus which
+    // offers better quality at the same bitrate. Falls back to M4A/AAC.
+    let format_selector = match cfg.youtube.quality.as_str() {
+        "low" => "worstaudio",
+        _ => "bestaudio", // high (default) — gets Opus ~160kbps or AAC ~256kbps
+    };
 
     // Get both the stream URL and metadata in a single call via JSON dump.
-    // This is faster than two separate yt-dlp invocations.
     let output = Command::new(&ytdlp)
         .args([
-            "-f", "bestaudio[ext=m4a]/bestaudio",
+            "-f", format_selector,
             "-j", // Print JSON info (includes the URL)
             "--no-warnings",
             "--no-playlist",

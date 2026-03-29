@@ -5,7 +5,7 @@ import type { SkinData } from "../skin/parser";
 import SkinBrowser from "./SkinBrowser";
 import "./settings.css";
 
-type Tab = "skins" | "shortcuts" | "library" | "spotify" | "general";
+type Tab = "skins" | "shortcuts" | "library" | "spotify" | "youtube" | "general";
 
 const SHORTCUTS: { section: string; bindings: [string, string][] }[] = [
   {
@@ -364,6 +364,163 @@ function SpotifyTab({ colors }: { colors: ColorProps }) {
   );
 }
 
+interface YouTubeSettingsData {
+  quality: string;
+  has_cookie: boolean;
+  ytdlp_path: string | null;
+  ytdlp_status: string;
+}
+
+interface YouTubeAuthStatus {
+  authenticated: boolean;
+}
+
+function YouTubeTab({ colors }: { colors: ColorProps }) {
+  const [settings, setSettings] = useState<YouTubeSettingsData>({
+    quality: "high", has_cookie: false, ytdlp_path: null, ytdlp_status: "Checking...",
+  });
+  const [authStatus, setAuthStatus] = useState<YouTubeAuthStatus>({ authenticated: false });
+  const [cookieInput, setCookieInput] = useState("");
+  const [savingCookie, setSavingCookie] = useState(false);
+  const [statusMsg, setStatusMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    invoke<YouTubeSettingsData>("get_youtube_settings").then(setSettings).catch(() => {});
+    invoke<YouTubeAuthStatus>("youtube_auth_status").then(setAuthStatus).catch(() => {});
+  }, []);
+
+  const updateQuality = useCallback(async (quality: string) => {
+    setSettings((prev) => ({ ...prev, quality }));
+    try {
+      await invoke("set_youtube_settings", { quality, ytdlpPath: settings.ytdlp_path });
+    } catch (e) {
+      console.error("Failed to save YouTube settings:", e);
+    }
+  }, [settings.ytdlp_path]);
+
+  const saveCookie = useCallback(async () => {
+    if (!cookieInput.trim()) return;
+    setSavingCookie(true);
+    setStatusMsg(null);
+    try {
+      const result = await invoke<YouTubeAuthStatus>("youtube_save_cookie", { cookie: cookieInput.trim() });
+      setAuthStatus(result);
+      setSettings((prev) => ({ ...prev, has_cookie: true }));
+      setCookieInput("");
+      setStatusMsg("Logged in successfully!");
+    } catch (e) {
+      setStatusMsg(`Login failed: ${e}`);
+    } finally {
+      setSavingCookie(false);
+    }
+  }, [cookieInput]);
+
+  const clearCookie = useCallback(async () => {
+    try {
+      const result = await invoke<YouTubeAuthStatus>("youtube_clear_cookie");
+      setAuthStatus(result);
+      setSettings((prev) => ({ ...prev, has_cookie: false }));
+      setStatusMsg("Logged out");
+    } catch (e) {
+      setStatusMsg(`Logout failed: ${e}`);
+    }
+  }, []);
+
+  return (
+    <div className="shortcuts-tab">
+      {/* Audio Quality */}
+      <div className="shortcuts-group">
+        <div className="shortcuts-group-title" style={{ color: colors.current }}>Audio Quality</div>
+        <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
+          Controls the bitrate of audio streamed from YouTube Music.
+        </div>
+        {([
+          ["high", "High (best available — Opus ~160 kbps or AAC ~256 kbps)"],
+          ["low", "Low (reduced bandwidth, ~48 kbps)"],
+        ] as const).map(([value, label]) => (
+          <label key={value} className="shortcuts-row" style={{ cursor: "pointer", gap: 8 }}>
+            <input type="radio" name="yt-quality" checked={settings.quality === value || (settings.quality === "medium" && value === "high")}
+              onChange={() => updateQuality(value)}
+              style={{ accentColor: colors.current }} />
+            <span style={{ fontSize: 13 }}>{label}</span>
+          </label>
+        ))}
+      </div>
+
+      {/* YouTube Music Account */}
+      <div className="shortcuts-group">
+        <div className="shortcuts-group-title" style={{ color: colors.current }}>YouTube Music Account</div>
+        {authStatus.authenticated ? (
+          <>
+            <div style={{ fontSize: 12, marginBottom: 8 }}>
+              <span style={{ color: colors.current }}>Logged in</span>
+              <span style={{ opacity: 0.7 }}> — personal library, liked songs, and history are available in the browser.</span>
+            </div>
+            <div onClick={clearCookie}
+              style={{ display: "inline-block", padding: "4px 12px", background: colors.selectedbg, color: colors.current, cursor: "pointer", fontSize: 12 }}>
+              Log Out
+            </div>
+          </>
+        ) : (
+          <>
+            <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
+              YouTube Music works without login for search and browsing.
+              To access your personal library, liked songs, and playlists,
+              paste your browser cookies below.
+            </div>
+            <div style={{ fontSize: 12, opacity: 0.6, marginBottom: 8 }}>
+              How to get your cookie: Open music.youtube.com in your browser while logged in,
+              open Developer Tools (F12) &rarr; Network tab &rarr; refresh the page &rarr;
+              click the first request &rarr; copy the <code style={{ color: colors.current }}>Cookie</code> header value.
+            </div>
+            <textarea
+              value={cookieInput}
+              onChange={(e) => setCookieInput(e.target.value)}
+              placeholder="Paste cookie header value here..."
+              rows={3}
+              style={{
+                width: "100%", boxSizing: "border-box",
+                background: "rgba(255,255,255,0.08)", border: `1px solid ${colors.selectedbg}`,
+                color: colors.normal, padding: "4px 6px", fontSize: 11,
+                fontFamily: "monospace", resize: "vertical",
+              }}
+            />
+            <div style={{ marginTop: 8 }}>
+              <div onClick={!savingCookie && cookieInput.trim() ? saveCookie : undefined}
+                style={{
+                  display: "inline-block", padding: "4px 12px",
+                  background: colors.selectedbg, color: colors.current,
+                  cursor: !savingCookie && cookieInput.trim() ? "pointer" : "default",
+                  fontSize: 12, opacity: !savingCookie && cookieInput.trim() ? 1 : 0.3,
+                }}>
+                {savingCookie ? "Validating..." : "Save & Log In"}
+              </div>
+            </div>
+          </>
+        )}
+        {statusMsg && (
+          <div style={{ fontSize: 11, marginTop: 8, color: statusMsg.startsWith("Login failed") ? "#ff6666" : colors.current }}>
+            {statusMsg}
+          </div>
+        )}
+      </div>
+
+      {/* yt-dlp Status */}
+      <div className="shortcuts-group">
+        <div className="shortcuts-group-title" style={{ color: colors.current }}>yt-dlp</div>
+        <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
+          RetroAmp uses yt-dlp to extract audio streams from YouTube. It is downloaded
+          automatically if not found on your system.
+        </div>
+        <div className="shortcuts-row" style={{ gap: 8 }}>
+          <span style={{ fontSize: 12, opacity: 0.7 }}>Status</span>
+          <span style={{ fontSize: 12, color: colors.current }}>{settings.ytdlp_status}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 interface Props {
   skin: SkinData | null;
   scale: number;
@@ -487,6 +644,16 @@ export default function SettingsWindow({ skin, scale }: Props) {
               Spotify
             </button>
             <button
+              className={`settings-tab ${activeTab === "youtube" ? "active" : ""}`}
+              style={{
+                color: activeTab === "youtube" ? ps.current : ps.normal,
+                borderBottomColor: activeTab === "youtube" ? ps.current : "transparent",
+              }}
+              onClick={() => setActiveTab("youtube")}
+            >
+              YouTube
+            </button>
+            <button
               className={`settings-tab ${activeTab === "general" ? "active" : ""}`}
               style={{
                 color: activeTab === "general" ? ps.current : ps.normal,
@@ -502,6 +669,7 @@ export default function SettingsWindow({ skin, scale }: Props) {
             {activeTab === "shortcuts" && <ShortcutsTab colors={ps} />}
             {activeTab === "library" && <LibraryTab colors={ps} />}
             {activeTab === "spotify" && <SpotifyTab colors={ps} />}
+            {activeTab === "youtube" && <YouTubeTab colors={ps} />}
             {activeTab === "general" && <GeneralTab colors={ps} />}
           </div>
         </div>

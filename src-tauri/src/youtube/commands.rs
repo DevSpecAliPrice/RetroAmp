@@ -142,6 +142,75 @@ pub async fn youtube_get_playlist(browse_id: String) -> Result<YtPlaylistDetail,
 }
 
 // ---------------------------------------------------------------------------
+// Settings commands
+// ---------------------------------------------------------------------------
+
+/// YouTube settings returned to and accepted from the frontend.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct YouTubeSettings {
+    pub quality: String,
+    pub has_cookie: bool,
+    pub ytdlp_path: Option<String>,
+    pub ytdlp_status: String,
+}
+
+/// Get the current YouTube settings.
+#[tauri::command]
+pub fn get_youtube_settings() -> YouTubeSettings {
+    let cfg = crate::config::AppConfig::load();
+    let ytdlp_path = crate::youtube::ytdlp::find();
+    let ytdlp_status = match &ytdlp_path {
+        Some(p) if p.to_str() == Some("yt-dlp") => "System PATH".to_string(),
+        Some(p) => format!("Installed: {}", p.display()),
+        None => "Not installed".to_string(),
+    };
+    YouTubeSettings {
+        quality: cfg.youtube.quality,
+        has_cookie: cfg.youtube.cookie.is_some(),
+        ytdlp_path: ytdlp_path.map(|p| p.to_string_lossy().to_string()),
+        ytdlp_status,
+    }
+}
+
+/// Update YouTube settings (quality, yt-dlp path override).
+#[tauri::command]
+pub fn set_youtube_settings(quality: String, ytdlp_path: Option<String>) -> Result<(), String> {
+    let mut cfg = crate::config::AppConfig::load();
+    cfg.youtube.quality = quality;
+    cfg.youtube.ytdlp_path = ytdlp_path;
+    cfg.save()
+}
+
+/// Save a YouTube Music cookie for authenticated access.
+/// Also immediately reinitializes the API client with the new cookie.
+#[tauri::command]
+pub async fn youtube_save_cookie(cookie: String) -> Result<YouTubeAuthStatus, String> {
+    // Try to login first to validate the cookie.
+    crate::youtube::api::login_with_cookie(&cookie).await?;
+
+    // If login succeeded, persist the cookie.
+    let mut cfg = crate::config::AppConfig::load();
+    cfg.youtube.cookie = Some(cookie);
+    cfg.save().map_err(|e| format!("Failed to save cookie: {e}"))?;
+
+    log::info!("[youtube] cookie saved to config");
+    Ok(YouTubeAuthStatus { authenticated: true })
+}
+
+/// Clear the saved YouTube Music cookie and revert to anonymous mode.
+#[tauri::command]
+pub async fn youtube_clear_cookie() -> Result<YouTubeAuthStatus, String> {
+    crate::youtube::api::logout().await?;
+
+    let mut cfg = crate::config::AppConfig::load();
+    cfg.youtube.cookie = None;
+    cfg.save().map_err(|e| format!("Failed to save config: {e}"))?;
+
+    log::info!("[youtube] cookie cleared from config");
+    Ok(YouTubeAuthStatus { authenticated: false })
+}
+
+// ---------------------------------------------------------------------------
 // Auth commands (optional — for accessing personal library)
 // ---------------------------------------------------------------------------
 

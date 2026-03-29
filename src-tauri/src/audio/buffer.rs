@@ -321,7 +321,7 @@ fn build_adts_pipeline(
     };
     params.with_channels(ch_layout).with_extra_data(asc);
 
-    let decoder = symphonia::default::get_codecs()
+    let decoder = crate::audio::get_codecs()
         .make(&params, &DecoderOptions::default())
         .map_err(|e| {
             AudioError::UnsupportedFormat(format!(
@@ -390,7 +390,7 @@ fn build_symphonia_pipeline(
         .map(|ch| ch.count() as u16)
         .unwrap_or(2);
 
-    let decoder = symphonia::default::get_codecs()
+    let decoder = crate::audio::get_codecs()
         .make(&codec_params, &DecoderOptions::default())
         .map_err(|e| {
             AudioError::UnsupportedFormat(format!(

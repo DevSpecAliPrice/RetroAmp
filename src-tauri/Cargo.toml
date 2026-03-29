@@ -73,6 +73,7 @@ rusty_ytdl = { version = "0.7", default-features = false }
 ytmapi-rs = { version = "0.3", features = ["reqwest"] }
 reqwest = { version = "0.13", default-features = false, features = ["cookies"] }
 chrono = { version = "0.4", default-features = false, features = ["now"] }
+audiopus = "0.2"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
