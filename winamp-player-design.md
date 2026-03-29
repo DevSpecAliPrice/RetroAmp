@@ -543,6 +543,14 @@ These are genuinely different use cases, not redundant implementations:
 
 A user with Spotify Premium gets native integration with their existing library, playlists, and high-quality audio. A user without Spotify — or who wants access to content not on Spotify (live recordings, remixes, niche uploads) — uses YouTube Music. Both produce raw PCM that flows through the same audio pipeline.
 
+### Future: Subsonic/Navidrome (Self-Hosted Music Servers)
+
+The Subsonic API is an open protocol supported by self-hosted music servers like Navidrome, Airsonic, and Jellyfin. Users who run their own music server on a home network could connect RetroAmp to it — streaming their personal library over the network with full quality, no legal issues, and no third-party service dependencies.
+
+This appeals to the same audience that would use a Winamp-inspired player: people who care about their music collection and want control over their setup. The integration would be a new `AudioSource` implementation that fetches audio via the Subsonic REST API, architecturally similar to internet radio (HTTP stream → Symphonia decode → pipeline). A dedicated browser window would handle library navigation, search, and playlist management against the Subsonic server.
+
+Not planned for the initial build — this is a future goal once the core streaming services are stable.
+
 ---
 
 ## Recommended Build Sequence

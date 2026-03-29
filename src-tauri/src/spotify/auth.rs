@@ -36,14 +36,11 @@ pub struct LoginResult {
     pub expires_at: std::time::Instant,
 }
 
-/// RetroAmp's registered Spotify Developer App client ID.
-/// This is a public identifier (not a secret) — safe to embed in source code.
-/// OAuth2 PKCE doesn't use the client_secret, so there's no security concern.
-const RETROAMP_CLIENT_ID: &str = "f0ec7821b0e14d138902b31c8acdf832";
-
-/// Get the default Spotify client ID for RetroAmp.
+/// Get the default Spotify client ID.
+/// Returns librespot's built-in ID as a fallback, but this will be rate-limited
+/// for Web API calls. Users should provide their own client ID via Settings.
 pub fn default_client_id() -> String {
-    RETROAMP_CLIENT_ID.to_string()
+    librespot::core::config::SessionConfig::default().client_id
 }
 
 /// Run the OAuth2 PKCE browser flow. Blocking — waits for the user to

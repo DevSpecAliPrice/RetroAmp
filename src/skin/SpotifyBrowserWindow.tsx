@@ -511,22 +511,17 @@ export default function SpotifyBrowserWindow({ skin, scale }: Props) {
         <div style={{ padding: 16 * s, textAlign: "center" }}>
           <div style={{ fontSize: Math.round(10 * s), marginBottom: 8 * s }}>Not connected to Spotify</div>
           <div style={{ fontSize: Math.round(8 * s), opacity: 0.6, marginBottom: 12 * s }}>
-            Connect your Spotify Premium account to browse and stream music.
+            Spotify requires a Developer App for access. See SPOTIFY_SETUP.md for instructions, then go to Preferences &gt; Spotify to enter your Client ID and log in.
           </div>
           <div
-            onClick={async () => {
-              try {
-                const result = await invoke<SpotifyStatus>("spotify_login");
-                setConnected(result.connected);
-              } catch (e) { console.error("Login failed:", e); }
-            }}
+            onClick={() => invoke("open_settings").catch(console.error)}
             style={{
               display: "inline-block", padding: `${4 * s}px ${12 * s}px`,
               background: ps.selectedbg, color: ps.current, cursor: "pointer",
               fontSize: Math.round(9 * s),
             }}
           >
-            Log In with Spotify
+            Open Preferences
           </div>
         </div>
       );

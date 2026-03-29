@@ -245,8 +245,34 @@ function SpotifyTab({ colors }: { colors: ColorProps }) {
     }
   }, [settings]);
 
+  const hasClientId = !!(settings.client_id && settings.client_id.trim());
+
   return (
     <div className="shortcuts-tab">
+      {/* Client ID — required setup */}
+      <div className="shortcuts-group">
+        <div className="shortcuts-group-title" style={{ color: colors.current }}>Setup</div>
+        <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
+          Spotify requires a Developer App for third-party access.
+          See the <span style={{ color: colors.current }}>SPOTIFY_SETUP.md</span> guide in the docs folder for instructions.
+        </div>
+        <div className="shortcuts-row" style={{ gap: 8 }}>
+          <span style={{ fontSize: 12, opacity: 0.7, flexShrink: 0 }}>Client ID</span>
+          <input type="text" value={settings.client_id ?? ""}
+            onChange={(e) => updateSetting("client_id", e.target.value || null)}
+            placeholder="Paste your Client ID here"
+            style={{
+              flex: 1, background: "rgba(255,255,255,0.08)", border: `1px solid ${hasClientId ? colors.selectedbg : "#662222"}`,
+              color: colors.normal, padding: "2px 6px", fontSize: 12, fontFamily: "inherit",
+            }} />
+        </div>
+        {!hasClientId && (
+          <div style={{ fontSize: 11, color: "#ff6666", marginTop: 4 }}>
+            A Client ID is required to use Spotify. See the setup guide for details.
+          </div>
+        )}
+      </div>
+
       {/* Account section */}
       <div className="shortcuts-group">
         <div className="shortcuts-group-title" style={{ color: colors.current }}>Account</div>
@@ -272,10 +298,12 @@ function SpotifyTab({ colors }: { colors: ColorProps }) {
         ) : (
           <>
             <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
-              Connect your Spotify Premium account to stream music through RetroAmp.
+              {hasClientId
+                ? "Connect your Spotify Premium account to stream music through RetroAmp."
+                : "Enter a Client ID above to enable Spotify login."}
             </div>
-            <div onClick={loggingIn ? undefined : login}
-              style={{ display: "inline-block", padding: "4px 12px", background: colors.selectedbg, color: colors.current, cursor: loggingIn ? "wait" : "pointer", fontSize: 12, opacity: loggingIn ? 0.5 : 1 }}>
+            <div onClick={hasClientId && !loggingIn ? login : undefined}
+              style={{ display: "inline-block", padding: "4px 12px", background: colors.selectedbg, color: colors.current, cursor: hasClientId && !loggingIn ? "pointer" : "default", fontSize: 12, opacity: hasClientId && !loggingIn ? 1 : 0.3 }}>
               {loggingIn ? "Waiting for browser..." : "Log In with Spotify"}
             </div>
           </>
@@ -332,24 +360,6 @@ function SpotifyTab({ colors }: { colors: ColorProps }) {
         </label>
       </div>
 
-      {/* Advanced — client ID override */}
-      <div className="shortcuts-group">
-        <div className="shortcuts-group-title" style={{ color: colors.current, opacity: 0.6 }}>Advanced</div>
-        <div style={{ fontSize: 12, opacity: 0.5, marginBottom: 8 }}>
-          Override the Spotify app Client ID. Leave blank to use the default.
-        </div>
-        <div className="shortcuts-row" style={{ gap: 8 }}>
-          <span style={{ fontSize: 12, opacity: 0.5, flexShrink: 0 }}>Client ID</span>
-          <input type="text" value={settings.client_id ?? ""}
-            onChange={(e) => updateSetting("client_id", e.target.value || null)}
-            placeholder="(using default)"
-            style={{
-              flex: 1, background: "rgba(255,255,255,0.05)", border: `1px solid ${colors.selectedbg}44`,
-              color: colors.normal, padding: "2px 6px", fontSize: 11, fontFamily: "inherit",
-              opacity: 0.7,
-            }} />
-        </div>
-      </div>
     </div>
   );
 }
