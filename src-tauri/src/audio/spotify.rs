@@ -216,8 +216,6 @@ pub struct SpotifyPlayer {
     /// A connected librespot Session for audio playback. Created during login
     /// or auto-reconnect (where Tokio is available), reused for all tracks.
     playback_session: Mutex<Option<Session>>,
-    /// The currently active librespot Player (one per track).
-    player: Mutex<Option<Arc<Player>>>,
     /// OAuth token for authentication and Web API requests.
     api_token: Mutex<Option<StoredToken>>,
     /// Username from the last successful login (cached for display).
@@ -240,7 +238,6 @@ impl SpotifyPlayer {
     pub fn new(cache_dir: Option<PathBuf>) -> Self {
         Self {
             playback_session: Mutex::new(None),
-            player: Mutex::new(None),
             api_token: Mutex::new(None),
             username: Mutex::new(None),
             account_type: Mutex::new(None),
@@ -317,7 +314,6 @@ impl SpotifyPlayer {
 
     /// Disconnect from Spotify. Clears the token and cached credentials.
     pub fn disconnect(&self) -> Result<(), String> {
-        if let Ok(mut g) = self.player.lock() { *g = None; }
         if let Ok(mut g) = self.playback_session.lock() { *g = None; }
         if let Ok(mut g) = self.api_token.lock() { *g = None; }
         if let Ok(mut g) = self.username.lock() { *g = None; }
@@ -332,10 +328,6 @@ impl SpotifyPlayer {
     /// Load a Spotify track and return an AudioSource that produces its audio.
     /// Uses the pre-connected playback session (created during login).
     pub fn load_track(&self, track_uri: &str) -> Result<Box<dyn AudioSource>, String> {
-        // Drop the previous Player first — it holds a Sink that writes to the
-        // old ring buffer, and would keep running in the background otherwise.
-        if let Ok(mut g) = self.player.lock() { *g = None; }
-
         let session = self.playback_session()
             .ok_or("Spotify playback session not available — please log in again")?;
 
@@ -443,32 +435,22 @@ impl SpotifyPlayer {
         // Tell librespot to load and start playing the track.
         player.load(uri, true, 0);
 
-        // Store the player reference and also pass it to SpotifySource so the
-        // Player is dropped when the engine drops the source (stops playback).
-        let player_clone = Arc::clone(&player);
-        if let Ok(mut guard) = self.player.lock() {
-            *guard = Some(player);
-        }
-
         // Return the AudioSource that reads from the consumer side.
+        // SpotifySource is the SOLE owner of the Player — when the engine
+        // drops the source (on stop or source switch), the Player is dropped
+        // and librespot stops decoding/writing to the ring buffer.
         Ok(Box::new(SpotifySource {
             consumer,
             metadata,
             position_ms,
             _duration_ms: duration_ms,
             sink_active,
-            _player: player_clone,
+            _player: player,
             state: SourceState::Ready,
             consecutive_empty: 0,
         }))
     }
 
-    /// Seek the current Spotify track to the given position.
-    pub fn seek(&self, position_ms: u32) {
-        if let Ok(guard) = self.player.lock() {
-            if let Some(ref player) = *guard {
-                player.seek(position_ms);
-            }
-        }
-    }
+    // Note: Seek is not supported for Spotify tracks — the Player is owned
+    // exclusively by SpotifySource and dropped when the engine stops.
 }
