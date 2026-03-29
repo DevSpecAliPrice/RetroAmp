@@ -22,7 +22,10 @@ pub fn youtube_play_track(
     artist: String,
     album: String,
     duration_ms: u64,
+    thumbnail_url: Option<String>,
 ) -> Result<(), String> {
+    let cover_art = thumbnail_url.as_deref().and_then(download_thumbnail);
+
     let uri = format!("youtube:{video_id}");
     let mut pl = playlist.lock().map_err(|e| e.to_string())?;
     let id = pl.add_track(&uri);
@@ -40,7 +43,7 @@ pub fn youtube_play_track(
             genre: None,
             year: None,
             track_number: None,
-            cover_art: None,
+            cover_art,
         },
     );
 
@@ -65,7 +68,10 @@ pub fn youtube_add_to_playlist(
     artist: String,
     album: String,
     duration_ms: u64,
+    thumbnail_url: Option<String>,
 ) -> Result<(), String> {
+    let cover_art = thumbnail_url.as_deref().and_then(download_thumbnail);
+
     let uri = format!("youtube:{video_id}");
     let mut pl = playlist.lock().map_err(|e| e.to_string())?;
     let id = pl.add_track(&uri);
@@ -82,10 +88,93 @@ pub fn youtube_add_to_playlist(
             genre: None,
             year: None,
             track_number: None,
-            cover_art: None,
+            cover_art,
         },
     );
     Ok(())
+}
+
+/// Add multiple YouTube tracks to the playlist at once.
+/// If `play_first` is true, the first track is played immediately.
+#[tauri::command]
+pub fn youtube_add_tracks(
+    engine: State<'_, Arc<crate::audio::engine::AudioEngine>>,
+    playlist: State<'_, Arc<std::sync::Mutex<crate::playlist::manager::PlaylistManager>>>,
+    tracks: Vec<YtTrackInput>,
+    play_first: bool,
+) -> Result<(), String> {
+    let mut pl = playlist.lock().map_err(|e| e.to_string())?;
+
+    let mut first_path: Option<String> = None;
+    let mut first_meta: Option<crate::audio::source::TrackMetadata> = None;
+
+    for (i, t) in tracks.iter().enumerate() {
+        let uri = format!("youtube:{}", t.video_id);
+        let id = pl.add_track(&uri);
+        let meta = crate::audio::source::TrackMetadata {
+            title: Some(t.title.clone()),
+            artist: Some(t.artist.clone()),
+            album: Some(t.album.clone()),
+            duration: Some(std::time::Duration::from_millis(t.duration_ms)),
+            sample_rate: 44100,
+            channels: 2,
+            bitrate: None,
+            genre: None,
+            year: None,
+            track_number: None,
+            cover_art: if i == 0 { t.thumbnail_url.as_deref().and_then(download_thumbnail) } else { None },
+        };
+        pl.update_metadata(id, &meta);
+
+        if i == 0 && play_first {
+            pl.play_track(id);
+            first_path = Some(uri);
+            first_meta = Some(meta);
+        }
+    }
+
+    if let (Some(path), Some(meta)) = (first_path, first_meta) {
+        drop(pl);
+        crate::commands::play_path(&engine, &path, None, Some(meta))?;
+    }
+
+    Ok(())
+}
+
+/// Input type for bulk track addition.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct YtTrackInput {
+    pub video_id: String,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub duration_ms: u64,
+    pub thumbnail_url: Option<String>,
+}
+
+/// Download a thumbnail image and return its bytes.
+/// Returns None on any failure (non-blocking to caller).
+fn download_thumbnail(url: &str) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let response = ureq::get(url)
+        .header("User-Agent", "RetroAmp/0.1")
+        .config()
+        .timeout_connect(Some(std::time::Duration::from_secs(5)))
+        .timeout_recv_response(Some(std::time::Duration::from_secs(5)))
+        .build()
+        .call()
+        .ok()?;
+    let mut bytes = Vec::new();
+    response
+        .into_body()
+        .into_reader()
+        .take(512 * 1024) // Max 512KB
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    Some(bytes)
 }
 
 // ---------------------------------------------------------------------------
@@ -142,6 +231,28 @@ pub async fn youtube_get_playlist(browse_id: String) -> Result<YtPlaylistDetail,
 }
 
 // ---------------------------------------------------------------------------
+// Library commands (authenticated only)
+// ---------------------------------------------------------------------------
+
+/// Get the user's liked songs.
+#[tauri::command]
+pub async fn youtube_get_library_songs() -> Result<Vec<YtTrack>, String> {
+    crate::youtube::api::get_library_songs().await
+}
+
+/// Get the user's playlists.
+#[tauri::command]
+pub async fn youtube_get_library_playlists() -> Result<Vec<YtPlaylist>, String> {
+    crate::youtube::api::get_library_playlists().await
+}
+
+/// Get the user's listening history.
+#[tauri::command]
+pub async fn youtube_get_history() -> Result<Vec<YtTrack>, String> {
+    crate::youtube::api::get_history().await
+}
+
+// ---------------------------------------------------------------------------
 // Settings commands
 // ---------------------------------------------------------------------------
 
@@ -150,6 +261,7 @@ pub async fn youtube_get_playlist(browse_id: String) -> Result<YtPlaylistDetail,
 pub struct YouTubeSettings {
     pub quality: String,
     pub has_cookie: bool,
+    pub auth_user: u32,
     pub ytdlp_path: Option<String>,
     pub ytdlp_status: String,
 }
@@ -167,35 +279,69 @@ pub fn get_youtube_settings() -> YouTubeSettings {
     YouTubeSettings {
         quality: cfg.youtube.quality,
         has_cookie: cfg.youtube.cookie.is_some(),
+        auth_user: cfg.youtube.auth_user.unwrap_or(0),
         ytdlp_path: ytdlp_path.map(|p| p.to_string_lossy().to_string()),
         ytdlp_status,
     }
 }
 
-/// Update YouTube settings (quality, yt-dlp path override).
+/// Update YouTube settings.
 #[tauri::command]
-pub fn set_youtube_settings(quality: String, ytdlp_path: Option<String>) -> Result<(), String> {
+pub fn set_youtube_settings(quality: String, auth_user: u32, ytdlp_path: Option<String>) -> Result<(), String> {
     let mut cfg = crate::config::AppConfig::load();
     cfg.youtube.quality = quality;
+    cfg.youtube.auth_user = if auth_user == 0 { None } else { Some(auth_user) };
     cfg.youtube.ytdlp_path = ytdlp_path;
     cfg.save()
 }
 
 /// Save a YouTube Music cookie for authenticated access.
-/// Also immediately reinitializes the API client with the new cookie.
+/// Also fetches the DATASYNC_ID for channel identification and
+/// reinitializes the API client.
 #[tauri::command]
 pub async fn youtube_save_cookie(cookie: String) -> Result<YouTubeAuthStatus, String> {
     // Try to login first to validate the cookie.
     crate::youtube::api::login_with_cookie(&cookie).await?;
 
-    // If login succeeded, persist the cookie.
+    // Fetch DATASYNC_ID from music.youtube.com for channel identification.
+    // This is needed for library access on accounts with Brand Accounts.
+    let datasync_id = fetch_datasync_id(&cookie);
+
+    // Persist cookie and DATASYNC_ID.
     let mut cfg = crate::config::AppConfig::load();
     cfg.youtube.cookie = Some(cookie);
+    cfg.youtube.datasync_id = datasync_id.clone();
     cfg.save().map_err(|e| format!("Failed to save cookie: {e}"))?;
 
-    log::info!("[youtube] cookie saved to config");
+    log::info!("[youtube] cookie saved, datasync_id={datasync_id:?}");
     Ok(YouTubeAuthStatus { authenticated: true })
 }
+
+/// Fetch DATASYNC_ID from music.youtube.com page using the user's cookie.
+fn fetch_datasync_id(cookie: &str) -> Option<String> {
+    let response = ureq::get("https://music.youtube.com")
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:88.0) Gecko/20100101 Firefox/88.0")
+        .header("Cookie", cookie)
+        .call()
+        .ok()?;
+
+    let body = response.into_body().read_to_string().ok()?;
+
+    // Extract DATASYNC_ID from ytcfg or page content.
+    let dsid = body
+        .split_once("\"DATASYNC_ID\":\"")
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map(|(val, _)| val.to_string())?;
+
+    if dsid.is_empty() {
+        return None;
+    }
+
+    log::info!("[youtube] extracted DATASYNC_ID: {dsid}");
+    Some(dsid)
+}
+
+use std::io::Read as _;
 
 /// Clear the saved YouTube Music cookie and revert to anonymous mode.
 #[tauri::command]

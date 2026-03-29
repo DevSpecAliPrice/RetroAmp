@@ -216,6 +216,17 @@ pub struct YouTubeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cookie: Option<String>,
 
+    /// Google account index for multi-account users (X-Goog-AuthUser header).
+    /// 0 = first account (default), 1 = second, etc.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_user: Option<u32>,
+
+    /// DATASYNC_ID extracted from music.youtube.com during cookie login.
+    /// The first part (before ||) is sent as X-Goog-PageId to identify
+    /// the correct YouTube channel/profile for library access.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub datasync_id: Option<String>,
+
     /// Optional override for the yt-dlp binary path.
     /// If unset, RetroAmp uses the managed binary or system PATH.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -231,6 +242,8 @@ impl Default for YouTubeConfig {
         Self {
             quality: default_youtube_quality(),
             cookie: None,
+            auth_user: None,
+            datasync_id: None,
             ytdlp_path: None,
         }
     }

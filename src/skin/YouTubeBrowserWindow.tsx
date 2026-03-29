@@ -89,7 +89,21 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
     backgroundSize: dir === "repeat-x" ? "auto 100%" : "100% auto",
   });
 
-  // --- Navigation state ---
+  // --- Auth state ---
+  const [authenticated, setAuthenticated] = useState(false);
+  useEffect(() => {
+    invoke<{ authenticated: boolean }>("youtube_auth_status")
+      .then((s) => setAuthenticated(s.authenticated)).catch(() => {});
+    // Re-check on focus (catches login from Settings window).
+    const onFocus = () => invoke<{ authenticated: boolean }>("youtube_auth_status")
+      .then((s) => setAuthenticated(s.authenticated)).catch(() => {});
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, []);
+
+  // --- Tab & navigation state ---
+  type Tab = "search" | "library";
+  const [tab, setTab] = useState<Tab>("search");
   const [detailStack, setDetailStack] = useState<DetailView[]>([]);
   const currentDetail = detailStack.length > 0 ? detailStack[detailStack.length - 1] : null;
 
@@ -153,6 +167,36 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
     }
   }, [currentDetail?.type, currentDetail?.id]);
 
+  // --- Library state ---
+  type LibSection = "liked" | "playlists" | "history";
+  const [libSection, setLibSection] = useState<LibSection>("playlists");
+  const [libLiked, setLibLiked] = useState<YtTrack[]>([]);
+  const [libPlaylists, setLibPlaylists] = useState<YtPlaylist[]>([]);
+  const [libHistory, setLibHistory] = useState<YtTrack[]>([]);
+  const [libLoading, setLibLoading] = useState(false);
+  const [libError, setLibError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (tab !== "library" || !authenticated) return;
+    setLibLoading(true);
+    setLibError(null);
+    if (libSection === "liked") {
+      invoke<YtTrack[]>("youtube_get_library_songs")
+        .then(setLibLiked).catch((e) => { console.error(e); setLibError(`${e}`); })
+        .finally(() => setLibLoading(false));
+    } else if (libSection === "playlists") {
+      console.log("[RetroAmp] loading library playlists...");
+      invoke<YtPlaylist[]>("youtube_get_library_playlists")
+        .then((r) => { console.log("[RetroAmp] got playlists:", r.length); setLibPlaylists(r); })
+        .catch((e) => { console.error("[RetroAmp] playlists error:", e); setLibError(`${e}`); })
+        .finally(() => setLibLoading(false));
+    } else if (libSection === "history") {
+      invoke<YtTrack[]>("youtube_get_history")
+        .then(setLibHistory).catch((e) => { console.error(e); setLibError(`${e}`); })
+        .finally(() => setLibLoading(false));
+    }
+  }, [tab, libSection, authenticated]);
+
   // --- Status message ---
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const statusTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -172,6 +216,7 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
         artist: artistNames(track.artists),
         album: track.album?.name ?? "",
         durationMs: track.duration_ms ?? 0,
+        thumbnailUrl: track.thumbnail_url ?? null,
       });
       showStatus("Playing...");
     } catch (e) { showStatus(`Error: ${e}`); }
@@ -186,8 +231,27 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
         artist: artistNames(track.artists),
         album: track.album?.name ?? "",
         durationMs: track.duration_ms ?? 0,
+        thumbnailUrl: track.thumbnail_url ?? null,
       });
       showStatus("Added to playlist");
+    } catch (e) { showStatus(`Error: ${e}`); }
+  }, [showStatus]);
+
+  const addTracks = useCallback(async (tracks: YtTrack[], playFirst: boolean) => {
+    if (tracks.length === 0) return;
+    try {
+      await invoke("youtube_add_tracks", {
+        tracks: tracks.filter(t => t.video_id).map(t => ({
+          video_id: t.video_id,
+          title: t.title,
+          artist: artistNames(t.artists),
+          album: t.album?.name ?? "",
+          duration_ms: t.duration_ms ?? 0,
+          thumbnail_url: t.thumbnail_url ?? null,
+        })),
+        playFirst,
+      });
+      showStatus(playFirst ? "Playing..." : `Added ${tracks.length} tracks`);
     } catch (e) { showStatus(`Error: ${e}`); }
   }, [showStatus]);
 
@@ -217,13 +281,17 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
       onDoubleClick={() => playTrack(track)}
       onContextMenu={(e) => { e.preventDefault(); openTrackMenu(track, e.clientX, e.clientY); }}
       style={{
-        display: "flex", alignItems: "center", gap: 4 * s, padding: `0 ${4 * s}px`,
-        height: ROW_HEIGHT * s, cursor: "default", fontSize: Math.round(9 * s),
+        display: "flex", alignItems: "center", gap: 4 * s, padding: `${1 * s}px ${4 * s}px`,
+        minHeight: ROW_HEIGHT * s, cursor: "default", fontSize: Math.round(9 * s),
       }}
       onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = `${ps.selectedbg}44`; }}
       onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = "transparent"; }}
     >
-      <span style={{ width: 24 * s, textAlign: "right", opacity: 0.5, flexShrink: 0 }}>{index + 1}</span>
+      {track.thumbnail_url ? (
+        <img src={track.thumbnail_url} alt="" style={{ width: 11 * s, height: 11 * s, objectFit: "cover", flexShrink: 0 }} />
+      ) : (
+        <span style={{ width: 11 * s, textAlign: "center", opacity: 0.3, flexShrink: 0, fontSize: Math.round(8 * s) }}>{index + 1}</span>
+      )}
       <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{track.title}</span>
       <span style={{ width: 80 * s, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", opacity: 0.7, flexShrink: 0 }}>{artistNames(track.artists)}</span>
       <span style={{ width: 32 * s, textAlign: "right", opacity: 0.5, flexShrink: 0 }}>{track.duration_ms ? formatDuration(track.duration_ms) : track.duration ?? ""}</span>
@@ -351,6 +419,16 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
             <div style={{ fontSize: Math.round(9 * s), opacity: 0.7 }}>
               {artistNames(detailAlbum.artists)} {detailAlbum.year ? `\u00b7 ${detailAlbum.year}` : ""} \u00b7 {detailAlbum.tracks.length} tracks
             </div>
+            <div style={{ display: "flex", gap: 6 * s, marginTop: 4 * s }}>
+              <div onClick={() => addTracks(detailAlbum.tracks, true)}
+                style={{ padding: `${2 * s}px ${8 * s}px`, background: ps.selectedbg, color: ps.current, cursor: "pointer", fontSize: Math.round(8 * s) }}>
+                Play All
+              </div>
+              <div onClick={() => addTracks(detailAlbum.tracks, false)}
+                style={{ padding: `${2 * s}px ${8 * s}px`, background: ps.selectedbg, color: ps.current, cursor: "pointer", fontSize: Math.round(8 * s), opacity: 0.7 }}>
+                Add All
+              </div>
+            </div>
           </div>
         </div>
         {detailAlbum.tracks.map((t, i) => renderTrackRow(t, i))}
@@ -399,9 +477,90 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
             <div style={{ fontSize: Math.round(9 * s), opacity: 0.7 }}>
               {detailPlaylist.info.author ?? "YouTube Music"}{detailPlaylist.info.track_count ? ` \u00b7 ${detailPlaylist.info.track_count}` : ""}
             </div>
+            <div style={{ display: "flex", gap: 6 * s, marginTop: 4 * s }}>
+              <div onClick={() => addTracks(detailPlaylist.tracks, true)}
+                style={{ padding: `${2 * s}px ${8 * s}px`, background: ps.selectedbg, color: ps.current, cursor: "pointer", fontSize: Math.round(8 * s) }}>
+                Play All
+              </div>
+              <div onClick={() => addTracks(detailPlaylist.tracks, false)}
+                style={{ padding: `${2 * s}px ${8 * s}px`, background: ps.selectedbg, color: ps.current, cursor: "pointer", fontSize: Math.round(8 * s), opacity: 0.7 }}>
+                Add All
+              </div>
+            </div>
           </div>
         </div>
         {detailPlaylist.tracks.map((t, i) => renderTrackRow(t, i))}
+      </div>
+    );
+  };
+
+  // --- Library content ---
+  const renderLibraryContent = () => {
+    if (!authenticated) {
+      return (
+        <div style={{ padding: 12 * s, textAlign: "center" }}>
+          <div style={{ fontSize: Math.round(10 * s), marginBottom: 6 * s }}>Not logged in</div>
+          <div style={{ fontSize: Math.round(9 * s), opacity: 0.6, marginBottom: 10 * s }}>
+            Log in with your YouTube Music cookies in Preferences to access your library, liked songs, and playlists.
+          </div>
+          <div
+            onClick={() => invoke("open_settings").catch(console.error)}
+            style={{
+              display: "inline-block", padding: `${4 * s}px ${12 * s}px`,
+              background: ps.selectedbg, color: ps.current, cursor: "pointer",
+              fontSize: Math.round(9 * s),
+            }}
+          >
+            Open Preferences
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div>
+        <div style={{ display: "flex", gap: 0, borderBottom: `1px solid ${ps.selectedbg}33` }}>
+          {(["liked", "playlists", "history"] as LibSection[]).map((sec) => (
+            <div key={sec}
+              onClick={() => setLibSection(sec)}
+              style={{
+                flex: 1, textAlign: "center", padding: `${3 * s}px 0`, cursor: "pointer",
+                fontSize: Math.round(8 * s), textTransform: "capitalize",
+                color: libSection === sec ? ps.current : ps.normal,
+                borderBottom: `2px solid ${libSection === sec ? ps.current : "transparent"}`,
+              }}
+            >{sec === "liked" ? "Liked Songs" : sec}</div>
+          ))}
+        </div>
+        {libLoading ? <div style={{ padding: 8 * s, opacity: 0.5 }}>Loading...</div> :
+         libError ? <div style={{ padding: 8 * s, fontSize: Math.round(9 * s), opacity: 0.7 }}>{libError}</div> : (
+          <>
+            {libSection === "liked" && (
+              libLiked.length === 0 ? <div style={{ padding: 8 * s, opacity: 0.5 }}>No liked songs yet. Like songs on YouTube Music and they'll appear here.</div> :
+              <>
+                <div style={{ padding: `${3 * s}px ${4 * s}px`, display: "flex", gap: 6 * s }}>
+                  <div onClick={() => addTracks(libLiked, true)}
+                    style={{ padding: `${2 * s}px ${8 * s}px`, background: ps.selectedbg, color: ps.current, cursor: "pointer", fontSize: Math.round(8 * s) }}>
+                    Play All
+                  </div>
+                  <div onClick={() => addTracks(libLiked, false)}
+                    style={{ padding: `${2 * s}px ${8 * s}px`, background: ps.selectedbg, color: ps.current, cursor: "pointer", fontSize: Math.round(8 * s), opacity: 0.7 }}>
+                    Add All
+                  </div>
+                </div>
+                {libLiked.map((t, i) => renderTrackRow(t, i))}
+              </>
+            )}
+            {libSection === "playlists" && (
+              libPlaylists.length === 0 ? <div style={{ padding: 8 * s, opacity: 0.5 }}>No playlists</div> :
+              libPlaylists.map(renderPlaylistRow)
+            )}
+            {libSection === "history" && (
+              libHistory.length === 0 ? <div style={{ padding: 8 * s, opacity: 0.5 }}>No history</div> :
+              libHistory.map((t, i) => renderTrackRow(t, i))
+            )}
+          </>
+        )}
       </div>
     );
   };
@@ -424,6 +583,8 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
       );
     }
 
+    if (tab === "search") return renderSearchContent();
+    if (tab === "library") return renderLibraryContent();
     return renderSearchContent();
   };
 
@@ -453,6 +614,21 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
           {/* Title */}
           <div style={{ padding: `${2 * s}px ${4 * s}px`, fontSize: Math.round(9 * s), textAlign: "center", flexShrink: 0, borderBottom: `1px solid ${ps.selectedbg}` }}>
             YOUTUBE MUSIC
+          </div>
+
+          {/* Tabs */}
+          <div style={{ display: "flex", flexShrink: 0, borderBottom: `1px solid ${ps.selectedbg}33` }}>
+            {(["search", ...(authenticated ? ["library"] : [])] as Tab[]).map((t) => (
+              <div key={t}
+                onClick={() => { setTab(t); setDetailStack([]); }}
+                style={{
+                  flex: 1, textAlign: "center", padding: `${3 * s}px 0`, cursor: "pointer",
+                  fontSize: Math.round(8 * s), textTransform: "capitalize",
+                  color: tab === t ? ps.current : ps.normal,
+                  borderBottom: `2px solid ${tab === t ? ps.current : "transparent"}`,
+                }}
+              >{t}</div>
+            ))}
           </div>
 
           {/* Scrollable content */}

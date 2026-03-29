@@ -367,6 +367,7 @@ function SpotifyTab({ colors }: { colors: ColorProps }) {
 interface YouTubeSettingsData {
   quality: string;
   has_cookie: boolean;
+  auth_user: number;
   ytdlp_path: string | null;
   ytdlp_status: string;
 }
@@ -377,7 +378,7 @@ interface YouTubeAuthStatus {
 
 function YouTubeTab({ colors }: { colors: ColorProps }) {
   const [settings, setSettings] = useState<YouTubeSettingsData>({
-    quality: "high", has_cookie: false, ytdlp_path: null, ytdlp_status: "Checking...",
+    quality: "high", has_cookie: false, auth_user: 0, ytdlp_path: null, ytdlp_status: "Checking...",
   });
   const [authStatus, setAuthStatus] = useState<YouTubeAuthStatus>({ authenticated: false });
   const [cookieInput, setCookieInput] = useState("");
@@ -389,14 +390,19 @@ function YouTubeTab({ colors }: { colors: ColorProps }) {
     invoke<YouTubeAuthStatus>("youtube_auth_status").then(setAuthStatus).catch(() => {});
   }, []);
 
-  const updateQuality = useCallback(async (quality: string) => {
-    setSettings((prev) => ({ ...prev, quality }));
+  const saveSettings = useCallback(async (updates: Partial<YouTubeSettingsData>) => {
+    const updated = { ...settings, ...updates };
+    setSettings(updated);
     try {
-      await invoke("set_youtube_settings", { quality, ytdlpPath: settings.ytdlp_path });
+      await invoke("set_youtube_settings", {
+        quality: updated.quality,
+        authUser: updated.auth_user,
+        ytdlpPath: updated.ytdlp_path,
+      });
     } catch (e) {
       console.error("Failed to save YouTube settings:", e);
     }
-  }, [settings.ytdlp_path]);
+  }, [settings]);
 
   const saveCookie = useCallback(async () => {
     if (!cookieInput.trim()) return;
@@ -440,11 +446,30 @@ function YouTubeTab({ colors }: { colors: ColorProps }) {
         ] as const).map(([value, label]) => (
           <label key={value} className="shortcuts-row" style={{ cursor: "pointer", gap: 8 }}>
             <input type="radio" name="yt-quality" checked={settings.quality === value || (settings.quality === "medium" && value === "high")}
-              onChange={() => updateQuality(value)}
+              onChange={() => saveSettings({ quality: value })}
               style={{ accentColor: colors.current }} />
             <span style={{ fontSize: 13 }}>{label}</span>
           </label>
         ))}
+      </div>
+
+      {/* Account Index (multi-account) */}
+      <div className="shortcuts-group">
+        <div className="shortcuts-group-title" style={{ color: colors.current }}>Google Account</div>
+        <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
+          If you have multiple Google accounts signed in, set which account to use for YouTube Music.
+          Check the <code style={{ color: colors.current }}>X-Goog-AuthUser</code> header in your browser's DevTools on music.youtube.com.
+        </div>
+        <div className="shortcuts-row" style={{ gap: 8 }}>
+          <span style={{ fontSize: 12, opacity: 0.7, flexShrink: 0 }}>Account index</span>
+          <input type="number" min={0} max={9} value={settings.auth_user}
+            onChange={(e) => saveSettings({ auth_user: parseInt(e.target.value) || 0 })}
+            style={{
+              width: 50, background: "rgba(255,255,255,0.08)", border: `1px solid ${colors.selectedbg}`,
+              color: colors.normal, padding: "2px 6px", fontSize: 12, fontFamily: "inherit", textAlign: "center",
+            }} />
+          <span style={{ fontSize: 11, opacity: 0.5 }}>0 = first account (default)</span>
+        </div>
       </div>
 
       {/* YouTube Music Account */}
