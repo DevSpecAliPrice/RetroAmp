@@ -42,6 +42,9 @@ pub struct AppConfig {
 
     #[serde(default)]
     pub youtube: YouTubeConfig,
+
+    #[serde(default)]
+    pub visualizer: VisualizerConfig,
 }
 
 /// Skin-related preferences.
@@ -143,6 +146,14 @@ pub struct RadioConfig {
     /// Per-column widths (unscaled pixels). Only present for columns the user has resized.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub column_widths: HashMap<String, f64>,
+}
+
+/// Visualizer preferences.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct VisualizerConfig {
+    /// Last-used Butterchurn preset name, restored on next launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_preset: Option<String>,
 }
 
 /// General application preferences.
@@ -287,6 +298,9 @@ pub struct UiConfig {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub youtube_browser: Option<WindowLayoutEntry>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visualizer: Option<WindowLayoutEntry>,
 }
 
 /// Saved layout for a single window.

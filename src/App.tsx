@@ -12,6 +12,7 @@ import LibraryBrowserWindow from "./skin/LibraryBrowserWindow";
 import SpotifyBrowserWindow from "./skin/SpotifyBrowserWindow";
 import YouTubeBrowserWindow from "./skin/YouTubeBrowserWindow";
 import TagEditorWindow from "./tageditor/TagEditorWindow";
+import VisualizerWindow from "./visualizer/VisualizerWindow";
 
 const DEFAULT_SKIN_NAME = "RetroAmp Default";
 
@@ -343,6 +344,8 @@ function App() {
       return <SpotifyBrowserWindow skin={skin} scale={scale} />;
     case "youtubebrowser":
       return <YouTubeBrowserWindow skin={skin} scale={scale} />;
+    case "visualizer":
+      return <VisualizerWindow skin={skin} scale={scale} />;
     case "shade":
       return <MainWindow skin={skin} scale={scale} isShade />;
     default:

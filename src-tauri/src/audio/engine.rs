@@ -113,6 +113,7 @@ impl AudioEngine {
 
         let fft_data = Arc::new(Mutex::new(FftData {
             magnitudes: vec![0.0; 512],
+            waveform: vec![0.0; 1024],
             sample_rate: 44100,
         }));
 

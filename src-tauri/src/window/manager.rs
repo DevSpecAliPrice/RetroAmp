@@ -18,6 +18,7 @@ pub enum WindowId {
     LibraryBrowser,
     SpotifyBrowser,
     YouTubeBrowser,
+    Visualizer,
 }
 
 impl WindowId {
@@ -32,6 +33,7 @@ impl WindowId {
             WindowId::LibraryBrowser => "librarybrowser",
             WindowId::SpotifyBrowser => "spotifybrowser",
             WindowId::YouTubeBrowser => "youtubebrowser",
+            WindowId::Visualizer => "visualizer",
         }
     }
 
@@ -46,6 +48,7 @@ impl WindowId {
             WindowId::LibraryBrowser => "/?window=librarybrowser",
             WindowId::SpotifyBrowser => "/?window=spotifybrowser",
             WindowId::YouTubeBrowser => "/?window=youtubebrowser",
+            WindowId::Visualizer => "/?window=visualizer",
         }
     }
 
@@ -70,6 +73,7 @@ impl WindowId {
             WindowId::LibraryBrowser => 350,
             WindowId::SpotifyBrowser => 350,
             WindowId::YouTubeBrowser => 350,
+            WindowId::Visualizer => 400,
         }
     }
 
@@ -79,7 +83,7 @@ impl WindowId {
             WindowId::Main | WindowId::Equalizer => false,
             WindowId::Playlist | WindowId::Settings | WindowId::RadioBrowser
             | WindowId::LibraryBrowser | WindowId::SpotifyBrowser
-            | WindowId::YouTubeBrowser => true,
+            | WindowId::YouTubeBrowser | WindowId::Visualizer => true,
         }
     }
 }
@@ -117,6 +121,7 @@ impl WindowManager {
         states.insert(WindowId::RadioBrowser, false);
         states.insert(WindowId::LibraryBrowser, false);
         states.insert(WindowId::SpotifyBrowser, false);
+        states.insert(WindowId::Visualizer, false);
 
         // Determine scale from screen height.
         let scale = Self::detect_scale();

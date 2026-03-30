@@ -20,6 +20,9 @@ pub struct FftData {
     /// Magnitude values for each frequency bin, normalised to [0.0, 1.0].
     /// Length is FFT_SIZE / 2 (512 bins for 1024-point FFT).
     pub magnitudes: Vec<f32>,
+    /// Time-domain waveform (mono, pre-window) for visualisers that need
+    /// oscilloscope-style data. Length is FFT_SIZE (1024 samples, [-1.0, 1.0]).
+    pub waveform: Vec<f32>,
     /// The sample rate the FFT was computed at, so the frontend can map
     /// bin indices to frequencies if needed.
     pub sample_rate: u32,
@@ -37,6 +40,8 @@ pub struct FftAnalyser {
     scratch: Vec<Complex<f32>>,
     /// The most recently computed magnitudes.
     current_magnitudes: Vec<f32>,
+    /// Pre-window mono samples from the last processed buffer (for waveform visualisation).
+    current_waveform: Vec<f32>,
     /// Smoothing factor for magnitude values (0.0 = no smoothing, 1.0 = frozen).
     /// A small amount of smoothing prevents the spectrum from flickering.
     smoothing: f32,
@@ -61,6 +66,7 @@ impl FftAnalyser {
             input_buffer: vec![Complex::new(0.0, 0.0); FFT_SIZE],
             scratch: vec![Complex::new(0.0, 0.0); scratch_len],
             current_magnitudes: vec![0.0; FFT_SIZE / 2],
+            current_waveform: vec![0.0; FFT_SIZE],
             smoothing: 0.3,
         }
     }
@@ -81,7 +87,9 @@ impl FftAnalyser {
             return;
         }
 
-        // Mix down to mono and take the last FFT_SIZE frames
+        // Mix down to mono and take the last FFT_SIZE frames.
+        // Store the raw mono samples (pre-window) for waveform visualisation,
+        // then apply the Hann window for FFT input.
         let start_frame = frame_count.saturating_sub(FFT_SIZE);
         for i in 0..FFT_SIZE {
             let frame_idx = start_frame + i;
@@ -91,9 +99,10 @@ impl FftAnalyser {
                     mono += samples[frame_idx * channels + ch];
                 }
                 mono /= channels as f32;
+                self.current_waveform[i] = mono;
                 self.input_buffer[i] = Complex::new(mono * self.window[i], 0.0);
             } else {
-                // Zero-pad if we don't have enough samples
+                self.current_waveform[i] = 0.0;
                 self.input_buffer[i] = Complex::new(0.0, 0.0);
             }
         }
@@ -117,6 +126,7 @@ impl FftAnalyser {
     pub fn current_data(&self, sample_rate: u32) -> FftData {
         FftData {
             magnitudes: self.current_magnitudes.clone(),
+            waveform: self.current_waveform.clone(),
             sample_rate,
         }
     }

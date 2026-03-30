@@ -422,6 +422,7 @@ pub fn run() {
             let settings_layout = saved_ui.settings.as_ref().unwrap_or(&default_layout);
             let spotify_layout = saved_ui.spotify_browser.as_ref().unwrap_or(&default_layout);
             let youtube_layout = saved_ui.youtube_browser.as_ref().unwrap_or(&default_layout);
+            let visualizer_layout = saved_ui.visualizer.as_ref().unwrap_or(&default_layout);
 
             let all_panels: &[(WindowId, &config::WindowLayoutEntry)] = &[
                 (WindowId::Equalizer, &saved_ui.equalizer),
@@ -431,6 +432,7 @@ pub fn run() {
                 (WindowId::Settings, settings_layout),
                 (WindowId::SpotifyBrowser, spotify_layout),
                 (WindowId::YouTubeBrowser, youtube_layout),
+                (WindowId::Visualizer, visualizer_layout),
             ];
 
             // Derive default size from main window (computed once).
@@ -457,6 +459,7 @@ pub fn run() {
 
                 let default_w = match id {
                     WindowId::RadioBrowser | WindowId::SpotifyBrowser | WindowId::YouTubeBrowser => main_w * 1.5,
+                    WindowId::Visualizer => main_w * 2.0,
                     WindowId::Settings => 700.0,
                     _ => main_w,
                 };
@@ -758,6 +761,9 @@ pub fn run() {
             commands::get_download_dir,
             commands::set_download_dir,
             commands::play_history_track,
+            // Visualizer
+            commands::get_last_visualizer_preset,
+            commands::set_last_visualizer_preset,
             // Context menu
             context_menu::show_context_menu,
             // Spotify — auth & settings

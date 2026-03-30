@@ -584,6 +584,9 @@ pub fn save_window_layout(app: &AppHandle, states: &WindowStates) {
     if is_visible("youtubebrowser") || app.get_webview_window("youtubebrowser").is_some() {
         cfg.ui.youtube_browser = Some(capture("youtubebrowser", is_visible("youtubebrowser"), true));
     }
+    if is_visible("visualizer") || app.get_webview_window("visualizer").is_some() {
+        cfg.ui.visualizer = Some(capture("visualizer", is_visible("visualizer"), true));
+    }
 
     let _ = cfg.save();
 }
@@ -1883,6 +1886,20 @@ pub fn set_download_dir(path: String) -> Result<(), String> {
     let mut cfg = crate::config::AppConfig::load();
     cfg.general.download_dir = Some(path);
     cfg.save().map_err(|e| format!("{e}"))
+}
+
+// -- Visualizer --
+
+#[tauri::command]
+pub fn get_last_visualizer_preset() -> Option<String> {
+    crate::config::AppConfig::load().visualizer.last_preset
+}
+
+#[tauri::command]
+pub fn set_last_visualizer_preset(preset: String) {
+    let mut cfg = crate::config::AppConfig::load();
+    cfg.visualizer.last_preset = Some(preset);
+    let _ = cfg.save();
 }
 
 /// Play a track from the recording history buffer.

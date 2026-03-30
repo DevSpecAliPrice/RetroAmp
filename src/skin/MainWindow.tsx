@@ -104,6 +104,9 @@ const REGIONS = {
   shuffle: { x: 164, y: 89, w: 47, h: 15 },
   repeat: { x: 211, y: 89, w: 28, h: 15 },
 
+  // Spectrum analyser / vis area
+  vis: { x: 24, y: 43, w: 75, h: 16 },
+
   // EQ/PL toggle buttons
   eq: { x: 219, y: 58, w: 23, h: 12 },
   pl: { x: 242, y: 58, w: 23, h: 12 },
@@ -857,7 +860,9 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
       const hit = (r: { x: number; y: number; w: number; h: number }) =>
         x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
 
-      if (hit(REGIONS.volume)) {
+      if (hit(REGIONS.vis)) {
+        invoke("toggle_window", { windowId: "Visualizer" }).catch(console.error);
+      } else if (hit(REGIONS.volume)) {
         invoke("set_volume", { volume: 1.0 });
       } else if (hit(REGIONS.balance)) {
         invoke("set_balance", { balance: 0.0 });
@@ -888,6 +893,7 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
       { type: "item", id: "spotify_browser", label: "Spotify..." },
       { type: "item", id: "youtube_browser", label: "YouTube Music..." },
       { type: "item", id: "media_library", label: "Media Library..." },
+      { type: "item", id: "visualizer", label: "Visualizer" },
       { type: "separator" },
       {
         type: "submenu", label: "Skins", items: [
@@ -914,6 +920,7 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
     else if (selected === "spotify_browser") invoke("toggle_window", { windowId: "SpotifyBrowser" }).catch(console.error);
     else if (selected === "youtube_browser") invoke("toggle_window", { windowId: "YouTubeBrowser" }).catch(console.error);
     else if (selected === "media_library") invoke("toggle_window", { windowId: "LibraryBrowser" }).catch(console.error);
+    else if (selected === "visualizer") invoke("toggle_window", { windowId: "Visualizer" }).catch(console.error);
     else if (selected === "skins_browse") invoke("open_settings");
     else if (selected === "preferences") invoke("open_settings");
     else if (selected.startsWith("skin:")) onSkinChange?.(selected.slice(5));

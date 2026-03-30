@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 pub const SKIN_NAME: &str = "RetroAmp Default";
 
 /// Bump this when the embedded skin assets change, so cached copies get refreshed.
-const SKIN_VERSION: &str = "6";
+const SKIN_VERSION: &str = "7";
 
 /// Files embedded at compile time from `assets/default-skin/`.
 const FILES: &[(&str, &[u8])] = &[
