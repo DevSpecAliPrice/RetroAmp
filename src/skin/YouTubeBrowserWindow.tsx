@@ -27,7 +27,7 @@ interface YtAlbum {
 interface YtArtist {
   browse_id: string; name: string; thumbnail_url?: string;
   description?: string; subscribers?: string;
-  albums: YtAlbumRef[]; singles: YtAlbumRef[];
+  top_tracks: YtTrack[]; albums: YtAlbumRef[]; singles: YtAlbumRef[];
 }
 interface YtPlaylist {
   browse_id: string; title: string; author?: string;
@@ -89,17 +89,65 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
     backgroundSize: dir === "repeat-x" ? "auto 100%" : "100% auto",
   });
 
+  // --- Keyboard shortcuts (transport controls, matching App.tsx) ---
+  useEffect(() => {
+    const handleKeyDown = async (e: KeyboardEvent) => {
+      // Don't intercept when typing in inputs.
+      const tag = (e.target as HTMLElement).tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if (e.ctrlKey || e.altKey || e.metaKey) return;
+
+      switch (e.key) {
+        case "z": e.preventDefault(); invoke("previous_track"); break;
+        case "x": e.preventDefault(); invoke("resume"); break;
+        case "c": {
+          e.preventDefault();
+          const st = await invoke<{ state: string }>("get_status");
+          if (st.state === "Playing") invoke("pause");
+          else invoke("resume");
+          break;
+        }
+        case "v": e.preventDefault(); invoke("stop"); break;
+        case "b": e.preventDefault(); invoke("next_track"); break;
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
   // --- Auth state ---
   const [authenticated, setAuthenticated] = useState(false);
-  useEffect(() => {
+  const recheckAuth = useCallback(() => {
     invoke<{ authenticated: boolean }>("youtube_auth_status")
-      .then((s) => setAuthenticated(s.authenticated)).catch(() => {});
-    // Re-check on focus (catches login from Settings window).
-    const onFocus = () => invoke<{ authenticated: boolean }>("youtube_auth_status")
-      .then((s) => setAuthenticated(s.authenticated)).catch(() => {});
-    window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
+      .then((s) => {
+        console.log("[YT Browser] auth check:", s.authenticated);
+        setAuthenticated(s.authenticated);
+      }).catch((e) => console.error("[YT Browser] auth check failed:", e));
   }, []);
+
+  useEffect(() => {
+    // Check immediately on mount.
+    recheckAuth();
+    // Re-check on focus (catches login from other windows).
+    window.addEventListener("focus", recheckAuth);
+    // Listen for the login-result event (fired by WebView login flow).
+    let unlisten: (() => void) | undefined;
+    import("@tauri-apps/api/event").then(({ listen }) => {
+      listen<{ success: boolean }>("youtube-login-result", (event) => {
+        console.log("[YT Browser] login-result event received:", event.payload);
+        if (event.payload.success) {
+          setAuthenticated(true);
+        }
+      }).then((fn) => { unlisten = fn; });
+    });
+    // Also poll every 5 seconds in case focus events are missed.
+    const interval = setInterval(recheckAuth, 5000);
+    return () => {
+      window.removeEventListener("focus", recheckAuth);
+      unlisten?.();
+      clearInterval(interval);
+    };
+  }, [recheckAuth]);
 
   // --- Tab & navigation state ---
   type Tab = "search" | "library";
@@ -209,6 +257,7 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
   // --- Actions ---
   const playTrack = useCallback(async (track: YtTrack) => {
     if (!track.video_id) return;
+    showStatus(`Loading ${track.title}...`, 30000);
     try {
       await invoke("youtube_play_track", {
         videoId: track.video_id,
@@ -218,7 +267,7 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
         durationMs: track.duration_ms ?? 0,
         thumbnailUrl: track.thumbnail_url ?? null,
       });
-      showStatus("Playing...");
+      showStatus(`Playing: ${track.title}`);
     } catch (e) { showStatus(`Error: ${e}`); }
   }, [showStatus]);
 
@@ -453,6 +502,22 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
           <div style={{ padding: `0 ${4 * s}px ${4 * s}px`, fontSize: Math.round(8 * s), opacity: 0.6, lineHeight: 1.4 }}>
             {detailArtist.description.slice(0, 200)}{detailArtist.description.length > 200 ? "..." : ""}
           </div>
+        )}
+        {detailArtist.top_tracks.length > 0 && (
+          <>
+            <SectionTitle>Top Songs</SectionTitle>
+            <div style={{ padding: `${3 * s}px ${4 * s}px`, display: "flex", gap: 6 * s }}>
+              <div onClick={() => addTracks(detailArtist.top_tracks, true)}
+                style={{ padding: `${2 * s}px ${8 * s}px`, background: ps.selectedbg, color: ps.current, cursor: "pointer", fontSize: Math.round(8 * s) }}>
+                Play All
+              </div>
+              <div onClick={() => addTracks(detailArtist.top_tracks, false)}
+                style={{ padding: `${2 * s}px ${8 * s}px`, background: ps.selectedbg, color: ps.current, cursor: "pointer", fontSize: Math.round(8 * s), opacity: 0.7 }}>
+                Add All
+              </div>
+            </div>
+            {detailArtist.top_tracks.map((t, i) => renderTrackRow(t, i))}
+          </>
         )}
         {detailArtist.albums.length > 0 && (
           <><SectionTitle>Albums</SectionTitle>{detailArtist.albums.map((a) => renderAlbumRow(a, a.browse_id))}</>

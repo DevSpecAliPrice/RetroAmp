@@ -40,7 +40,10 @@ const YTM_ORIGIN: &str = "https://music.youtube.com";
 /// the first part as `X-Goog-PageId` to identify the correct channel.
 fn innertube_browse(browse_id: &str, cookie: &str) -> Result<serde_json::Value, String> {
     let cfg = crate::config::AppConfig::load();
-    let auth_user = cfg.youtube.auth_user.unwrap_or(0).to_string();
+    // X-Goog-AuthUser is always 0 — it selects between multiple Google
+    // accounts in the same browser session, but our WebView only has one.
+    // Channel/profile selection is handled by onBehalfOfUser in the body.
+    let auth_user = "0";
 
     // Extract SAPISID from cookie for auth header.
     let sapisid = cookie
@@ -64,6 +67,10 @@ fn innertube_browse(browse_id: &str, cookie: &str) -> Result<serde_json::Value, 
     let hash = compute_sha1(&hash_input);
     let auth_header = format!("SAPISIDHASH {timestamp}_{hash}");
 
+    // Send DATASYNC_ID as context.user.onBehalfOfUser in the JSON body
+    // (how OuterTune and ytmusicapi do it), NOT as X-Goog-PageId header.
+    let datasync_id = cfg.youtube.datasync_id.as_deref().filter(|s| !s.is_empty());
+
     let body = serde_json::json!({
         "context": {
             "client": {
@@ -71,6 +78,9 @@ fn innertube_browse(browse_id: &str, cookie: &str) -> Result<serde_json::Value, 
                 "clientVersion": "1.20260324.01.00",
                 "hl": "en",
                 "gl": "GB",
+            },
+            "user": {
+                "onBehalfOfUser": datasync_id,
             }
         },
         "browseId": browse_id,
@@ -78,30 +88,18 @@ fn innertube_browse(browse_id: &str, cookie: &str) -> Result<serde_json::Value, 
 
     let url = format!("{YTM_API_URL}?alt=json&prettyPrint=false&key={YTM_API_KEY}");
 
-    // Extract X-Goog-PageId from stored DATASYNC_ID.
-    // The first part (before ||) identifies the channel for library access.
-    let page_id = cfg.youtube.datasync_id.as_deref().and_then(|dsid| {
-        dsid.split("||").next().filter(|s| !s.is_empty())
-    });
-
     let body_str = serde_json::to_string(&body)
         .map_err(|e| format!("Failed to serialize request: {e}"))?;
 
-    let mut request = ureq::post(&url)
+    let response = ureq::post(&url)
         .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:88.0) Gecko/20100101 Firefox/88.0")
         .header("Cookie", cookie)
         .header("Authorization", &auth_header)
-        .header("X-Goog-AuthUser", &auth_user)
+        .header("X-Goog-AuthUser", auth_user)
         .header("X-Origin", YTM_ORIGIN)
         .header("Origin", YTM_ORIGIN)
         .header("Referer", YTM_ORIGIN)
-        .header("Content-Type", "application/json");
-
-    if let Some(pid) = page_id {
-        request = request.header("X-Goog-PageId", pid);
-    }
-
-    let response = request
+        .header("Content-Type", "application/json")
         .send(&body_str)
         .map_err(|e| format!("InnerTube browse request failed: {e}"))?;
 
@@ -110,8 +108,22 @@ fn innertube_browse(browse_id: &str, cookie: &str) -> Result<serde_json::Value, 
         .read_to_string()
         .map_err(|e| format!("Failed to read InnerTube response: {e}"))?;
 
-    serde_json::from_str(&body_str)
-        .map_err(|e| format!("Failed to parse InnerTube JSON: {e}"))
+    let json: serde_json::Value = serde_json::from_str(&body_str)
+        .map_err(|e| format!("Failed to parse InnerTube JSON: {e}"))?;
+
+    // Detect expired sessions — YouTube returns a "Sign in" button inside
+    // a messageRenderer when session cookies have expired. Only check the
+    // actual message renderers (not the broader page which always contains
+    // signInEndpoint references as part of the UI structure).
+    {
+        let mut messages = Vec::new();
+        find_messages(&json, &mut messages);
+        if messages.iter().any(|m| m == "Sign in") {
+            return Err("Session expired — please log in again in Preferences > YouTube.".into());
+        }
+    }
+
+    Ok(json)
 }
 
 /// Compute SHA-1 hash hex string (used for SAPISIDHASH auth).
@@ -343,9 +355,9 @@ pub async fn search(query: &str) -> Result<YtSearchResults, String> {
 
     let client = get_client().await?;
 
-    // Run filtered searches in parallel.
+    // Run filtered searches in parallel (songs, albums, artists, playlists).
     let q = query.to_string();
-    let (songs_res, albums_res, artists_res) = tokio::join!(
+    let (songs_res, albums_res, artists_res, playlists_res) = tokio::join!(
         async {
             let r: Result<Vec<ytmapi_rs::parse::SearchResultSong>, _> =
                 yt_query!(client, SearchQuery::new(&q).with_filter(SongsFilter))
@@ -362,6 +374,13 @@ pub async fn search(query: &str) -> Result<YtSearchResults, String> {
             let r: Result<Vec<ytmapi_rs::parse::SearchResultArtist>, _> =
                 yt_query!(client, SearchQuery::new(&q).with_filter(ArtistsFilter))
                     .map_err(|e| format!("Artist search failed: {e}"));
+            r
+        },
+        async {
+            use ytmapi_rs::query::search::CommunityPlaylistsFilter;
+            let r: Result<Vec<ytmapi_rs::parse::SearchResultPlaylist>, _> =
+                yt_query!(client, SearchQuery::new(&q).with_filter(CommunityPlaylistsFilter))
+                    .map_err(|e| format!("Playlist search failed: {e}"));
             r
         },
     );
@@ -388,11 +407,33 @@ pub async fn search(query: &str) -> Result<YtSearchResults, String> {
         })
         .collect();
 
+    let playlists: Vec<YtPlaylist> = playlists_res
+        .unwrap_or_else(|e| { log::warn!("[youtube] {e}"); Vec::new() })
+        .into_iter()
+        .filter_map(|p| match p {
+            ytmapi_rs::parse::SearchResultPlaylist::Community(c) => Some(YtPlaylist {
+                browse_id: c.playlist_id.get_raw().to_string(),
+                title: c.title,
+                author: Some(c.author),
+                track_count: None,
+                thumbnail_url: best_thumbnail(&c.thumbnails),
+            }),
+            ytmapi_rs::parse::SearchResultPlaylist::Featured(f) => Some(YtPlaylist {
+                browse_id: f.playlist_id.get_raw().to_string(),
+                title: f.title,
+                author: Some(f.author),
+                track_count: None,
+                thumbnail_url: best_thumbnail(&f.thumbnails),
+            }),
+            _ => None, // Skip podcasts for now.
+        })
+        .collect();
+
     Ok(YtSearchResults {
         tracks,
         albums,
         artists,
-        playlists: Vec::new(), // Playlist search can be added later if needed.
+        playlists,
     })
 }
 
@@ -481,6 +522,39 @@ pub async fn get_artist(browse_id: &str) -> Result<YtArtist, String> {
 
     let thumbnail_url = best_thumbnail(&artist.thumbnails);
 
+    // Extract top tracks from the artist's song releases.
+    let top_tracks: Vec<YtTrack> = artist
+        .top_releases
+        .songs
+        .as_ref()
+        .map(|songs| {
+            songs
+                .results
+                .iter()
+                .map(|s| YtTrack {
+                    video_id: s.video_id.get_raw().to_string(),
+                    title: s.title.clone(),
+                    artists: s
+                        .artists
+                        .iter()
+                        .map(|a| YtArtistRef {
+                            browse_id: a.id.as_ref().map(|id| id.get_raw().to_string()),
+                            name: a.name.clone(),
+                        })
+                        .collect(),
+                    album: Some(YtAlbumRefSimple {
+                        browse_id: s.album.id.get_raw().to_string(),
+                        name: s.album.name.clone(),
+                    }),
+                    duration: None,
+                    duration_ms: None,
+                    thumbnail_url: thumbnail_url.clone(),
+                    explicit: s.explicit == ytmapi_rs::common::Explicit::IsExplicit,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     let albums = convert_artist_albums(&artist.top_releases.albums);
     let singles = convert_artist_albums(&artist.top_releases.singles);
 
@@ -490,6 +564,7 @@ pub async fn get_artist(browse_id: &str) -> Result<YtArtist, String> {
         thumbnail_url,
         description: artist.description,
         subscribers: artist.subscribers,
+        top_tracks,
         albums,
         singles,
     })
@@ -610,6 +685,7 @@ pub async fn get_search_suggestions(query: &str) -> Result<Vec<String>, String> 
 // Library (authenticated only)
 // ---------------------------------------------------------------------------
 
+
 /// Get the user's liked songs.
 ///
 /// YouTube Music stores liked songs in the "Liked Music" auto-playlist.
@@ -621,7 +697,6 @@ pub async fn get_library_songs() -> Result<Vec<YtTrack>, String> {
         .ok_or("Not logged in — liked songs require authentication")?;
 
     // "VLLM" = VL (playlist prefix) + LM (Liked Music auto-playlist).
-    // This is how OuterTune fetches liked songs.
     let json = innertube_browse("VLLM", cookie)?;
 
     // Dump for debugging.

@@ -850,4 +850,39 @@ Any integration displaying Spotify content must comply with Spotify's design gui
 
 ---
 
-*RetroAmp design document. Last updated: 25 March 2026.*
+## Future Features
+
+### Podcast Support
+
+RetroAmp could become a podcast client alongside its music player role, leveraging existing YouTube Music integration and potentially other providers.
+
+**YouTube Music Podcasts:**
+- YouTube Music already exposes podcasts via InnerTube API (browse IDs like `FEmusic_library_podcasts`, episode types in playlist responses)
+- Our raw JSON extraction infrastructure can parse podcast/episode renderers
+- Library tab already shows "Episodes for Later" auto-playlist
+- Episode playback works through the same yt-dlp → Symphonia pipeline
+
+**Potential Additional Providers:**
+- RSS/Atom feeds (standard podcast distribution format)
+- Podcast Index API (open, community-maintained podcast directory)
+- Apple Podcasts catalog (via iTunes Search API, public)
+- Spotify podcasts (if Spotify integration is restored)
+
+**Podcast-Specific UI Requirements:**
+- Episode progress tracking (resume from last position)
+- Playback speed control (0.5x to 3x, with pitch correction)
+- Sleep timer
+- Episode queue management (separate from music queue)
+- Subscription management with new episode notifications
+- Show notes / description display
+- Chapter markers (if embedded in the feed)
+
+**Architecture Considerations:**
+- Podcasts share the audio pipeline but need different metadata (show name, episode date, description)
+- Progress persistence needs per-episode tracking (different from music where we track per-playlist position)
+- Playback speed control requires a tempo-shifting audio processor in the engine pipeline
+- Feed polling for new episodes could reuse the background task infrastructure (similar to yt-dlp update checking)
+
+---
+
+*RetroAmp design document. Last updated: 30 March 2026.*

@@ -273,24 +273,32 @@ pub fn run() {
                 });
             }
             // YouTube startup tasks (non-blocking):
-            // 1. Check for yt-dlp updates and download if needed
-            // 2. Restore authenticated YouTube Music session from saved cookie
-            tauri::async_runtime::spawn(async {
-                // yt-dlp update check (blocking I/O, run in spawn_blocking).
-                let _ = tauri::async_runtime::spawn_blocking(|| {
-                    crate::youtube::ytdlp::check_for_update();
-                }).await;
+            // 1. Check for yt-dlp updates
+            // 2. Restore authenticated session from saved cookie
+            // 3. Refresh session cookies via hidden WebView (prevents 24h expiry)
+            {
+                let app_for_yt = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    // yt-dlp update check (blocking I/O).
+                    let _ = tauri::async_runtime::spawn_blocking(|| {
+                        crate::youtube::ytdlp::check_for_update();
+                    }).await;
 
-                // Restore YouTube Music cookie session if saved.
-                let cfg = crate::config::AppConfig::load();
-                if let Some(ref cookie) = cfg.youtube.cookie {
-                    log::info!("[youtube] restoring authenticated session from saved cookie...");
-                    match crate::youtube::api::login_with_cookie(cookie).await {
-                        Ok(()) => log::info!("[youtube] authenticated session restored"),
-                        Err(e) => log::warn!("[youtube] cookie restore failed: {e}"),
+                    // Restore YouTube Music cookie session if saved.
+                    let cfg = crate::config::AppConfig::load();
+                    if let Some(ref cookie) = cfg.youtube.cookie {
+                        log::info!("[youtube] restoring authenticated session from saved cookie...");
+                        match crate::youtube::api::login_with_cookie(cookie).await {
+                            Ok(()) => {
+                                log::info!("[youtube] authenticated session restored");
+                                // Refresh session cookies to prevent 24h expiry.
+                                crate::youtube::commands::refresh_session_cookies(&app_for_yt);
+                            }
+                            Err(e) => log::warn!("[youtube] cookie restore failed: {e}"),
+                        }
                     }
-                }
-            });
+                });
+            }
 
             // Start OS media controls (MPRIS on Linux, SMTC on Windows,
             // MPRemoteCommandCenter on macOS). Non-fatal if it fails.
@@ -800,6 +808,7 @@ pub fn run() {
             youtube::commands::youtube_get_history,
             youtube::commands::get_youtube_settings,
             youtube::commands::set_youtube_settings,
+            youtube::commands::youtube_login_webview,
             youtube::commands::youtube_save_cookie,
             youtube::commands::youtube_clear_cookie,
             youtube::commands::youtube_auth_status,

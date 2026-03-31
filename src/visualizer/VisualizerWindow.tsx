@@ -65,7 +65,15 @@ export default function VisualizerWindow({ skin, scale }: Props) {
     setShowPresetName(true);
     clearTimeout(fadeTimerRef.current);
     fadeTimerRef.current = setTimeout(() => setShowPresetName(false), 3000);
+    // Persist for next session
+    invoke("set_last_visualizer_preset", { preset: name }).catch(() => {});
   }, []);
+
+  const loadPresetByName = useCallback((name: string, blend: number) => {
+    const names = presetNamesRef.current;
+    const idx = names.indexOf(name);
+    if (idx >= 0) loadPresetByIndex(idx, blend);
+  }, [loadPresetByIndex]);
 
   const nextPreset = useCallback(() => {
     loadPresetByIndex(presetIndexRef.current + 1, BLEND_SECS);
@@ -139,14 +147,23 @@ export default function VisualizerWindow({ skin, scale }: Props) {
       presetNamesRef.current = names;
       console.log(`[visualizer] loaded ${names.length} presets`);
 
-      // Start with a random preset (instant load, no blend)
+      // Restore last preset, or pick a random one on first launch
+      let startIndex = Math.floor(Math.random() * names.length);
+      try {
+        const lastPreset = await invoke<string | null>("get_last_visualizer_preset");
+        if (lastPreset) {
+          const saved = names.indexOf(lastPreset);
+          if (saved >= 0) startIndex = saved;
+        }
+      } catch { /* first launch — use random */ }
+
       if (names.length > 0) {
-        const startIndex = Math.floor(Math.random() * names.length);
         presetIndexRef.current = startIndex;
         viz.loadPreset(presets[names[startIndex]], 0);
         setPresetName(names[startIndex]);
         setShowPresetName(true);
         fadeTimerRef.current = setTimeout(() => setShowPresetName(false), 3000);
+        invoke("set_last_visualizer_preset", { preset: names[startIndex] }).catch(() => {});
       }
 
       // Render loop — always runs at display refresh rate
@@ -261,6 +278,34 @@ export default function VisualizerWindow({ skin, scale }: Props) {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [nextPreset, prevPreset, randomPreset]);
 
+  // Build preset submenu items grouped by first character
+  const buildPresetMenu = useCallback((): NativeMenuEntry => {
+    const names = presetNamesRef.current;
+    const current = names[presetIndexRef.current] ?? "";
+
+    // Group by first character (uppercased). Symbols go under "#".
+    const groups: Record<string, NativeMenuEntry[]> = {};
+    for (const name of names) {
+      const first = name[0]?.toUpperCase() ?? "#";
+      const key = /[A-Z]/.test(first) ? first : "#";
+      if (!groups[key]) groups[key] = [];
+      const label = name === current ? `● ${name}` : name;
+      groups[key].push({ type: "item", id: `preset:${name}`, label });
+    }
+
+    const sortedKeys = Object.keys(groups).sort((a, b) =>
+      a === "#" ? -1 : b === "#" ? 1 : a.localeCompare(b)
+    );
+
+    const submenus: NativeMenuEntry[] = sortedKeys.map((key) => ({
+      type: "submenu" as const,
+      label: key === "#" ? "# Symbols" : key,
+      items: groups[key],
+    }));
+
+    return { type: "submenu", label: "Presets", items: submenus };
+  }, []);
+
   // Context menu
   const handleContextMenu = useCallback(
     async (e: React.MouseEvent) => {
@@ -272,26 +317,21 @@ export default function VisualizerWindow({ skin, scale }: Props) {
         { type: "item", id: "prev", label: "← Previous Preset" },
         { type: "item", id: "random", label: "Random Preset" },
         { type: "separator" },
+        buildPresetMenu(),
+        { type: "separator" },
         { type: "item", id: "close", label: "Close Visualizer" },
       ];
 
       const selected = await showContextMenu(items, e.clientX, e.clientY);
-      switch (selected) {
-        case "next":
-          nextPreset();
-          break;
-        case "prev":
-          prevPreset();
-          break;
-        case "random":
-          randomPreset();
-          break;
-        case "close":
-          invoke("toggle_window", { windowId: "Visualizer" }).catch(console.error);
-          break;
-      }
+      if (!selected) return;
+
+      if (selected === "next") nextPreset();
+      else if (selected === "prev") prevPreset();
+      else if (selected === "random") randomPreset();
+      else if (selected === "close") invoke("toggle_window", { windowId: "Visualizer" }).catch(console.error);
+      else if (selected.startsWith("preset:")) loadPresetByName(selected.slice(7), BLEND_SECS);
     },
-    [nextPreset, prevPreset, randomPreset]
+    [nextPreset, prevPreset, randomPreset, buildPresetMenu, loadPresetByName]
   );
 
   // Edge resize (top/bottom edges)

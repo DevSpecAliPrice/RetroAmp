@@ -104,6 +104,8 @@ pub struct YtArtist {
     #[serde(default)]
     pub subscribers: Option<String>,
     #[serde(default)]
+    pub top_tracks: Vec<YtTrack>,
+    #[serde(default)]
     pub albums: Vec<YtAlbumRef>,
     #[serde(default)]
     pub singles: Vec<YtAlbumRef>,

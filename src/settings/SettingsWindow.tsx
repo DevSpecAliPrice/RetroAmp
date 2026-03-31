@@ -384,10 +384,41 @@ function YouTubeTab({ colors }: { colors: ColorProps }) {
   const [cookieInput, setCookieInput] = useState("");
   const [savingCookie, setSavingCookie] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [loggingIn, setLoggingIn] = useState(false);
 
   useEffect(() => {
     invoke<YouTubeSettingsData>("get_youtube_settings").then(setSettings).catch(() => {});
     invoke<YouTubeAuthStatus>("youtube_auth_status").then(setAuthStatus).catch(() => {});
+  }, []);
+
+  // Listen for WebView login completion.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    import("@tauri-apps/api/event").then(({ listen }) => {
+      listen<{ success: boolean; error?: string }>("youtube-login-result", (event) => {
+        setLoggingIn(false);
+        if (event.payload.success) {
+          setAuthStatus({ authenticated: true });
+          setSettings((prev) => ({ ...prev, has_cookie: true }));
+          setStatusMsg("Logged in successfully!");
+        } else {
+          setStatusMsg(`Login failed: ${event.payload.error ?? "unknown error"}`);
+        }
+      }).then((fn) => { unlisten = fn; });
+    });
+    return () => { unlisten?.(); };
+  }, []);
+
+  const loginWebView = useCallback(async () => {
+    setLoggingIn(true);
+    setStatusMsg(null);
+    try {
+      await invoke("youtube_login_webview");
+    } catch (e) {
+      setLoggingIn(false);
+      setStatusMsg(`Login failed: ${e}`);
+    }
   }, []);
 
   const saveSettings = useCallback(async (updates: Partial<YouTubeSettingsData>) => {
@@ -453,25 +484,6 @@ function YouTubeTab({ colors }: { colors: ColorProps }) {
         ))}
       </div>
 
-      {/* Account Index (multi-account) */}
-      <div className="shortcuts-group">
-        <div className="shortcuts-group-title" style={{ color: colors.current }}>Google Account</div>
-        <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
-          If you have multiple Google accounts signed in, set which account to use for YouTube Music.
-          Check the <code style={{ color: colors.current }}>X-Goog-AuthUser</code> header in your browser's DevTools on music.youtube.com.
-        </div>
-        <div className="shortcuts-row" style={{ gap: 8 }}>
-          <span style={{ fontSize: 12, opacity: 0.7, flexShrink: 0 }}>Account index</span>
-          <input type="number" min={0} max={9} value={settings.auth_user}
-            onChange={(e) => saveSettings({ auth_user: parseInt(e.target.value) || 0 })}
-            style={{
-              width: 50, background: "rgba(255,255,255,0.08)", border: `1px solid ${colors.selectedbg}`,
-              color: colors.normal, padding: "2px 6px", fontSize: 12, fontFamily: "inherit", textAlign: "center",
-            }} />
-          <span style={{ fontSize: 11, opacity: 0.5 }}>0 = first account (default)</span>
-        </div>
-      </div>
-
       {/* YouTube Music Account */}
       <div className="shortcuts-group">
         <div className="shortcuts-group-title" style={{ color: colors.current }}>YouTube Music Account</div>
@@ -490,41 +502,61 @@ function YouTubeTab({ colors }: { colors: ColorProps }) {
           <>
             <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
               YouTube Music works without login for search and browsing.
-              To access your personal library, liked songs, and playlists,
-              paste your browser cookies below.
+              Sign in with your Google account to access your library, liked songs, and playlists.
+              If you have multiple YouTube channels or a Brand Account, use the Advanced manual login below instead.
             </div>
-            <div style={{ fontSize: 12, opacity: 0.6, marginBottom: 8 }}>
-              How to get your cookie: Open music.youtube.com in your browser while logged in,
-              open Developer Tools (F12) &rarr; Network tab &rarr; refresh the page &rarr;
-              click the first request &rarr; copy the <code style={{ color: colors.current }}>Cookie</code> header value.
-            </div>
-            <textarea
-              value={cookieInput}
-              onChange={(e) => setCookieInput(e.target.value)}
-              placeholder="Paste cookie header value here..."
-              rows={3}
-              style={{
-                width: "100%", boxSizing: "border-box",
-                background: "rgba(255,255,255,0.08)", border: `1px solid ${colors.selectedbg}`,
-                color: colors.normal, padding: "4px 6px", fontSize: 11,
-                fontFamily: "monospace", resize: "vertical",
-              }}
-            />
-            <div style={{ marginTop: 8 }}>
-              <div onClick={!savingCookie && cookieInput.trim() ? saveCookie : undefined}
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <div onClick={!loggingIn ? loginWebView : undefined}
                 style={{
                   display: "inline-block", padding: "4px 12px",
                   background: colors.selectedbg, color: colors.current,
-                  cursor: !savingCookie && cookieInput.trim() ? "pointer" : "default",
-                  fontSize: 12, opacity: !savingCookie && cookieInput.trim() ? 1 : 0.3,
+                  cursor: !loggingIn ? "pointer" : "default",
+                  fontSize: 12, opacity: !loggingIn ? 1 : 0.5,
                 }}>
-                {savingCookie ? "Validating..." : "Save & Log In"}
+                {loggingIn ? "Waiting for sign-in..." : "Log In with Google"}
               </div>
+            </div>
+            {/* Advanced: manual cookie paste */}
+            <div style={{ marginTop: 10 }}>
+              <div onClick={() => setShowAdvanced(!showAdvanced)}
+                style={{ fontSize: 11, opacity: 0.5, cursor: "pointer" }}>
+                {showAdvanced ? "\u25BC" : "\u25B6"} Advanced: manual cookie login
+              </div>
+              {showAdvanced && (
+                <div style={{ marginTop: 6 }}>
+                  <div style={{ fontSize: 12, opacity: 0.6, marginBottom: 6 }}>
+                    Paste the <code style={{ color: colors.current }}>Cookie</code> header from browser DevTools on music.youtube.com.
+                  </div>
+                  <textarea
+                    value={cookieInput}
+                    onChange={(e) => setCookieInput(e.target.value)}
+                    placeholder="Paste cookie header value here..."
+                    rows={3}
+                    style={{
+                      width: "100%", boxSizing: "border-box",
+                      background: "rgba(255,255,255,0.08)", border: `1px solid ${colors.selectedbg}`,
+                      color: colors.normal, padding: "4px 6px", fontSize: 11,
+                      fontFamily: "monospace", resize: "vertical",
+                    }}
+                  />
+                  <div style={{ marginTop: 6 }}>
+                    <div onClick={!savingCookie && cookieInput.trim() ? saveCookie : undefined}
+                      style={{
+                        display: "inline-block", padding: "4px 12px",
+                        background: colors.selectedbg, color: colors.current,
+                        cursor: !savingCookie && cookieInput.trim() ? "pointer" : "default",
+                        fontSize: 12, opacity: !savingCookie && cookieInput.trim() ? 1 : 0.3,
+                      }}>
+                      {savingCookie ? "Validating..." : "Save & Log In"}
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           </>
         )}
         {statusMsg && (
-          <div style={{ fontSize: 11, marginTop: 8, color: statusMsg.startsWith("Login failed") ? "#ff6666" : colors.current }}>
+          <div style={{ fontSize: 11, marginTop: 8, color: statusMsg.includes("failed") || statusMsg.includes("Failed") ? "#ff6666" : colors.current }}>
             {statusMsg}
           </div>
         )}
