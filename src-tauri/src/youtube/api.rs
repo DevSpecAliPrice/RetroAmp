@@ -25,24 +25,30 @@ use super::types::*;
 // Direct InnerTube API client for library queries
 // ---------------------------------------------------------------------------
 
-const YTM_API_URL: &str = "https://music.youtube.com/youtubei/v1/browse";
+const YTM_API_BASE: &str = "https://music.youtube.com/youtubei/v1";
 const YTM_API_KEY: &str = "AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30";
 const YTM_ORIGIN: &str = "https://music.youtube.com";
 
-/// Make a direct InnerTube browse request with proper channel/profile support.
+/// Make a direct InnerTube API request with proper channel/profile support.
 ///
-/// This bypasses ytmapi-rs for library queries because:
+/// This is the generalized InnerTube client used for all authenticated
+/// operations (browse, like, playlist management, subscriptions).
+///
+/// Bypasses ytmapi-rs because:
 /// 1. ytmapi-rs hardcodes `X-Goog-AuthUser: 0`
-/// 2. ytmapi-rs doesn't send `X-Goog-PageId` which is required for
-///    accounts with Brand Accounts / delegated channels
+/// 2. ytmapi-rs doesn't send `X-Goog-PageId` / `onBehalfOfUser` which is
+///    required for accounts with Brand Accounts / delegated channels
 ///
-/// We extract the `DATASYNC_ID` from music.youtube.com on login and use
-/// the first part as `X-Goog-PageId` to identify the correct channel.
-fn innertube_browse(browse_id: &str, cookie: &str) -> Result<serde_json::Value, String> {
+/// # Arguments
+/// * `endpoint` — API path suffix (e.g. `"browse"`, `"like/like"`, `"playlist/create"`)
+/// * `cookie` — user's YouTube Music session cookie string
+/// * `extra_body` — additional JSON fields merged into the request body alongside `context`
+fn innertube_request(
+    endpoint: &str,
+    cookie: &str,
+    extra_body: serde_json::Value,
+) -> Result<serde_json::Value, String> {
     let cfg = crate::config::AppConfig::load();
-    // X-Goog-AuthUser is always 0 — it selects between multiple Google
-    // accounts in the same browser session, but our WebView only has one.
-    // Channel/profile selection is handled by onBehalfOfUser in the body.
     let auth_user = "0";
 
     // Extract SAPISID from cookie for auth header.
@@ -67,11 +73,9 @@ fn innertube_browse(browse_id: &str, cookie: &str) -> Result<serde_json::Value, 
     let hash = compute_sha1(&hash_input);
     let auth_header = format!("SAPISIDHASH {timestamp}_{hash}");
 
-    // Send DATASYNC_ID as context.user.onBehalfOfUser in the JSON body
-    // (how OuterTune and ytmusicapi do it), NOT as X-Goog-PageId header.
+    // Build the base body with context (client + user).
     let datasync_id = cfg.youtube.datasync_id.as_deref().filter(|s| !s.is_empty());
-
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "context": {
             "client": {
                 "clientName": "WEB_REMIX",
@@ -83,10 +87,17 @@ fn innertube_browse(browse_id: &str, cookie: &str) -> Result<serde_json::Value, 
                 "onBehalfOfUser": datasync_id,
             }
         },
-        "browseId": browse_id,
     });
 
-    let url = format!("{YTM_API_URL}?alt=json&prettyPrint=false&key={YTM_API_KEY}");
+    // Merge extra_body fields into the top-level body object.
+    if let Some(extra) = extra_body.as_object() {
+        let body_map = body.as_object_mut().unwrap();
+        for (k, v) in extra {
+            body_map.insert(k.clone(), v.clone());
+        }
+    }
+
+    let url = format!("{YTM_API_BASE}/{endpoint}?alt=json&prettyPrint=false&key={YTM_API_KEY}");
 
     let body_str = serde_json::to_string(&body)
         .map_err(|e| format!("Failed to serialize request: {e}"))?;
@@ -101,7 +112,7 @@ fn innertube_browse(browse_id: &str, cookie: &str) -> Result<serde_json::Value, 
         .header("Referer", YTM_ORIGIN)
         .header("Content-Type", "application/json")
         .send(&body_str)
-        .map_err(|e| format!("InnerTube browse request failed: {e}"))?;
+        .map_err(|e| format!("InnerTube {endpoint} request failed: {e}"))?;
 
     let body_str = response
         .into_body()
@@ -111,10 +122,7 @@ fn innertube_browse(browse_id: &str, cookie: &str) -> Result<serde_json::Value, 
     let json: serde_json::Value = serde_json::from_str(&body_str)
         .map_err(|e| format!("Failed to parse InnerTube JSON: {e}"))?;
 
-    // Detect expired sessions — YouTube returns a "Sign in" button inside
-    // a messageRenderer when session cookies have expired. Only check the
-    // actual message renderers (not the broader page which always contains
-    // signInEndpoint references as part of the UI structure).
+    // Detect expired sessions.
     {
         let mut messages = Vec::new();
         find_messages(&json, &mut messages);
@@ -124,6 +132,11 @@ fn innertube_browse(browse_id: &str, cookie: &str) -> Result<serde_json::Value, 
     }
 
     Ok(json)
+}
+
+/// Make a direct InnerTube browse request (thin wrapper around `innertube_request`).
+fn innertube_browse(browse_id: &str, cookie: &str) -> Result<serde_json::Value, String> {
+    innertube_request("browse", cookie, serde_json::json!({ "browseId": browse_id }))
 }
 
 /// Compute SHA-1 hash hex string (used for SAPISIDHASH auth).
@@ -486,6 +499,7 @@ pub async fn get_album(browse_id: &str) -> Result<YtAlbum, String> {
                 duration_ms,
                 thumbnail_url: thumbnail_url.clone(),
                 explicit: t.explicit == ytmapi_rs::common::Explicit::IsExplicit,
+                set_video_id: None,
             }
         })
         .collect();
@@ -550,13 +564,14 @@ pub async fn get_artist(browse_id: &str) -> Result<YtArtist, String> {
                     duration_ms: None,
                     thumbnail_url: thumbnail_url.clone(),
                     explicit: s.explicit == ytmapi_rs::common::Explicit::IsExplicit,
+                    set_video_id: None,
                 })
                 .collect()
         })
         .unwrap_or_default();
 
-    let albums = convert_artist_albums(&artist.top_releases.albums);
-    let singles = convert_artist_albums(&artist.top_releases.singles);
+    let albums = convert_artist_albums(&artist.top_releases.albums, browse_id, &artist.name);
+    let singles = convert_artist_albums(&artist.top_releases.singles, browse_id, &artist.name);
 
     Ok(YtArtist {
         browse_id: browse_id.to_string(),
@@ -649,6 +664,7 @@ pub async fn get_playlist(browse_id: &str) -> Result<YtPlaylistDetail, String> {
                     duration_ms,
                     thumbnail_url: best_thumbnail(&song.thumbnails),
                     explicit: song.explicit == ytmapi_rs::common::Explicit::IsExplicit,
+                    set_video_id: None,
                 })
             }
             _ => None,
@@ -814,6 +830,263 @@ pub async fn get_history() -> Result<Vec<YtTrack>, String> {
     }
 
     Ok(tracks)
+}
+
+// ---------------------------------------------------------------------------
+// Write operations (authenticated only)
+// ---------------------------------------------------------------------------
+
+/// Like a track on YouTube Music.
+pub async fn like_track(video_id: &str) -> Result<(), String> {
+    let cfg = crate::config::AppConfig::load();
+    let cookie = cfg.youtube.cookie.as_deref()
+        .ok_or("Not logged in — liking requires authentication")?;
+    innertube_request("like/like", cookie, serde_json::json!({
+        "target": { "videoId": video_id }
+    }))?;
+    log::info!("[youtube] liked track {video_id}");
+    Ok(())
+}
+
+/// Remove a like from a track on YouTube Music.
+pub async fn unlike_track(video_id: &str) -> Result<(), String> {
+    let cfg = crate::config::AppConfig::load();
+    let cookie = cfg.youtube.cookie.as_deref()
+        .ok_or("Not logged in — unliking requires authentication")?;
+    innertube_request("like/removelike", cookie, serde_json::json!({
+        "target": { "videoId": video_id }
+    }))?;
+    log::info!("[youtube] unliked track {video_id}");
+    Ok(())
+}
+
+/// Create a new YouTube Music playlist. Returns the new playlist ID.
+pub async fn create_playlist(title: &str, video_ids: &[String]) -> Result<String, String> {
+    let cfg = crate::config::AppConfig::load();
+    let cookie = cfg.youtube.cookie.as_deref()
+        .ok_or("Not logged in — creating playlists requires authentication")?;
+    let json = innertube_request("playlist/create", cookie, serde_json::json!({
+        "title": title,
+        "privacyStatus": "PRIVATE",
+        "videoIds": video_ids,
+    }))?;
+    let playlist_id = json.get("playlistId")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| "No playlistId in response".to_string())?;
+    log::info!("[youtube] created playlist {playlist_id}: {title}");
+    Ok(playlist_id)
+}
+
+/// Delete a YouTube Music playlist.
+pub async fn delete_playlist(playlist_id: &str) -> Result<(), String> {
+    let cfg = crate::config::AppConfig::load();
+    let cookie = cfg.youtube.cookie.as_deref()
+        .ok_or("Not logged in — deleting playlists requires authentication")?;
+    let pid = playlist_id.strip_prefix("VL").unwrap_or(playlist_id);
+    innertube_request("playlist/delete", cookie, serde_json::json!({
+        "playlistId": pid,
+    }))?;
+    log::info!("[youtube] deleted playlist {pid}");
+    Ok(())
+}
+
+/// Add a track to a YouTube Music playlist.
+pub async fn add_to_yt_playlist(playlist_id: &str, video_id: &str) -> Result<(), String> {
+    let cfg = crate::config::AppConfig::load();
+    let cookie = cfg.youtube.cookie.as_deref()
+        .ok_or("Not logged in — adding to playlist requires authentication")?;
+    // edit_playlist expects raw playlist ID without VL prefix.
+    let pid = playlist_id.strip_prefix("VL").unwrap_or(playlist_id);
+    innertube_request("browse/edit_playlist", cookie, serde_json::json!({
+        "playlistId": pid,
+        "actions": [{
+            "action": "ACTION_ADD_VIDEO",
+            "addedVideoId": video_id,
+        }]
+    }))?;
+    log::info!("[youtube] added {video_id} to playlist {pid}");
+    Ok(())
+}
+
+/// Remove a track from a YouTube Music playlist.
+pub async fn remove_from_yt_playlist(
+    playlist_id: &str,
+    video_id: &str,
+    set_video_id: &str,
+) -> Result<(), String> {
+    let cfg = crate::config::AppConfig::load();
+    let cookie = cfg.youtube.cookie.as_deref()
+        .ok_or("Not logged in — removing from playlist requires authentication")?;
+    let pid = playlist_id.strip_prefix("VL").unwrap_or(playlist_id);
+    innertube_request("browse/edit_playlist", cookie, serde_json::json!({
+        "playlistId": pid,
+        "actions": [{
+            "action": "ACTION_REMOVE_VIDEO",
+            "removedVideoId": video_id,
+            "setVideoId": set_video_id,
+        }]
+    }))?;
+    log::info!("[youtube] removed {video_id} from playlist {pid}");
+    Ok(())
+}
+
+/// Subscribe to a YouTube Music artist/channel.
+pub async fn subscribe(channel_id: &str) -> Result<(), String> {
+    let cfg = crate::config::AppConfig::load();
+    let cookie = cfg.youtube.cookie.as_deref()
+        .ok_or("Not logged in — subscribing requires authentication")?;
+    innertube_request("subscription/subscribe", cookie, serde_json::json!({
+        "channelIds": [channel_id],
+    }))?;
+    log::info!("[youtube] subscribed to {channel_id}");
+    Ok(())
+}
+
+/// Unsubscribe from a YouTube Music artist/channel.
+pub async fn unsubscribe(channel_id: &str) -> Result<(), String> {
+    let cfg = crate::config::AppConfig::load();
+    let cookie = cfg.youtube.cookie.as_deref()
+        .ok_or("Not logged in — unsubscribing requires authentication")?;
+    innertube_request("subscription/unsubscribe", cookie, serde_json::json!({
+        "channelIds": [channel_id],
+    }))?;
+    log::info!("[youtube] unsubscribed from {channel_id}");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Browse: Home feed and Explore
+// ---------------------------------------------------------------------------
+
+/// Get the YouTube Music home feed (personalized recommendations).
+/// Returns raw JSON — the response structure is complex and variable,
+/// best parsed client-side.
+pub async fn get_home_feed() -> Result<serde_json::Value, String> {
+    let cfg = crate::config::AppConfig::load();
+    let cookie = cfg.youtube.cookie.as_deref()
+        .ok_or("Not logged in — home feed requires authentication")?;
+    let json = innertube_browse("FEmusic_home", cookie)?;
+    log::info!("[youtube] fetched home feed");
+    Ok(json)
+}
+
+/// Get moods and genres for the Explore page.
+/// Returns raw JSON — parsed client-side into genre/mood cards.
+pub async fn get_moods_and_genres() -> Result<serde_json::Value, String> {
+    let cfg = crate::config::AppConfig::load();
+    let cookie = cfg.youtube.cookie.as_deref()
+        .ok_or("Not logged in — explore requires authentication")?;
+    let json = innertube_browse("FEmusic_moods_and_genres", cookie)?;
+    log::info!("[youtube] fetched moods and genres");
+    Ok(json)
+}
+
+/// Browse a genre/mood category page and return the playlists it contains.
+pub async fn get_genre_playlists(browse_id: &str, params: Option<&str>) -> Result<Vec<YtPlaylist>, String> {
+    let cfg = crate::config::AppConfig::load();
+    let cookie = cfg.youtube.cookie.as_deref()
+        .ok_or("Not logged in — browsing genres requires authentication")?;
+
+    // Genre categories often need a `params` field to return results.
+    let mut body = serde_json::json!({ "browseId": browse_id });
+    if let Some(p) = params {
+        body.as_object_mut().unwrap().insert("params".to_string(), serde_json::json!(p));
+    }
+    let json = innertube_request("browse", cookie, body)?;
+
+    // Debug: dump response and renderer types for troubleshooting.
+    if let Some(cache_dir) = dirs::cache_dir() {
+        let safe_id = browse_id.replace('/', "_");
+        let dump_path = cache_dir.join("retroamp").join(format!("yt_genre_{safe_id}_debug.json"));
+        let _ = std::fs::create_dir_all(dump_path.parent().unwrap());
+        let _ = std::fs::write(&dump_path, serde_json::to_string_pretty(&json).unwrap_or_default());
+    }
+    let mut renderer_types = Vec::new();
+    find_renderer_types(&json, &mut renderer_types);
+    log::info!("[youtube] genre {browse_id} renderer types: {renderer_types:?}");
+
+    // Genre pages contain playlists in musicTwoRowItemRenderer nodes (same as library playlists)
+    // plus sometimes in musicCarouselShelfRenderer shelves.
+    let playlists = extract_playlists_from_browse_response(&json);
+
+    log::info!("[youtube] genre {browse_id}: {} playlists", playlists.len());
+    Ok(playlists)
+}
+
+/// Get subscribed/library artists via direct InnerTube.
+pub async fn get_library_artists() -> Result<Vec<YtArtistRef>, String> {
+    let cfg = crate::config::AppConfig::load();
+    let cookie = cfg.youtube.cookie.as_deref()
+        .ok_or("Not logged in — library artists require authentication")?;
+
+    // Try the primary browse ID for subscribed artists.
+    let json = match innertube_browse("FEmusic_library_corpus_artists", cookie) {
+        Ok(j) => j,
+        Err(_) => innertube_browse("FEmusic_library_privately_owned_artists", cookie)?,
+    };
+
+    let artists = extract_artists_from_browse_response(&json);
+    log::info!("[youtube] library artists: {} found", artists.len());
+    Ok(artists)
+}
+
+/// Extract artist references from a YouTube Music browse response.
+fn extract_artists_from_browse_response(json: &serde_json::Value) -> Vec<YtArtistRef> {
+    let mut artists = Vec::new();
+    find_artist_renderers(json, &mut artists);
+    artists
+}
+
+/// Recursively find artist items in browse responses.
+/// Artists appear as musicTwoRowItemRenderer or musicResponsiveListItemRenderer.
+fn find_artist_renderers(value: &serde_json::Value, artists: &mut Vec<YtArtistRef>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(renderer) = map.get("musicTwoRowItemRenderer") {
+                let browse_id = renderer
+                    .pointer("/navigationEndpoint/browseEndpoint/browseId")
+                    .and_then(|v| v.as_str());
+                let title = renderer
+                    .pointer("/title/runs/0/text")
+                    .and_then(|v| v.as_str());
+                // Artists have browse IDs starting with "UC".
+                if let (Some(bid), Some(name)) = (browse_id, title) {
+                    if bid.starts_with("UC") {
+                        artists.push(YtArtistRef {
+                            browse_id: Some(bid.to_string()),
+                            name: name.to_string(),
+                        });
+                    }
+                }
+            }
+            if let Some(renderer) = map.get("musicResponsiveListItemRenderer") {
+                let browse_id = renderer
+                    .pointer("/navigationEndpoint/browseEndpoint/browseId")
+                    .and_then(|v| v.as_str());
+                let name = renderer
+                    .pointer("/flexColumns/0/musicResponsiveListItemFlexColumnRenderer/text/runs/0/text")
+                    .and_then(|v| v.as_str());
+                if let (Some(bid), Some(n)) = (browse_id, name) {
+                    if bid.starts_with("UC") {
+                        artists.push(YtArtistRef {
+                            browse_id: Some(bid.to_string()),
+                            name: n.to_string(),
+                        });
+                    }
+                }
+            }
+            for v in map.values() {
+                find_artist_renderers(v, artists);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for v in arr {
+                find_artist_renderers(v, artists);
+            }
+        }
+        _ => {}
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1055,6 +1328,12 @@ fn parse_song_renderer(renderer: &serde_json::Value) -> Option<YtTrack> {
                 .map(|(url, _)| normalize_thumbnail_url(&url))
         });
 
+    // Playlist-specific entry ID (needed for removing tracks from playlists).
+    let set_video_id = renderer
+        .pointer("/playlistItemData/playlistSetVideoId")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
     Some(YtTrack {
         video_id,
         title,
@@ -1067,6 +1346,7 @@ fn parse_song_renderer(renderer: &serde_json::Value) -> Option<YtTrack> {
         duration_ms,
         thumbnail_url,
         explicit: false,
+        set_video_id,
     })
 }
 
@@ -1164,6 +1444,7 @@ fn convert_table_list_song(s: ytmapi_rs::parse::TableListSong) -> YtTrack {
         duration_ms,
         thumbnail_url: best_thumbnail(&s.thumbnails),
         explicit: s.explicit == ytmapi_rs::common::Explicit::IsExplicit,
+        set_video_id: None,
     }
 }
 
@@ -1188,6 +1469,7 @@ fn convert_history_song(s: ytmapi_rs::parse::HistoryItemSong) -> YtTrack {
         duration_ms,
         thumbnail_url: best_thumbnail(&s.thumbnails),
         explicit: s.explicit == ytmapi_rs::common::Explicit::IsExplicit,
+        set_video_id: None,
     }
 }
 
@@ -1208,6 +1490,7 @@ fn convert_search_song(s: ytmapi_rs::parse::SearchResultSong) -> YtTrack {
         duration_ms,
         thumbnail_url: best_thumbnail(&s.thumbnails),
         explicit: s.explicit == ytmapi_rs::common::Explicit::IsExplicit,
+        set_video_id: None,
     }
 }
 
@@ -1227,6 +1510,8 @@ fn convert_search_album(a: ytmapi_rs::parse::SearchResultAlbum) -> YtAlbumRef {
 
 fn convert_artist_albums(
     section: &Option<ytmapi_rs::parse::GetArtistAlbums>,
+    artist_browse_id: &str,
+    artist_name: &str,
 ) -> Vec<YtAlbumRef> {
     let Some(section) = section else {
         return Vec::new();
@@ -1239,7 +1524,10 @@ fn convert_artist_albums(
             name: a.title.clone(),
             thumbnail_url: best_thumbnail(&a.thumbnails),
             year: Some(a.year.clone()),
-            artists: Vec::new(),
+            artists: vec![YtArtistRef {
+                browse_id: Some(artist_browse_id.to_string()),
+                name: artist_name.to_string(),
+            }],
             album_type: None,
         })
         .collect()
@@ -1253,30 +1541,19 @@ fn best_thumbnail(thumbnails: &[ytmapi_rs::common::Thumbnail]) -> Option<String>
     if thumbnails.is_empty() {
         return None;
     }
-    // Pick the smallest thumbnail that's at least 120px wide, or the largest available.
-    let thumb = thumbnails
-        .iter()
-        .filter(|t| t.width >= 120)
-        .min_by_key(|t| t.width)
-        .or_else(|| thumbnails.iter().max_by_key(|t| t.width))?;
+    // Pick the largest available thumbnail. YouTube provides multiple sizes
+    // (typically 60, 120, 226, 576px). Larger thumbnails look better in
+    // the browser and the extra bandwidth is negligible.
+    let thumb = thumbnails.iter().max_by_key(|t| t.width)?;
     Some(normalize_thumbnail_url(&thumb.url))
 }
 
-/// Normalize a thumbnail URL — fix protocol-relative URLs and resize params.
+/// Normalize a thumbnail URL — fix protocol-relative URLs.
 fn normalize_thumbnail_url(url: &str) -> String {
     let mut url = url.to_string();
     // Fix protocol-relative URLs.
     if url.starts_with("//") {
         url = format!("https:{url}");
-    }
-    // YouTube thumbnail URLs often have `=w60-h60` or `=s60` size params.
-    // Replace with a reasonable size for our UI.
-    if let Some(idx) = url.rfind("=w") {
-        url.truncate(idx);
-        url.push_str("=w226-h226-l90-rj");
-    } else if let Some(idx) = url.rfind("=s") {
-        url.truncate(idx);
-        url.push_str("=w226-h226-l90-rj");
     }
     url
 }

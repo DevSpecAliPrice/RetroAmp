@@ -253,6 +253,96 @@ pub async fn youtube_get_history() -> Result<Vec<YtTrack>, String> {
 }
 
 // ---------------------------------------------------------------------------
+// Write operations (authenticated only)
+// ---------------------------------------------------------------------------
+
+/// Like a track on YouTube Music.
+#[tauri::command]
+pub async fn youtube_like_track(video_id: String) -> Result<(), String> {
+    crate::youtube::api::like_track(&video_id).await
+}
+
+/// Remove a like from a track on YouTube Music.
+#[tauri::command]
+pub async fn youtube_unlike_track(video_id: String) -> Result<(), String> {
+    crate::youtube::api::unlike_track(&video_id).await
+}
+
+/// Create a new YouTube Music playlist. Returns the new playlist ID.
+#[tauri::command]
+pub async fn youtube_create_playlist(
+    title: String,
+    video_ids: Vec<String>,
+) -> Result<String, String> {
+    crate::youtube::api::create_playlist(&title, &video_ids).await
+}
+
+/// Delete a YouTube Music playlist.
+#[tauri::command]
+pub async fn youtube_delete_playlist(playlist_id: String) -> Result<(), String> {
+    crate::youtube::api::delete_playlist(&playlist_id).await
+}
+
+/// Add a track to a YouTube Music playlist.
+#[tauri::command]
+pub async fn youtube_add_to_yt_playlist(
+    playlist_id: String,
+    video_id: String,
+) -> Result<(), String> {
+    crate::youtube::api::add_to_yt_playlist(&playlist_id, &video_id).await
+}
+
+/// Remove a track from a YouTube Music playlist.
+#[tauri::command]
+pub async fn youtube_remove_from_yt_playlist(
+    playlist_id: String,
+    video_id: String,
+    set_video_id: String,
+) -> Result<(), String> {
+    crate::youtube::api::remove_from_yt_playlist(&playlist_id, &video_id, &set_video_id).await
+}
+
+/// Subscribe to a YouTube Music artist.
+#[tauri::command]
+pub async fn youtube_subscribe(channel_id: String) -> Result<(), String> {
+    crate::youtube::api::subscribe(&channel_id).await
+}
+
+/// Unsubscribe from a YouTube Music artist.
+#[tauri::command]
+pub async fn youtube_unsubscribe(channel_id: String) -> Result<(), String> {
+    crate::youtube::api::unsubscribe(&channel_id).await
+}
+
+// ---------------------------------------------------------------------------
+// Browse: Home feed and Explore
+// ---------------------------------------------------------------------------
+
+/// Get the YouTube Music home feed (personalized recommendations).
+#[tauri::command]
+pub async fn youtube_get_home() -> Result<serde_json::Value, String> {
+    crate::youtube::api::get_home_feed().await
+}
+
+/// Get moods and genres for the Explore tab.
+#[tauri::command]
+pub async fn youtube_get_moods_and_genres() -> Result<serde_json::Value, String> {
+    crate::youtube::api::get_moods_and_genres().await
+}
+
+/// Browse a genre/mood category and return its playlists.
+#[tauri::command]
+pub async fn youtube_get_genre_playlists(browse_id: String, params: Option<String>) -> Result<Vec<super::types::YtPlaylist>, String> {
+    crate::youtube::api::get_genre_playlists(&browse_id, params.as_deref()).await
+}
+
+/// Get the user's subscribed/library artists.
+#[tauri::command]
+pub async fn youtube_get_library_artists() -> Result<Vec<super::types::YtArtistRef>, String> {
+    crate::youtube::api::get_library_artists().await
+}
+
+// ---------------------------------------------------------------------------
 // Settings commands
 // ---------------------------------------------------------------------------
 

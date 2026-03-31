@@ -814,6 +814,20 @@ pub fn run() {
             youtube::commands::youtube_auth_status,
             youtube::commands::youtube_login,
             youtube::commands::youtube_logout,
+            // YouTube — write operations
+            youtube::commands::youtube_like_track,
+            youtube::commands::youtube_unlike_track,
+            youtube::commands::youtube_create_playlist,
+            youtube::commands::youtube_delete_playlist,
+            youtube::commands::youtube_add_to_yt_playlist,
+            youtube::commands::youtube_remove_from_yt_playlist,
+            youtube::commands::youtube_subscribe,
+            youtube::commands::youtube_unsubscribe,
+            // YouTube — browse (home, explore, genres, library artists)
+            youtube::commands::youtube_get_home,
+            youtube::commands::youtube_get_moods_and_genres,
+            youtube::commands::youtube_get_genre_playlists,
+            youtube::commands::youtube_get_library_artists,
         ])
         .run(tauri::generate_context!())
         .expect("error while running RetroAmp");

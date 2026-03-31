@@ -58,6 +58,10 @@ pub struct YtTrack {
     pub thumbnail_url: Option<String>,
     #[serde(default)]
     pub explicit: bool,
+    /// Playlist-specific entry ID, needed for removing tracks from playlists.
+    /// Only present when the track was fetched from a playlist browse response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set_video_id: Option<String>,
 }
 
 /// Minimal album reference inside a track (just name + id).

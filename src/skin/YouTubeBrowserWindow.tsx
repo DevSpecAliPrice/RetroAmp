@@ -1,8 +1,22 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, type ImgHTMLAttributes } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { SkinData } from "./parser";
 import { showContextMenu, type NativeMenuEntry } from "../nativeMenu";
+
+/** Image component that hides itself on load error and uses no-referrer policy
+ *  (required for YouTube thumbnail CDN URLs in embedded WebViews). */
+function Thumb(props: ImgHTMLAttributes<HTMLImageElement>) {
+  return (
+    <img
+      {...props}
+      loading="lazy"
+      referrerPolicy="no-referrer"
+      crossOrigin="anonymous"
+      onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
+    />
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Types matching the Rust youtube/types.rs
@@ -17,7 +31,7 @@ interface YtAlbumRef {
 interface YtTrack {
   video_id: string; title: string; artists: YtArtistRef[];
   album?: YtAlbumRefSimple; duration?: string; duration_ms?: number;
-  thumbnail_url?: string; explicit: boolean;
+  thumbnail_url?: string; explicit: boolean; set_video_id?: string;
 }
 interface YtAlbum {
   browse_id: string; title: string; artists: YtArtistRef[];
@@ -46,7 +60,8 @@ interface YtPlaylistDetail { info: YtPlaylist; tracks: YtTrack[] }
 type DetailView =
   | { type: "album"; id: string; name: string }
   | { type: "artist"; id: string; name: string }
-  | { type: "playlist"; id: string; name: string };
+  | { type: "playlist"; id: string; name: string }
+  | { type: "genre"; id: string; name: string; params?: string };
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -150,7 +165,7 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
   }, [recheckAuth]);
 
   // --- Tab & navigation state ---
-  type Tab = "search" | "library";
+  type Tab = "search" | "home" | "explore" | "library";
   const [tab, setTab] = useState<Tab>("search");
   const [detailStack, setDetailStack] = useState<DetailView[]>([]);
   const currentDetail = detailStack.length > 0 ? detailStack[detailStack.length - 1] : null;
@@ -192,6 +207,7 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
   const [detailAlbum, setDetailAlbum] = useState<YtAlbum | null>(null);
   const [detailArtist, setDetailArtist] = useState<YtArtist | null>(null);
   const [detailPlaylist, setDetailPlaylist] = useState<YtPlaylistDetail | null>(null);
+  const [detailGenrePlaylists, setDetailGenrePlaylists] = useState<YtPlaylist[]>([]);
   const [detailLoading, setDetailLoading] = useState(false);
 
   useEffect(() => {
@@ -212,15 +228,21 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
       invoke<YtPlaylistDetail>("youtube_get_playlist", { browseId: currentDetail.id })
         .then(setDetailPlaylist).catch((e) => console.error("Playlist fetch failed:", e))
         .finally(() => setDetailLoading(false));
+    } else if (currentDetail.type === "genre") {
+      setDetailGenrePlaylists([]);
+      invoke<YtPlaylist[]>("youtube_get_genre_playlists", { browseId: currentDetail.id, params: currentDetail.params ?? null })
+        .then(setDetailGenrePlaylists).catch((e) => console.error("Genre fetch failed:", e))
+        .finally(() => setDetailLoading(false));
     }
   }, [currentDetail?.type, currentDetail?.id]);
 
   // --- Library state ---
-  type LibSection = "liked" | "playlists" | "history";
+  type LibSection = "liked" | "playlists" | "history" | "artists";
   const [libSection, setLibSection] = useState<LibSection>("playlists");
   const [libLiked, setLibLiked] = useState<YtTrack[]>([]);
   const [libPlaylists, setLibPlaylists] = useState<YtPlaylist[]>([]);
   const [libHistory, setLibHistory] = useState<YtTrack[]>([]);
+  const [libArtists, setLibArtists] = useState<YtArtistRef[]>([]);
   const [libLoading, setLibLoading] = useState(false);
   const [libError, setLibError] = useState<string | null>(null);
 
@@ -230,7 +252,8 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
     setLibError(null);
     if (libSection === "liked") {
       invoke<YtTrack[]>("youtube_get_library_songs")
-        .then(setLibLiked).catch((e) => { console.error(e); setLibError(`${e}`); })
+        .then((tracks) => { setLibLiked(tracks); setLikedIds(new Set(tracks.map(t => t.video_id))); })
+        .catch((e) => { console.error(e); setLibError(`${e}`); })
         .finally(() => setLibLoading(false));
     } else if (libSection === "playlists") {
       console.log("[RetroAmp] loading library playlists...");
@@ -242,8 +265,38 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
       invoke<YtTrack[]>("youtube_get_history")
         .then(setLibHistory).catch((e) => { console.error(e); setLibError(`${e}`); })
         .finally(() => setLibLoading(false));
+    } else if (libSection === "artists") {
+      invoke<YtArtistRef[]>("youtube_get_library_artists")
+        .then(setLibArtists).catch((e) => { console.error(e); setLibError(`${e}`); })
+        .finally(() => setLibLoading(false));
     }
   }, [tab, libSection, authenticated]);
+
+  // --- Home & Explore state ---
+  const [homeData, setHomeData] = useState<any>(null);
+  const [homeLoading, setHomeLoading] = useState(false);
+  const [exploreData, setExploreData] = useState<any>(null);
+  const [exploreLoading, setExploreLoading] = useState(false);
+
+  // --- Home feed effect ---
+  useEffect(() => {
+    if (tab !== "home" || !authenticated || homeData) return;
+    setHomeLoading(true);
+    invoke<any>("youtube_get_home")
+      .then(setHomeData)
+      .catch((e) => { console.error("[YT] home feed error:", e); })
+      .finally(() => setHomeLoading(false));
+  }, [tab, authenticated, homeData]);
+
+  // --- Explore effect ---
+  useEffect(() => {
+    if (tab !== "explore" || !authenticated || exploreData) return;
+    setExploreLoading(true);
+    invoke<any>("youtube_get_moods_and_genres")
+      .then(setExploreData)
+      .catch((e) => { console.error("[YT] explore error:", e); })
+      .finally(() => setExploreLoading(false));
+  }, [tab, authenticated, exploreData]);
 
   // --- Status message ---
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
@@ -253,6 +306,15 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
     clearTimeout(statusTimer.current);
     statusTimer.current = setTimeout(() => setStatusMsg(null), ms);
   }, []);
+
+  // --- Like state (optimistic, session-local) ---
+  const [likedIds, setLikedIds] = useState<Set<string>>(new Set());
+  const [subscribedIds, setSubscribedIds] = useState<Set<string>>(new Set());
+
+  // --- Create playlist dialog state ---
+  const [showCreatePlaylistDialog, setShowCreatePlaylistDialog] = useState(false);
+  const [createPlaylistFor, setCreatePlaylistFor] = useState<YtTrack | null>(null);
+  const [newPlaylistName, setNewPlaylistName] = useState("");
 
   // --- Actions ---
   const playTrack = useCallback(async (track: YtTrack) => {
@@ -304,25 +366,102 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
     } catch (e) { showStatus(`Error: ${e}`); }
   }, [showStatus]);
 
+  const likeTrack = useCallback(async (track: YtTrack) => {
+    if (!authenticated || !track.video_id) return;
+    try {
+      await invoke("youtube_like_track", { videoId: track.video_id });
+      setLikedIds(prev => new Set(prev).add(track.video_id));
+      showStatus(`Liked: ${track.title}`);
+    } catch (e) { showStatus(`Error: ${e}`); }
+  }, [authenticated, showStatus]);
+
+  const unlikeTrack = useCallback(async (track: YtTrack) => {
+    if (!authenticated || !track.video_id) return;
+    try {
+      await invoke("youtube_unlike_track", { videoId: track.video_id });
+      setLikedIds(prev => { const s = new Set(prev); s.delete(track.video_id); return s; });
+      showStatus(`Unliked: ${track.title}`);
+    } catch (e) { showStatus(`Error: ${e}`); }
+  }, [authenticated, showStatus]);
+
+  const confirmCreatePlaylist = useCallback(async () => {
+    const name = newPlaylistName.trim();
+    if (!name) return;
+    const videoIds = createPlaylistFor ? [createPlaylistFor.video_id] : [];
+    try {
+      await invoke("youtube_create_playlist", { title: name, videoIds });
+      showStatus(`Created playlist: ${name}`);
+      setShowCreatePlaylistDialog(false);
+      setNewPlaylistName("");
+      setCreatePlaylistFor(null);
+      // Refresh library playlists.
+      invoke<YtPlaylist[]>("youtube_get_library_playlists")
+        .then(setLibPlaylists).catch(console.error);
+    } catch (e) { showStatus(`Error: ${e}`); }
+  }, [newPlaylistName, createPlaylistFor, showStatus]);
+
   const openTrackMenu = useCallback(async (track: YtTrack, mx: number, my: number) => {
     const items: NativeMenuEntry[] = [
       { type: "item", id: "play", label: "Play" },
       { type: "item", id: "add", label: "Add to Playlist" },
     ];
+    if (authenticated) {
+      items.push({ type: "separator" });
+      const isLiked = likedIds.has(track.video_id);
+      items.push({ type: "item", id: isLiked ? "unlike" : "like", label: isLiked ? "Unlike" : "Like" });
+      // "Add to YouTube Playlist" submenu.
+      const ytPlItems: NativeMenuEntry[] = libPlaylists.map((pl) => ({
+        type: "item" as const, id: `yt_pl_${pl.browse_id}`, label: pl.title,
+      }));
+      ytPlItems.push({ type: "separator" });
+      ytPlItems.push({ type: "item", id: "yt_pl_new", label: "New Playlist..." });
+      items.push({ type: "submenu", label: "Add to YouTube Playlist", items: ytPlItems });
+    }
     if (track.album?.browse_id) {
       items.push({ type: "separator" });
       items.push({ type: "item", id: "album", label: "Go to Album" });
     }
-    if (track.artists.length > 0 && track.artists[0].browse_id) {
+    if (track.artists.length > 0 && track.artists[0].name) {
       if (!track.album?.browse_id) items.push({ type: "separator" });
       items.push({ type: "item", id: "artist", label: "Go to Artist" });
     }
     const sel = await showContextMenu(items, mx, my);
+    if (!sel) return;
     if (sel === "play") playTrack(track);
     else if (sel === "add") addToPlaylist(track);
+    else if (sel === "like") likeTrack(track);
+    else if (sel === "unlike") unlikeTrack(track);
     else if (sel === "album" && track.album?.browse_id) pushDetail({ type: "album", id: track.album.browse_id, name: track.album.name });
-    else if (sel === "artist" && track.artists[0]?.browse_id) pushDetail({ type: "artist", id: track.artists[0].browse_id, name: track.artists[0].name });
-  }, [playTrack, addToPlaylist, pushDetail]);
+    else if (sel === "artist" && track.artists[0]) {
+      const artist = track.artists[0];
+      if (artist.browse_id) {
+        pushDetail({ type: "artist", id: artist.browse_id, name: artist.name });
+      } else {
+        // Search for the artist to find their browse ID.
+        showStatus(`Searching for ${artist.name}...`);
+        try {
+          const results = await invoke<YtSearchResults>("youtube_search", { query: artist.name });
+          const match = results.artists.find(a => a.browse_id && a.name.toLowerCase() === artist.name.toLowerCase())
+            || results.artists.find(a => a.browse_id);
+          if (match?.browse_id) {
+            pushDetail({ type: "artist", id: match.browse_id, name: match.name });
+          } else {
+            showStatus(`Artist "${artist.name}" not found`);
+          }
+        } catch (e) { showStatus(`Error: ${e}`); }
+      }
+    }
+    else if (sel === "yt_pl_new") {
+      setCreatePlaylistFor(track);
+      setShowCreatePlaylistDialog(true);
+    } else if (sel.startsWith("yt_pl_")) {
+      const playlistId = sel.slice(6);
+      try {
+        await invoke("youtube_add_to_yt_playlist", { playlistId, videoId: track.video_id });
+        showStatus("Added to YouTube playlist");
+      } catch (e) { showStatus(`Error: ${e}`); }
+    }
+  }, [playTrack, addToPlaylist, pushDetail, likeTrack, unlikeTrack, authenticated, likedIds, libPlaylists, showStatus]);
 
   // --- Rendering helpers ---
   const renderTrackRow = useCallback((track: YtTrack, index: number) => (
@@ -337,15 +476,27 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
       onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = "transparent"; }}
     >
       {track.thumbnail_url ? (
-        <img src={track.thumbnail_url} alt="" style={{ width: 11 * s, height: 11 * s, objectFit: "cover", flexShrink: 0 }} />
+        <Thumb src={track.thumbnail_url} alt="" style={{ width: 11 * s, height: 11 * s, objectFit: "cover", flexShrink: 0 }} />
       ) : (
         <span style={{ width: 11 * s, textAlign: "center", opacity: 0.3, flexShrink: 0, fontSize: Math.round(8 * s) }}>{index + 1}</span>
+      )}
+      {authenticated && (
+        <span
+          onClick={(e) => { e.stopPropagation(); likedIds.has(track.video_id) ? unlikeTrack(track) : likeTrack(track); }}
+          style={{
+            width: 8 * s, textAlign: "center", cursor: "pointer", flexShrink: 0,
+            fontSize: Math.round(7 * s),
+            opacity: likedIds.has(track.video_id) ? 1 : 0.2,
+            color: likedIds.has(track.video_id) ? "#ff4444" : ps.normal,
+          }}
+          title={likedIds.has(track.video_id) ? "Unlike" : "Like"}
+        >{"\u2665"}</span>
       )}
       <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{track.title}</span>
       <span style={{ width: 80 * s, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", opacity: 0.7, flexShrink: 0 }}>{artistNames(track.artists)}</span>
       <span style={{ width: 32 * s, textAlign: "right", opacity: 0.5, flexShrink: 0 }}>{track.duration_ms ? formatDuration(track.duration_ms) : track.duration ?? ""}</span>
     </div>
-  ), [s, ps, playTrack, openTrackMenu]);
+  ), [s, ps, playTrack, openTrackMenu, authenticated, likedIds, likeTrack, unlikeTrack]);
 
   const renderAlbumRow = useCallback((album: YtAlbumRef, key: string) => (
     <div key={key}
@@ -358,7 +509,7 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
       onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = "transparent"; }}
     >
       {album.thumbnail_url && (
-        <img src={album.thumbnail_url} alt="" style={{ width: 24 * s, height: 24 * s, objectFit: "cover", flexShrink: 0 }} />
+        <Thumb src={album.thumbnail_url} alt="" style={{ width: 24 * s, height: 24 * s, objectFit: "cover", flexShrink: 0 }} />
       )}
       <div style={{ flex: 1, overflow: "hidden" }}>
         <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{album.name}</div>
@@ -396,7 +547,7 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
       onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = "transparent"; }}
     >
       {pl.thumbnail_url && (
-        <img src={pl.thumbnail_url} alt="" style={{ width: 24 * s, height: 24 * s, objectFit: "cover", flexShrink: 0 }} />
+        <Thumb src={pl.thumbnail_url} alt="" style={{ width: 24 * s, height: 24 * s, objectFit: "cover", flexShrink: 0 }} />
       )}
       <div style={{ flex: 1, overflow: "hidden" }}>
         <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{pl.title}</div>
@@ -461,12 +612,12 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
       <div>
         <div style={{ display: "flex", gap: 8 * s, padding: `${6 * s}px ${4 * s}px`, alignItems: "flex-start" }}>
           {detailAlbum.thumbnail_url && (
-            <img src={detailAlbum.thumbnail_url} alt="" style={{ width: 48 * s, height: 48 * s, objectFit: "cover", flexShrink: 0 }} />
+            <Thumb src={detailAlbum.thumbnail_url} alt="" style={{ width: 48 * s, height: 48 * s, objectFit: "cover", flexShrink: 0 }} />
           )}
           <div style={{ flex: 1, overflow: "hidden" }}>
             <div style={{ color: ps.current, fontSize: Math.round(10 * s), fontWeight: "bold", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{detailAlbum.title}</div>
             <div style={{ fontSize: Math.round(9 * s), opacity: 0.7 }}>
-              {artistNames(detailAlbum.artists)} {detailAlbum.year ? `\u00b7 ${detailAlbum.year}` : ""} \u00b7 {detailAlbum.tracks.length} tracks
+              {artistNames(detailAlbum.artists)} {detailAlbum.year ? `\u00b7 ${detailAlbum.year}` : ""} {"\u00b7"} {detailAlbum.tracks.length} tracks
             </div>
             <div style={{ display: "flex", gap: 6 * s, marginTop: 4 * s }}>
               <div onClick={() => addTracks(detailAlbum.tracks, true)}
@@ -491,11 +642,38 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
       <div>
         <div style={{ display: "flex", gap: 8 * s, padding: `${6 * s}px ${4 * s}px`, alignItems: "center" }}>
           {detailArtist.thumbnail_url && (
-            <img src={detailArtist.thumbnail_url} alt="" style={{ width: 40 * s, height: 40 * s, borderRadius: "50%", objectFit: "cover", flexShrink: 0 }} />
+            <Thumb src={detailArtist.thumbnail_url} alt="" style={{ width: 40 * s, height: 40 * s, borderRadius: "50%", objectFit: "cover", flexShrink: 0 }} />
           )}
           <div>
             <div style={{ color: ps.current, fontSize: Math.round(10 * s), fontWeight: "bold" }}>{detailArtist.name}</div>
             {detailArtist.subscribers && <div style={{ fontSize: Math.round(8 * s), opacity: 0.6 }}>{detailArtist.subscribers} subscribers</div>}
+            {authenticated && detailArtist.browse_id && (
+              <div
+                onClick={async () => {
+                  const channelId = detailArtist.browse_id;
+                  const isSub = subscribedIds.has(channelId);
+                  try {
+                    if (isSub) {
+                      await invoke("youtube_unsubscribe", { channelId });
+                      setSubscribedIds(prev => { const s2 = new Set(prev); s2.delete(channelId); return s2; });
+                      showStatus(`Unsubscribed from ${detailArtist.name}`);
+                    } else {
+                      await invoke("youtube_subscribe", { channelId });
+                      setSubscribedIds(prev => new Set(prev).add(channelId));
+                      showStatus(`Subscribed to ${detailArtist.name}`);
+                    }
+                  } catch (e) { showStatus(`Error: ${e}`); }
+                }}
+                style={{
+                  marginTop: 3 * s, padding: `${2 * s}px ${8 * s}px`,
+                  background: subscribedIds.has(detailArtist.browse_id) ? `${ps.selectedbg}88` : ps.selectedbg,
+                  color: ps.current, cursor: "pointer", fontSize: Math.round(8 * s),
+                  display: "inline-block",
+                }}
+              >
+                {subscribedIds.has(detailArtist.browse_id) ? "Subscribed" : "Subscribe"}
+              </div>
+            )}
           </div>
         </div>
         {detailArtist.description && (
@@ -535,7 +713,7 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
       <div>
         <div style={{ display: "flex", gap: 8 * s, padding: `${6 * s}px ${4 * s}px`, alignItems: "flex-start" }}>
           {detailPlaylist.info.thumbnail_url && (
-            <img src={detailPlaylist.info.thumbnail_url} alt="" style={{ width: 48 * s, height: 48 * s, objectFit: "cover", flexShrink: 0 }} />
+            <Thumb src={detailPlaylist.info.thumbnail_url} alt="" style={{ width: 48 * s, height: 48 * s, objectFit: "cover", flexShrink: 0 }} />
           )}
           <div style={{ flex: 1, overflow: "hidden" }}>
             <div style={{ color: ps.current, fontSize: Math.round(10 * s), fontWeight: "bold", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{detailPlaylist.info.title}</div>
@@ -551,10 +729,36 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
                 style={{ padding: `${2 * s}px ${8 * s}px`, background: ps.selectedbg, color: ps.current, cursor: "pointer", fontSize: Math.round(8 * s), opacity: 0.7 }}>
                 Add All
               </div>
+              {authenticated && (
+                <div onClick={async () => {
+                  const playlistId = detailPlaylist.info.browse_id.replace(/^VL/, "");
+                  try {
+                    await invoke("youtube_delete_playlist", { playlistId });
+                    showStatus(`Deleted playlist: ${detailPlaylist.info.title}`);
+                    popDetail();
+                    invoke<YtPlaylist[]>("youtube_get_library_playlists")
+                      .then(setLibPlaylists).catch(console.error);
+                  } catch (e) { showStatus(`Error: ${e}`); }
+                }}
+                  style={{ padding: `${2 * s}px ${8 * s}px`, background: "#660000", color: ps.current, cursor: "pointer", fontSize: Math.round(8 * s) }}>
+                  Delete
+                </div>
+              )}
             </div>
           </div>
         </div>
         {detailPlaylist.tracks.map((t, i) => renderTrackRow(t, i))}
+      </div>
+    );
+  };
+
+  const renderGenreDetail = () => {
+    if (detailLoading) return <div style={{ padding: 8 * s, opacity: 0.5 }}>Loading...</div>;
+    if (detailGenrePlaylists.length === 0) return <div style={{ padding: 8 * s, opacity: 0.5 }}>No playlists found</div>;
+    return (
+      <div>
+        <SectionTitle>{currentDetail?.name ?? "Genre"}</SectionTitle>
+        {detailGenrePlaylists.map(renderPlaylistRow)}
       </div>
     );
   };
@@ -585,7 +789,7 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
     return (
       <div>
         <div style={{ display: "flex", gap: 0, borderBottom: `1px solid ${ps.selectedbg}33` }}>
-          {(["liked", "playlists", "history"] as LibSection[]).map((sec) => (
+          {(["liked", "playlists", "artists", "history"] as LibSection[]).map((sec) => (
             <div key={sec}
               onClick={() => setLibSection(sec)}
               style={{
@@ -594,7 +798,7 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
                 color: libSection === sec ? ps.current : ps.normal,
                 borderBottom: `2px solid ${libSection === sec ? ps.current : "transparent"}`,
               }}
-            >{sec === "liked" ? "Liked Songs" : sec}</div>
+            >{sec === "liked" ? "Liked" : sec}</div>
           ))}
         </div>
         {libLoading ? <div style={{ padding: 8 * s, opacity: 0.5 }}>Loading...</div> :
@@ -617,8 +821,21 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
               </>
             )}
             {libSection === "playlists" && (
-              libPlaylists.length === 0 ? <div style={{ padding: 8 * s, opacity: 0.5 }}>No playlists</div> :
-              libPlaylists.map(renderPlaylistRow)
+              <>
+                <div style={{ padding: `${3 * s}px ${4 * s}px` }}>
+                  <div onClick={() => { setCreatePlaylistFor(null); setShowCreatePlaylistDialog(true); }}
+                    style={{ display: "inline-block", padding: `${2 * s}px ${8 * s}px`, background: ps.selectedbg, color: ps.current, cursor: "pointer", fontSize: Math.round(8 * s) }}>
+                    + New Playlist
+                  </div>
+                </div>
+                {libPlaylists.length === 0 ? <div style={{ padding: 8 * s, opacity: 0.5 }}>No playlists</div> :
+                  libPlaylists.map(renderPlaylistRow)
+                }
+              </>
+            )}
+            {libSection === "artists" && (
+              libArtists.length === 0 ? <div style={{ padding: 8 * s, opacity: 0.5 }}>No subscribed artists</div> :
+              libArtists.map(renderArtistRow)
             )}
             {libSection === "history" && (
               libHistory.length === 0 ? <div style={{ padding: 8 * s, opacity: 0.5 }}>No history</div> :
@@ -626,6 +843,147 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
             )}
           </>
         )}
+      </div>
+    );
+  };
+
+  // --- Home content ---
+  const renderHomeContent = () => {
+    if (homeLoading) return <div style={{ padding: 8 * s, opacity: 0.5 }}>Loading home feed...</div>;
+    if (!homeData) return <div style={{ padding: 8 * s, opacity: 0.5 }}>No data</div>;
+
+    const shelves: { title: string; items: any[] }[] = [];
+    findCarouselShelves(homeData, shelves);
+
+    if (shelves.length === 0) return <div style={{ padding: 8 * s, opacity: 0.5 }}>No recommendations available</div>;
+
+    return (
+      <div>
+        {shelves.map((shelf, i) => (
+          <div key={i}>
+            <SectionTitle>{shelf.title}</SectionTitle>
+            <div style={{ display: "flex", overflowX: "auto", gap: 4 * s, padding: `${2 * s}px ${4 * s}px` }}>
+              {shelf.items.map((item, j) => {
+                const rendered = parseHomeItem(item);
+                if (!rendered) return null;
+                return (
+                  <div key={j}
+                    onClick={() => {
+                      if (rendered.browseId) {
+                        if (rendered.type === "artist") pushDetail({ type: "artist", id: rendered.browseId, name: rendered.title });
+                        else if (rendered.type === "album") pushDetail({ type: "album", id: rendered.browseId, name: rendered.title });
+                        else pushDetail({ type: "playlist", id: rendered.browseId, name: rendered.title });
+                      } else if (rendered.videoId) {
+                        playTrack({ video_id: rendered.videoId, title: rendered.title, artists: [{ browse_id: null, name: rendered.subtitle }], duration_ms: 0, explicit: false } as YtTrack);
+                      }
+                    }}
+                    style={{
+                      minWidth: 48 * s, maxWidth: 60 * s, cursor: "pointer", flexShrink: 0,
+                      textAlign: "center", fontSize: Math.round(7 * s),
+                    }}
+                    onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.opacity = "0.8"; }}
+                    onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.opacity = "1"; }}
+                  >
+                    {rendered.thumbnailUrl && (
+                      <Thumb src={rendered.thumbnailUrl} alt="" style={{
+                        width: 48 * s, height: 48 * s, objectFit: "cover", display: "block",
+                        borderRadius: rendered.type === "artist" ? "50%" : 0,
+                      }} />
+                    )}
+                    <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginTop: 2 * s }}>{rendered.title}</div>
+                    {rendered.subtitle && <div style={{ opacity: 0.6, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{rendered.subtitle}</div>}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  };
+
+  // --- Explore content ---
+  const renderExploreContent = () => {
+    if (exploreLoading) return <div style={{ padding: 8 * s, opacity: 0.5 }}>Loading...</div>;
+    if (!exploreData) return <div style={{ padding: 8 * s, opacity: 0.5 }}>No data</div>;
+
+    const categories: { title: string; browseId: string; params?: string; color?: string }[] = [];
+    findMoodCategories(exploreData, categories);
+
+    if (categories.length === 0) return <div style={{ padding: 8 * s, opacity: 0.5 }}>No genres available</div>;
+
+    return (
+      <div style={{ padding: 4 * s }}>
+        <SectionTitle>Moods & Genres</SectionTitle>
+        <div style={{
+          display: "grid",
+          gridTemplateColumns: `repeat(auto-fill, minmax(${60 * s}px, 1fr))`,
+          gap: 4 * s, padding: `${2 * s}px`,
+        }}>
+          {categories.map((cat, i) => (
+            <div key={i}
+              onClick={() => pushDetail({ type: "genre", id: cat.browseId, name: cat.title, params: cat.params })}
+              style={{
+                padding: `${6 * s}px ${4 * s}px`, textAlign: "center",
+                background: cat.color || ps.selectedbg, color: "#fff",
+                cursor: "pointer", fontSize: Math.round(8 * s),
+                overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+              }}
+              onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.opacity = "0.8"; }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.opacity = "1"; }}
+            >
+              {cat.title}
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  // --- Create Playlist dialog ---
+  const renderCreatePlaylistDialog = () => {
+    if (!showCreatePlaylistDialog) return null;
+    return (
+      <div style={{
+        position: "fixed", top: 0, left: 0, right: 0, bottom: 0,
+        background: "rgba(0,0,0,0.6)", display: "flex",
+        alignItems: "center", justifyContent: "center", zIndex: 100,
+      }}
+        onClick={() => setShowCreatePlaylistDialog(false)}
+      >
+        <div style={{
+          background: ps.normalbg, border: `1px solid ${ps.selectedbg}`,
+          padding: 8 * s, minWidth: 120 * s,
+        }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div style={{ color: ps.current, fontSize: Math.round(9 * s), marginBottom: 6 * s }}>
+            New YouTube Playlist
+          </div>
+          <input
+            type="text" value={newPlaylistName}
+            onChange={(e) => setNewPlaylistName(e.target.value)}
+            placeholder="Playlist name"
+            autoFocus
+            onKeyDown={(e) => { if (e.key === "Enter") confirmCreatePlaylist(); }}
+            style={{
+              width: "100%", boxSizing: "border-box",
+              background: "rgba(255,255,255,0.08)", border: `1px solid ${ps.selectedbg}`,
+              color: ps.normal, padding: `${3 * s}px ${6 * s}px`,
+              fontSize: Math.round(9 * s), fontFamily: "inherit", outline: "none",
+            }}
+          />
+          <div style={{ display: "flex", gap: 6 * s, marginTop: 6 * s, justifyContent: "flex-end" }}>
+            <div onClick={() => setShowCreatePlaylistDialog(false)}
+              style={{ padding: `${2 * s}px ${8 * s}px`, cursor: "pointer", fontSize: Math.round(8 * s), opacity: 0.7 }}>
+              Cancel
+            </div>
+            <div onClick={confirmCreatePlaylist}
+              style={{ padding: `${2 * s}px ${8 * s}px`, background: ps.selectedbg, color: ps.current, cursor: "pointer", fontSize: Math.round(8 * s) }}>
+              Create
+            </div>
+          </div>
+        </div>
       </div>
     );
   };
@@ -644,11 +1002,14 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
           {currentDetail.type === "album" && renderAlbumDetail()}
           {currentDetail.type === "artist" && renderArtistDetail()}
           {currentDetail.type === "playlist" && renderPlaylistDetail()}
+          {currentDetail.type === "genre" && renderGenreDetail()}
         </>
       );
     }
 
     if (tab === "search") return renderSearchContent();
+    if (tab === "home") return renderHomeContent();
+    if (tab === "explore") return renderExploreContent();
     if (tab === "library") return renderLibraryContent();
     return renderSearchContent();
   };
@@ -683,7 +1044,7 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
 
           {/* Tabs */}
           <div style={{ display: "flex", flexShrink: 0, borderBottom: `1px solid ${ps.selectedbg}33` }}>
-            {(["search", ...(authenticated ? ["library"] : [])] as Tab[]).map((t) => (
+            {(["search", ...(authenticated ? ["home", "explore", "library"] : [])] as Tab[]).map((t) => (
               <div key={t}
                 onClick={() => { setTab(t); setDetailStack([]); }}
                 style={{
@@ -716,6 +1077,103 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
         <div style={{ flex: 1, minWidth: 0, overflow: "hidden", ...bgTile("PL_TOP_TILE_SELECTED", "repeat-x"), transform: "scaleY(-1)" }} />
         <div style={{ width: 25 * s, flexShrink: 0, ...bg("PL_TOP_RIGHT_SELECTED"), transform: "scaleY(-1)" }} />
       </div>
+
+      {renderCreatePlaylistDialog()}
     </div>
   );
+}
+
+// ---------------------------------------------------------------------------
+// Home/Explore JSON parsing helpers (outside component to avoid re-creation)
+// ---------------------------------------------------------------------------
+
+interface HomeItem {
+  type: "track" | "album" | "artist" | "playlist";
+  title: string;
+  subtitle: string;
+  thumbnailUrl?: string;
+  browseId?: string;
+  videoId?: string;
+}
+
+/** Recursively find musicCarouselShelfRenderer nodes. */
+function findCarouselShelves(obj: any, result: { title: string; items: any[] }[]) {
+  if (!obj || typeof obj !== "object") return;
+  if (obj.musicCarouselShelfRenderer) {
+    const shelf = obj.musicCarouselShelfRenderer;
+    const title = shelf?.header?.musicCarouselShelfBasicHeaderRenderer
+      ?.title?.runs?.[0]?.text ?? "Recommendations";
+    const items = shelf?.contents ?? [];
+    if (items.length > 0) result.push({ title, items });
+  }
+  for (const val of Object.values(obj)) {
+    if (Array.isArray(val)) val.forEach((v: any) => findCarouselShelves(v, result));
+    else if (typeof val === "object") findCarouselShelves(val, result);
+  }
+}
+
+/** Parse a single home carousel item into a renderable HomeItem. */
+function parseHomeItem(item: any): HomeItem | null {
+  // musicTwoRowItemRenderer — albums, playlists, artists
+  const twoRow = item?.musicTwoRowItemRenderer;
+  if (twoRow) {
+    const title = twoRow?.title?.runs?.[0]?.text ?? "";
+    const subtitle = (twoRow?.subtitle?.runs ?? []).map((r: any) => r.text).join("") ?? "";
+    const browseId = twoRow?.navigationEndpoint?.browseEndpoint?.browseId;
+    const pageType = twoRow?.navigationEndpoint?.browseEndpoint?.browseEndpointContextSupportedConfigs
+      ?.browseEndpointContextMusicConfig?.pageType ?? "";
+    const thumbs = twoRow?.thumbnailRenderer?.musicThumbnailRenderer?.thumbnail?.thumbnails ?? [];
+    const thumbnailUrl = thumbs.length > 0 ? normalizeThumbUrl(thumbs[thumbs.length - 1]?.url) : undefined;
+
+    let type: HomeItem["type"] = "playlist";
+    if (pageType.includes("ALBUM")) type = "album";
+    else if (pageType.includes("ARTIST") || browseId?.startsWith("UC")) type = "artist";
+
+    if (!title) return null;
+    return { type, title, subtitle, thumbnailUrl, browseId };
+  }
+
+  // musicResponsiveListItemRenderer — songs
+  const listItem = item?.musicResponsiveListItemRenderer;
+  if (listItem) {
+    const videoId = listItem?.playlistItemData?.videoId
+      ?? listItem?.overlay?.musicItemThumbnailOverlayRenderer?.content?.musicPlayButtonRenderer?.playNavigationEndpoint?.watchEndpoint?.videoId;
+    const columns = listItem?.flexColumns ?? [];
+    const title = columns[0]?.musicResponsiveListItemFlexColumnRenderer?.text?.runs?.[0]?.text ?? "";
+    const subtitle = columns[1]?.musicResponsiveListItemFlexColumnRenderer?.text?.runs?.[0]?.text ?? "";
+    const thumbs = listItem?.thumbnail?.musicThumbnailRenderer?.thumbnail?.thumbnails ?? [];
+    const thumbnailUrl = thumbs.length > 0 ? normalizeThumbUrl(thumbs[thumbs.length - 1]?.url) : undefined;
+
+    if (!title) return null;
+    return { type: "track", title, subtitle, thumbnailUrl, videoId };
+  }
+
+  return null;
+}
+
+/** Recursively find mood/genre category entries. */
+function findMoodCategories(obj: any, result: { title: string; browseId: string; params?: string; color?: string }[]) {
+  if (!obj || typeof obj !== "object") return;
+  if (obj.musicNavigationButtonRenderer) {
+    const btn = obj.musicNavigationButtonRenderer;
+    const title = btn?.buttonText?.runs?.[0]?.text;
+    const browseId = btn?.clickCommand?.browseEndpoint?.browseId;
+    const params = btn?.clickCommand?.browseEndpoint?.params;
+    let color: string | undefined;
+    const rawColor = btn?.solid?.leftStripeColor;
+    if (typeof rawColor === "number") {
+      color = "#" + ((rawColor >>> 0) & 0xFFFFFF).toString(16).padStart(6, "0");
+    }
+    if (title && browseId) result.push({ title, browseId, params, color });
+  }
+  for (const val of Object.values(obj)) {
+    if (Array.isArray(val)) val.forEach((v: any) => findMoodCategories(v, result));
+    else if (typeof val === "object") findMoodCategories(val, result);
+  }
+}
+
+/** Fix protocol-relative thumbnail URLs. */
+function normalizeThumbUrl(url?: string): string | undefined {
+  if (!url) return undefined;
+  return url.startsWith("//") ? `https:${url}` : url;
 }

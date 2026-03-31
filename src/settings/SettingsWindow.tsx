@@ -487,11 +487,15 @@ function YouTubeTab({ colors }: { colors: ColorProps }) {
       {/* YouTube Music Account */}
       <div className="shortcuts-group">
         <div className="shortcuts-group-title" style={{ color: colors.current }}>YouTube Music Account</div>
+        <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
+          Logging in is optional — search and browsing work without an account.
+          Sign in to access your personal library, liked songs, playlists, and listening history.
+        </div>
         {authStatus.authenticated ? (
           <>
             <div style={{ fontSize: 12, marginBottom: 8 }}>
               <span style={{ color: colors.current }}>Logged in</span>
-              <span style={{ opacity: 0.7 }}> — personal library, liked songs, and history are available in the browser.</span>
+              <span style={{ opacity: 0.7 }}> — your library, liked songs, playlists, and history are available in the YouTube Music browser.</span>
             </div>
             <div onClick={clearCookie}
               style={{ display: "inline-block", padding: "4px 12px", background: colors.selectedbg, color: colors.current, cursor: "pointer", fontSize: 12 }}>
@@ -500,10 +504,13 @@ function YouTubeTab({ colors }: { colors: ColorProps }) {
           </>
         ) : (
           <>
+            {/* Primary login — Google sign-in */}
+            <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 6, fontWeight: "bold" }}>
+              Quick Login
+            </div>
             <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
-              YouTube Music works without login for search and browsing.
-              Sign in with your Google account to access your library, liked songs, and playlists.
-              If you have multiple YouTube channels or a Brand Account, use the Advanced manual login below instead.
+              Opens a Google sign-in window. Pick your Google account, sign in, and RetroAmp will connect automatically.
+              This works for most users with a single YouTube Music account.
             </div>
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <div onClick={!loggingIn ? loginWebView : undefined}
@@ -516,21 +523,30 @@ function YouTubeTab({ colors }: { colors: ColorProps }) {
                 {loggingIn ? "Waiting for sign-in..." : "Log In with Google"}
               </div>
             </div>
-            {/* Advanced: manual cookie paste */}
-            <div style={{ marginTop: 10 }}>
+
+            {/* Advanced login — manual cookie paste */}
+            <div style={{ marginTop: 14 }}>
               <div onClick={() => setShowAdvanced(!showAdvanced)}
-                style={{ fontSize: 11, opacity: 0.5, cursor: "pointer" }}>
-                {showAdvanced ? "\u25BC" : "\u25B6"} Advanced: manual cookie login
+                style={{ fontSize: 12, opacity: 0.8, cursor: "pointer", fontWeight: "bold" }}>
+                {showAdvanced ? "\u25BC" : "\u25B6"} Manual Login (Advanced)
+              </div>
+              <div style={{ fontSize: 12, opacity: 0.6, marginTop: 4, marginBottom: showAdvanced ? 8 : 0 }}>
+                Use this if you have a Brand Account, multiple YouTube channels under one Google account,
+                or if the quick login connects to the wrong account. Paste your browser cookies directly.
               </div>
               {showAdvanced && (
-                <div style={{ marginTop: 6 }}>
-                  <div style={{ fontSize: 12, opacity: 0.6, marginBottom: 6 }}>
-                    Paste the <code style={{ color: colors.current }}>Cookie</code> header from browser DevTools on music.youtube.com.
+                <div>
+                  <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 6 }}>
+                    <b>How to get your cookie:</b> Open <span style={{ color: colors.current }}>music.youtube.com</span> in
+                    your browser while signed in to the correct account. Open Developer Tools
+                    (F12) &rarr; Network tab &rarr; refresh the page &rarr; click the first
+                    request &rarr; find the <code style={{ color: colors.current }}>Cookie</code> request
+                    header &rarr; copy the entire value.
                   </div>
                   <textarea
                     value={cookieInput}
                     onChange={(e) => setCookieInput(e.target.value)}
-                    placeholder="Paste cookie header value here..."
+                    placeholder="Paste the full Cookie header value here..."
                     rows={3}
                     style={{
                       width: "100%", boxSizing: "border-box",
