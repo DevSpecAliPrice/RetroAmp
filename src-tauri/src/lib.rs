@@ -11,6 +11,7 @@ pub mod playlist;
 pub mod tray;
 pub mod radio_browser;
 pub mod skin;
+#[cfg(feature = "spotify")]
 pub mod spotify;
 pub mod window;
 pub mod youtube;
@@ -201,6 +202,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(engine)
         .manage(playlist_manager)
         .manage(eq_settings)
@@ -220,6 +223,7 @@ pub fn run() {
 
             // Attempt to restore Spotify from saved refresh token (non-blocking).
             // No librespot Session needed — just refresh the OAuth token for Web API.
+            #[cfg(feature = "spotify")]
             {
                 let sp = Arc::clone(&spotify_player);
                 tauri::async_runtime::spawn_blocking(move || {
@@ -428,20 +432,24 @@ pub fn run() {
             let radio_layout = saved_ui.radio_browser.as_ref().unwrap_or(&default_layout);
             let library_layout = saved_ui.library_browser.as_ref().unwrap_or(&default_layout);
             let settings_layout = saved_ui.settings.as_ref().unwrap_or(&default_layout);
-            let spotify_layout = saved_ui.spotify_browser.as_ref().unwrap_or(&default_layout);
             let youtube_layout = saved_ui.youtube_browser.as_ref().unwrap_or(&default_layout);
             let visualizer_layout = saved_ui.visualizer.as_ref().unwrap_or(&default_layout);
 
-            let all_panels: &[(WindowId, &config::WindowLayoutEntry)] = &[
+            #[allow(unused_mut)]
+            let mut all_panels: Vec<(WindowId, &config::WindowLayoutEntry)> = vec![
                 (WindowId::Equalizer, &saved_ui.equalizer),
                 (WindowId::Playlist, &saved_ui.playlist),
                 (WindowId::RadioBrowser, radio_layout),
                 (WindowId::LibraryBrowser, library_layout),
                 (WindowId::Settings, settings_layout),
-                (WindowId::SpotifyBrowser, spotify_layout),
                 (WindowId::YouTubeBrowser, youtube_layout),
                 (WindowId::Visualizer, visualizer_layout),
             ];
+            #[cfg(feature = "spotify")]
+            {
+                let spotify_layout = saved_ui.spotify_browser.as_ref().unwrap_or(&default_layout);
+                all_panels.push((WindowId::SpotifyBrowser, spotify_layout));
+            }
 
             // Derive default size from main window (computed once).
             let (main_w, main_h) = app
@@ -453,7 +461,7 @@ pub fn run() {
                 })
                 .unwrap_or((w, h));
 
-            for &(id, entry) in all_panels {
+            for &(id, entry) in &all_panels {
                 let label = id.label();
                 let url = id.url_path();
                 let resizable = id.resizable();
@@ -466,7 +474,9 @@ pub fn run() {
                 }
 
                 let default_w = match id {
-                    WindowId::RadioBrowser | WindowId::SpotifyBrowser | WindowId::YouTubeBrowser => main_w * 1.5,
+                    WindowId::RadioBrowser | WindowId::YouTubeBrowser => main_w * 1.5,
+                    #[cfg(feature = "spotify")]
+                    WindowId::SpotifyBrowser => main_w * 1.5,
                     WindowId::Visualizer => main_w * 2.0,
                     WindowId::Settings => 700.0,
                     _ => main_w,
@@ -596,6 +606,7 @@ pub fn run() {
                         "settings" => Some(WindowId::Settings),
                         "radiobrowser" => Some(WindowId::RadioBrowser),
                         "librarybrowser" => Some(WindowId::LibraryBrowser),
+                        #[cfg(feature = "spotify")]
                         "spotifybrowser" => Some(WindowId::SpotifyBrowser),
                         "youtubebrowser" => Some(WindowId::YouTubeBrowser),
                         _ => None,
@@ -693,6 +704,14 @@ pub fn run() {
             commands::playlist_remove_selected,
             commands::playlist_remove_tracks,
             commands::playlist_clear,
+            commands::playlist_sort_by_title,
+            commands::playlist_reverse,
+            commands::playlist_randomize,
+            commands::playlist_select_all,
+            commands::playlist_select_none,
+            commands::playlist_invert_selection,
+            commands::playlist_crop,
+            commands::playlist_play_next,
             commands::playlist_save,
             commands::playlist_load,
             commands::play_url,
@@ -752,8 +771,12 @@ pub fn run() {
             commands::get_tracks_by_album,
             commands::get_tracks_by_genre,
             commands::reveal_in_file_manager,
+            commands::open_url,
+            commands::get_app_version,
             commands::get_playlist_add_mode,
             commands::set_playlist_add_mode,
+            commands::get_normalize_volume,
+            commands::set_normalize_volume,
             commands::get_library_columns,
             commands::set_library_columns,
             // Browser view state persistence
@@ -782,31 +805,60 @@ pub fn run() {
             // Visualizer
             commands::get_last_visualizer_preset,
             commands::set_last_visualizer_preset,
+            commands::get_visualizer_settings,
+            commands::set_visualizer_settings,
             // Context menu
             context_menu::show_context_menu,
             // Spotify — auth & settings
+            #[cfg(feature = "spotify")]
             spotify::commands::spotify_login,
+            #[cfg(feature = "spotify")]
             spotify::commands::spotify_logout,
+            #[cfg(feature = "spotify")]
             spotify::commands::spotify_status,
+            #[cfg(feature = "spotify")]
             spotify::commands::get_spotify_settings,
+            #[cfg(feature = "spotify")]
             spotify::commands::set_spotify_settings,
             // Spotify — playback
+            #[cfg(feature = "spotify")]
             spotify::commands::spotify_play_track,
+            #[cfg(feature = "spotify")]
             spotify::commands::spotify_add_to_playlist,
             // Spotify — browsing
+            #[cfg(feature = "spotify")]
             spotify::commands::spotify_search,
+            #[cfg(feature = "spotify")]
             spotify::commands::spotify_get_playlists,
+            #[cfg(feature = "spotify")]
             spotify::commands::spotify_get_playlist_items,
+            #[cfg(feature = "spotify")]
             spotify::commands::spotify_get_saved_albums,
+            #[cfg(feature = "spotify")]
             spotify::commands::spotify_get_saved_tracks,
+            #[cfg(feature = "spotify")]
             spotify::commands::spotify_get_album,
+            #[cfg(feature = "spotify")]
             spotify::commands::spotify_get_artist,
+            #[cfg(feature = "spotify")]
             spotify::commands::spotify_get_artist_albums,
+            #[cfg(feature = "spotify")]
             spotify::commands::spotify_get_recently_played,
+            #[cfg(feature = "spotify")]
+            spotify::commands::spotify_like_track,
+            #[cfg(feature = "spotify")]
+            spotify::commands::spotify_unlike_track,
+            #[cfg(feature = "spotify")]
+            spotify::commands::spotify_check_saved,
+            #[cfg(feature = "spotify")]
+            spotify::commands::spotify_add_to_user_playlist,
             // YouTube
             youtube::commands::youtube_play_track,
             youtube::commands::youtube_add_to_playlist,
             youtube::commands::youtube_add_tracks,
+            youtube::commands::youtube_save_current_track,
+            youtube::commands::youtube_download_track,
+            youtube::commands::youtube_download_playlist_track,
             youtube::commands::youtube_search,
             youtube::commands::youtube_search_songs,
             youtube::commands::youtube_search_suggestions,
@@ -818,6 +870,7 @@ pub fn run() {
             youtube::commands::youtube_get_history,
             youtube::commands::get_youtube_settings,
             youtube::commands::set_youtube_settings,
+            youtube::commands::youtube_update_ytdlp,
             youtube::commands::youtube_login_webview,
             youtube::commands::youtube_save_cookie,
             youtube::commands::youtube_clear_cookie,

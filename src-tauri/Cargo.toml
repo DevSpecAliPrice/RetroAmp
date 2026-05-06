@@ -68,7 +68,7 @@ sha1 = "0.10"
 sha2 = "0.10"
 percent-encoding = "2"
 souvlaki = { version = "0.8", default-features = false, features = ["use_zbus"] }
-librespot = { git = "https://github.com/librespot-org/librespot", default-features = false, features = ["native-tls"] }
+librespot = { git = "https://github.com/librespot-org/librespot", default-features = false, features = ["native-tls"], optional = true }
 tokio = { version = "1", features = ["rt"] }
 rusty_ytdl = { version = "0.7", default-features = false }
 ytmapi-rs = { version = "0.3", features = ["reqwest"] }
@@ -82,5 +82,18 @@ audiopus = "0.2"
 # and builds it via the `cc` crate, so no system library is required.
 fdk-aac = "0.8"
 
+# Auto-updates. `updater` fetches signed releases from the configured
+# endpoint; `process` provides relaunch() so the new binary takes over
+# after install. Desktop-only — gated by `cfg(desktop)` at the call site.
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+
 [features]
+default = []
 custom-protocol = ["tauri/custom-protocol"]
+# Spotify integration. Disabled by default — Spotify's Web API now requires
+# users to register their own Developer App (Dev Mode), which is too rough an
+# onboarding step for a casual player. YouTube Music covers the same ground
+# without that friction. Build with `--features spotify` to re-enable; the
+# code path is preserved for that purpose.
+spotify = ["dep:librespot"]

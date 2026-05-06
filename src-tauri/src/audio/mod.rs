@@ -23,7 +23,27 @@ pub mod radio;
 pub mod recorder;
 pub mod resample;
 pub mod source;
+
+// Spotify audio source. The real implementation pulls in librespot and only
+// compiles when the `spotify` feature is enabled; otherwise we expose a tiny
+// stub `SpotifyPlayer` so the rest of the audio pipeline keeps a stable type
+// signature without sprinkling cfgs through every command.
+#[cfg(feature = "spotify")]
 pub mod spotify;
+
+#[cfg(not(feature = "spotify"))]
+pub mod spotify {
+    use std::path::PathBuf;
+
+    pub struct SpotifyPlayer;
+
+    impl SpotifyPlayer {
+        pub fn new(_cache_dir: Option<PathBuf>) -> Self {
+            Self
+        }
+    }
+}
+
 pub mod stream_reader;
 pub mod youtube;
 

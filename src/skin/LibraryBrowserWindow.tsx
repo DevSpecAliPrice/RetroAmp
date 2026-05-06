@@ -425,6 +425,9 @@ export default function LibraryBrowserWindow({ skin, scale }: Props) {
       { type: "item", id: "play", label: `Play "${label}"` },
       { type: "item", id: "add", label: "Add to Playlist" },
       { type: "separator" },
+      { type: "item", id: "go_album", label: "Go to Album", disabled: !track.album },
+      { type: "item", id: "go_artist", label: "Go to Artist", disabled: !track.artist },
+      { type: "separator" },
       { type: "item", id: "reveal", label: "Show in File Manager" },
       { type: "item", id: "edit_tags", label: "Edit Tags..." },
       { type: "separator" },
@@ -443,6 +446,12 @@ export default function LibraryBrowserWindow({ skin, scale }: Props) {
     if (!sel) return;
     if (sel === "play") doPlayTracks(selected);
     else if (sel === "add") doAddTracks(selected);
+    else if (sel === "go_album" && track.album) {
+      setTab("albums"); setSearch(track.album);
+    }
+    else if (sel === "go_artist" && track.artist) {
+      setTab("artists"); setSearch(track.artist);
+    }
     else if (sel === "reveal") invoke("reveal_in_file_manager", { path: track.path });
     else if (sel === "edit_tags") invoke("open_tag_editor", { path: track.path });
     else if (sel.startsWith("rate:")) {

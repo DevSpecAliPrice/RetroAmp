@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { SkinData } from "./parser";
@@ -143,7 +143,7 @@ export default function SpotifyBrowserWindow({ skin, scale }: Props) {
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<SearchResults | null>(null);
   const [searchLoading, setSearchLoading] = useState(false);
-  const searchTimer = useRef<ReturnType<typeof setTimeout>>();
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   useEffect(() => {
     if (!searchQuery.trim() || !connected) {
@@ -218,7 +218,7 @@ export default function SpotifyBrowserWindow({ skin, scale }: Props) {
         invoke<Paged<ApiAlbumRef>>("spotify_get_artist_albums", { artistId: currentDetail.id, limit: 20, offset: 0 }),
       ]).then(([artist, albums]) => {
         setDetailArtist(artist);
-        setDetailArtistAlbums(nn(albums.items));
+        setDetailArtistAlbums(albums.items);
       }).catch(() => {}).finally(() => setDetailLoading(false));
     } else if (currentDetail.type === "playlist") {
       invoke<Paged<PlaylistTrackItem>>("spotify_get_playlist_items", {
@@ -230,12 +230,22 @@ export default function SpotifyBrowserWindow({ skin, scale }: Props) {
 
   // --- Status message ---
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
-  const statusTimer = useRef<ReturnType<typeof setTimeout>>();
+  const statusTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const showStatus = useCallback((msg: string, ms = 4000) => {
     setStatusMsg(msg);
     clearTimeout(statusTimer.current);
     statusTimer.current = setTimeout(() => setStatusMsg(null), ms);
   }, []);
+
+  // --- Liked tracks tracking (for Like/Unlike menu state) ---
+  const [likedIds, setLikedIds] = useState<Set<string>>(new Set());
+  const [userPlaylists, setUserPlaylists] = useState<ApiPlaylist[]>([]);
+  // Lazily fetch the user's playlists once we know the user is connected.
+  useEffect(() => {
+    if (!connected) return;
+    invoke<Paged<ApiPlaylist>>("spotify_get_playlists", { limit: 50, offset: 0 })
+      .then((r) => setUserPlaylists(r.items)).catch(() => {});
+  }, [connected]);
 
   // --- Actions ---
   const playTrack = useCallback(async (track: ApiTrack) => {
@@ -271,6 +281,31 @@ export default function SpotifyBrowserWindow({ skin, scale }: Props) {
       { type: "item", id: "play", label: "Play" },
       { type: "item", id: "add", label: "Add to Playlist" },
     ];
+
+    // Check liked state if we have an ID and we're connected.
+    let isLiked = track.id ? likedIds.has(track.id) : false;
+    if (connected && track.id && !likedIds.has(track.id)) {
+      try {
+        const checked = await invoke<boolean[]>("spotify_check_saved", { trackIds: [track.id] });
+        isLiked = checked[0] ?? false;
+        if (isLiked && track.id) setLikedIds((prev) => new Set(prev).add(track.id!));
+      } catch { /* ignore */ }
+    }
+
+    if (connected && track.id) {
+      items.push({ type: "separator" });
+      items.push({ type: "item", id: isLiked ? "unlike" : "like", label: isLiked ? "Unlike" : "Like" });
+      // "Add to Spotify Playlist" submenu — only show editable (owned/collaborative) playlists.
+      if (userPlaylists.length > 0) {
+        items.push({
+          type: "submenu", label: "Add to Spotify Playlist",
+          items: userPlaylists.map((pl) => ({
+            type: "item" as const, id: `sp_pl_${pl.id}`, label: pl.name,
+          })),
+        });
+      }
+    }
+
     if (track.album?.id) {
       items.push({ type: "separator" });
       items.push({ type: "item", id: "album", label: "Go to Album" });
@@ -279,12 +314,48 @@ export default function SpotifyBrowserWindow({ skin, scale }: Props) {
       if (!track.album?.id) items.push({ type: "separator" });
       items.push({ type: "item", id: "artist", label: "Go to Artist" });
     }
+
+    if (track.id) {
+      items.push({ type: "separator" });
+      items.push({ type: "item", id: "copy_link", label: "Copy Spotify Link" });
+      items.push({ type: "item", id: "open_web", label: "Open in Browser" });
+    }
+
     const sel = await showContextMenu(items, mx, my);
+    if (!sel) return;
     if (sel === "play") playTrack(track);
     else if (sel === "add") addToPlaylist(track);
+    else if (sel === "like" && track.id) {
+      try {
+        await invoke("spotify_like_track", { trackId: track.id });
+        setLikedIds((prev) => new Set(prev).add(track.id!));
+        showStatus("Added to Liked Songs");
+      } catch (e) { showStatus(`Error: ${e}`); }
+    }
+    else if (sel === "unlike" && track.id) {
+      try {
+        await invoke("spotify_unlike_track", { trackId: track.id });
+        setLikedIds((prev) => { const next = new Set(prev); next.delete(track.id!); return next; });
+        showStatus("Removed from Liked Songs");
+      } catch (e) { showStatus(`Error: ${e}`); }
+    }
+    else if (sel.startsWith("sp_pl_") && track.uri) {
+      const playlistId = sel.slice("sp_pl_".length);
+      try {
+        await invoke("spotify_add_to_user_playlist", { playlistId, trackUri: track.uri });
+        showStatus("Added to playlist");
+      } catch (e) { showStatus(`Error: ${e}`); }
+    }
     else if (sel === "album" && track.album?.id) pushDetail({ type: "album", id: track.album.id, name: track.album.name });
     else if (sel === "artist" && track.artists[0]?.id) pushDetail({ type: "artist", id: track.artists[0].id, name: track.artists[0].name });
-  }, [playTrack, addToPlaylist, pushDetail]);
+    else if (sel === "copy_link" && track.id) {
+      navigator.clipboard.writeText(`https://open.spotify.com/track/${track.id}`);
+      showStatus("Link copied");
+    }
+    else if (sel === "open_web" && track.id) {
+      invoke("open_url", { url: `https://open.spotify.com/track/${track.id}` }).catch(console.error);
+    }
+  }, [playTrack, addToPlaylist, pushDetail, connected, likedIds, userPlaylists, showStatus]);
 
   // --- Rendering helpers ---
   const renderTrackRow = useCallback((track: ApiTrack, index: number) => (

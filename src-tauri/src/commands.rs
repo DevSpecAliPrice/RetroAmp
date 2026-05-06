@@ -380,6 +380,87 @@ pub fn playlist_remove_tracks(
     Ok(pl.state())
 }
 
+/// Sort the playlist alphabetically by display name.
+#[tauri::command]
+pub fn playlist_sort_by_title(
+    playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
+) -> Result<PlaylistState, String> {
+    let mut pl = playlist.lock().map_err(|e| e.to_string())?;
+    pl.sort_by_title();
+    Ok(pl.state())
+}
+
+/// Reverse the playlist order.
+#[tauri::command]
+pub fn playlist_reverse(
+    playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
+) -> Result<PlaylistState, String> {
+    let mut pl = playlist.lock().map_err(|e| e.to_string())?;
+    pl.reverse();
+    Ok(pl.state())
+}
+
+/// Randomize the playlist order.
+#[tauri::command]
+pub fn playlist_randomize(
+    playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
+) -> Result<PlaylistState, String> {
+    let mut pl = playlist.lock().map_err(|e| e.to_string())?;
+    pl.randomize();
+    Ok(pl.state())
+}
+
+/// Select all tracks.
+#[tauri::command]
+pub fn playlist_select_all(
+    playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
+) -> Result<PlaylistState, String> {
+    let mut pl = playlist.lock().map_err(|e| e.to_string())?;
+    pl.select_all();
+    Ok(pl.state())
+}
+
+/// Clear the selection.
+#[tauri::command]
+pub fn playlist_select_none(
+    playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
+) -> Result<PlaylistState, String> {
+    let mut pl = playlist.lock().map_err(|e| e.to_string())?;
+    pl.select_none();
+    Ok(pl.state())
+}
+
+/// Invert the current selection.
+#[tauri::command]
+pub fn playlist_invert_selection(
+    playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
+) -> Result<PlaylistState, String> {
+    let mut pl = playlist.lock().map_err(|e| e.to_string())?;
+    pl.invert_selection();
+    Ok(pl.state())
+}
+
+/// Crop — keep only the selected tracks, remove the rest.
+#[tauri::command]
+pub fn playlist_crop(
+    playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
+) -> Result<PlaylistState, String> {
+    let mut pl = playlist.lock().map_err(|e| e.to_string())?;
+    pl.crop_to_selection();
+    Ok(pl.state())
+}
+
+/// Queue a track to play next (front of the queue).
+#[tauri::command]
+pub fn playlist_play_next(
+    id: TrackId,
+    playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
+) -> Result<PlaylistState, String> {
+    let mut pl = playlist.lock().map_err(|e| e.to_string())?;
+    pl.play_next(id);
+    Ok(pl.state())
+}
+
 /// Clear the entire playlist.
 #[tauri::command]
 pub fn playlist_clear(
@@ -578,6 +659,7 @@ pub fn save_window_layout(app: &AppHandle, states: &WindowStates) {
     if is_visible("librarybrowser") || app.get_webview_window("librarybrowser").is_some() {
         cfg.ui.library_browser = Some(capture("librarybrowser", is_visible("librarybrowser"), true));
     }
+    #[cfg(feature = "spotify")]
     if is_visible("spotifybrowser") || app.get_webview_window("spotifybrowser").is_some() {
         cfg.ui.spotify_browser = Some(capture("spotifybrowser", is_visible("spotifybrowser"), true));
     }
@@ -1126,8 +1208,16 @@ pub fn create_source(
     }
 
     if is_spotify_uri(path) {
-        let player = spotify_player.ok_or("Spotify not available")?;
-        return player.load_track(path);
+        #[cfg(feature = "spotify")]
+        {
+            let player = spotify_player.ok_or("Spotify not available")?;
+            return player.load_track(path);
+        }
+        #[cfg(not(feature = "spotify"))]
+        {
+            let _ = spotify_player;
+            return Err("Spotify support is disabled in this build".into());
+        }
     }
 
     if is_url(path) {
@@ -1593,6 +1683,24 @@ pub async fn reveal_in_file_manager(path: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Get the app version string from Cargo metadata.
+#[tauri::command]
+pub fn get_app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// Open a URL in the default browser.
+#[tauri::command]
+pub async fn open_url(url: String) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    { let _ = std::process::Command::new("xdg-open").arg(&url).spawn(); }
+    #[cfg(target_os = "macos")]
+    { let _ = std::process::Command::new("open").arg(&url).spawn(); }
+    #[cfg(target_os = "windows")]
+    { let _ = std::process::Command::new("cmd").args(["/C", "start", "", &url]).spawn(); }
+    Ok(())
+}
+
 /// Get the playlist add mode preference ("append", "replace", or "ask").
 #[tauri::command]
 pub fn get_playlist_add_mode() -> String {
@@ -1607,6 +1715,20 @@ pub fn set_playlist_add_mode(mode: String) -> Result<(), String> {
     }
     let mut cfg = crate::config::AppConfig::load();
     cfg.playback.playlist_add_mode = mode;
+    cfg.save()
+}
+
+/// Get the global ReplayGain volume normalisation setting.
+#[tauri::command]
+pub fn get_normalize_volume() -> bool {
+    crate::config::AppConfig::load().playback.normalize_volume
+}
+
+/// Set the global ReplayGain volume normalisation setting.
+#[tauri::command]
+pub fn set_normalize_volume(enabled: bool) -> Result<(), String> {
+    let mut cfg = crate::config::AppConfig::load();
+    cfg.playback.normalize_volume = enabled;
     cfg.save()
 }
 
@@ -1915,6 +2037,26 @@ pub fn set_last_visualizer_preset(preset: String) {
     let mut cfg = crate::config::AppConfig::load();
     cfg.visualizer.last_preset = Some(preset);
     let _ = cfg.save();
+}
+
+#[tauri::command]
+pub fn get_visualizer_settings() -> crate::config::VisualizerConfig {
+    crate::config::AppConfig::load().visualizer
+}
+
+#[tauri::command]
+pub fn set_visualizer_settings(
+    lock_preset: bool,
+    auto_cycle: bool,
+    cycle_secs: u32,
+    blend_secs: f32,
+) -> Result<(), String> {
+    let mut cfg = crate::config::AppConfig::load();
+    cfg.visualizer.lock_preset = lock_preset;
+    cfg.visualizer.auto_cycle = auto_cycle;
+    cfg.visualizer.cycle_secs = cycle_secs.max(5);
+    cfg.visualizer.blend_secs = blend_secs.max(0.0).min(10.0);
+    cfg.save().map_err(|e| format!("{e}"))
 }
 
 /// Play a track from the recording history buffer.

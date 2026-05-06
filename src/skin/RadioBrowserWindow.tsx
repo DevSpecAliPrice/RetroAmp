@@ -553,6 +553,7 @@ export default function RadioBrowserWindow({ skin, scale }: Props) {
   const openApiStationContextMenu = useCallback(async (apiStation: ApiStation, mx: number, my: number) => {
     const sel = await showContextMenu([
       { type: "item", id: "play", label: "Play" },
+      { type: "item", id: "add_playlist", label: "Add to Playlist" },
       { type: "item", id: "save", label: "Save to Library" },
       { type: "separator" },
       { type: "item", id: "copy_url", label: "Copy URL" },
@@ -560,6 +561,7 @@ export default function RadioBrowserWindow({ skin, scale }: Props) {
     if (!sel) return;
     const url = apiStation.url_resolved || apiStation.url;
     if (sel === "play") playStation(url, apiStation.name);
+    else if (sel === "add_playlist") invoke("playlist_add_url", { url, name: apiStation.name });
     else if (sel === "save") saveApiStation(apiStation);
     else if (sel === "copy_url") navigator.clipboard.writeText(url);
   }, [playStation, saveApiStation]);

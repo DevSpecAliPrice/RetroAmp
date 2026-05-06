@@ -21,6 +21,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { SkinData } from "./parser";
 import { showContextMenu, type NativeMenuEntry } from "../nativeMenu";
+import { FEATURES } from "../features";
 import {
   CHAR_WIDTH,
   CHAR_HEIGHT,
@@ -885,15 +886,17 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
     } catch { /* ignore */ }
 
     const items: NativeMenuEntry[] = [
-      { type: "item", id: "toggle_playlist", label: "Toggle Playlist" },
-      { type: "item", id: "toggle_equalizer", label: "Toggle Equalizer" },
+      { type: "item", id: "toggle_playlist", label: "Playlist Editor..." },
+      { type: "item", id: "toggle_equalizer", label: "Equalizer..." },
+      { type: "item", id: "visualizer", label: "Visualizer..." },
       { type: "separator" },
       { type: "item", id: "add_files", label: "Add Files..." },
-      { type: "item", id: "radio_browser", label: "Radio Browser..." },
-      { type: "item", id: "spotify_browser", label: "Spotify..." },
-      { type: "item", id: "youtube_browser", label: "YouTube Music..." },
       { type: "item", id: "media_library", label: "Media Library..." },
-      { type: "item", id: "visualizer", label: "Visualizer" },
+      { type: "item", id: "radio_browser", label: "Radio Browser..." },
+      { type: "item", id: "youtube_browser", label: "YouTube Music..." },
+      ...(FEATURES.spotify
+        ? ([{ type: "item", id: "spotify_browser", label: "Spotify..." }] as NativeMenuEntry[])
+        : []),
       { type: "separator" },
       {
         type: "submenu", label: "Skins", items: [
@@ -917,7 +920,7 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
       if (sel) invoke("playlist_add_files", { paths: Array.isArray(sel) ? sel : [sel] });
     }
     else if (selected === "radio_browser") invoke("toggle_window", { windowId: "RadioBrowser" }).catch(console.error);
-    else if (selected === "spotify_browser") invoke("toggle_window", { windowId: "SpotifyBrowser" }).catch(console.error);
+    else if (FEATURES.spotify && selected === "spotify_browser") invoke("toggle_window", { windowId: "SpotifyBrowser" }).catch(console.error);
     else if (selected === "youtube_browser") invoke("toggle_window", { windowId: "YouTubeBrowser" }).catch(console.error);
     else if (selected === "media_library") invoke("toggle_window", { windowId: "LibraryBrowser" }).catch(console.error);
     else if (selected === "visualizer") invoke("toggle_window", { windowId: "Visualizer" }).catch(console.error);

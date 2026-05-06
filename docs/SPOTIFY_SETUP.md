@@ -1,5 +1,7 @@
 # Spotify Setup Guide
 
+> **Spotify is currently disabled in default builds.** The Dev-Mode registration step described below is too rough an onboarding step for a casual desktop player, and YouTube Music covers the same ground out of the box. The Spotify code path is preserved behind a Cargo feature flag for re-enablement later — build the Tauri side with `cargo tauri build --features spotify` and set `FEATURES.spotify = true` in `src/features.ts` to bring it back. The instructions below remain valid once the feature is enabled.
+
 RetroAmp can stream music from Spotify, but due to Spotify's API restrictions, each user needs to register their own (free) Spotify Developer App. This is a one-time setup that takes about 2 minutes.
 
 ## Why is this needed?

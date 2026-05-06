@@ -155,3 +155,78 @@ pub fn get_recently_played(token: &str, limit: usize) -> Result<CursorPaged<Rece
     let url = format!("{API_BASE}/me/player/recently-played?limit={limit}");
     api_get(token, &url)
 }
+
+// ---------------------------------------------------------------------------
+// Mutations (PUT/POST/DELETE)
+// ---------------------------------------------------------------------------
+
+fn handle_status<T>(status: u16, body: String, on_ok: impl FnOnce() -> T, url: &str) -> Result<T, String> {
+    if status >= 400 {
+        log::error!("Spotify API HTTP {status} for {url}: {}", &body[..body.len().min(500)]);
+        return Err(format!("Spotify API error (HTTP {status}): {}", &body[..body.len().min(200)]));
+    }
+    Ok(on_ok())
+}
+
+/// Save a track to the user's library (Like).
+pub fn save_track(token: &str, track_id: &str) -> Result<(), String> {
+    let url = format!("{API_BASE}/me/tracks?ids={track_id}");
+    let response = ureq::put(&url)
+        .header("Authorization", &format!("Bearer {token}"))
+        .header("User-Agent", USER_AGENT)
+        .config()
+        .timeout_connect(Some(TIMEOUT))
+        .timeout_recv_response(Some(TIMEOUT))
+        .http_status_as_error(false)
+        .build()
+        .send_empty()
+        .map_err(|e| format!("Spotify API error: {e}"))?;
+    let status = response.status().as_u16();
+    let body = response.into_body().read_to_string().unwrap_or_default();
+    handle_status(status, body, || (), &url)
+}
+
+/// Remove a track from the user's library (Unlike).
+pub fn unsave_track(token: &str, track_id: &str) -> Result<(), String> {
+    let url = format!("{API_BASE}/me/tracks?ids={track_id}");
+    let response = ureq::delete(&url)
+        .header("Authorization", &format!("Bearer {token}"))
+        .header("User-Agent", USER_AGENT)
+        .config()
+        .timeout_connect(Some(TIMEOUT))
+        .timeout_recv_response(Some(TIMEOUT))
+        .http_status_as_error(false)
+        .build()
+        .call()
+        .map_err(|e| format!("Spotify API error: {e}"))?;
+    let status = response.status().as_u16();
+    let body = response.into_body().read_to_string().unwrap_or_default();
+    handle_status(status, body, || (), &url)
+}
+
+/// Check whether tracks are saved in the user's library.
+pub fn check_saved_tracks(token: &str, track_ids: &[String]) -> Result<Vec<bool>, String> {
+    let ids = track_ids.join(",");
+    let url = format!("{API_BASE}/me/tracks/contains?ids={ids}");
+    api_get(token, &url)
+}
+
+/// Add a track to one of the user's playlists.
+pub fn add_to_user_playlist(token: &str, playlist_id: &str, track_uri: &str) -> Result<(), String> {
+    let url = format!("{API_BASE}/playlists/{playlist_id}/tracks");
+    let body = serde_json::json!({ "uris": [track_uri] }).to_string();
+    let response = ureq::post(&url)
+        .header("Authorization", &format!("Bearer {token}"))
+        .header("User-Agent", USER_AGENT)
+        .header("Content-Type", "application/json")
+        .config()
+        .timeout_connect(Some(TIMEOUT))
+        .timeout_recv_response(Some(TIMEOUT))
+        .http_status_as_error(false)
+        .build()
+        .send(body.as_bytes())
+        .map_err(|e| format!("Spotify API error: {e}"))?;
+    let status = response.status().as_u16();
+    let body = response.into_body().read_to_string().unwrap_or_default();
+    handle_status(status, body, || (), &url)
+}

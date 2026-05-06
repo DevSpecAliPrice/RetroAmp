@@ -15,9 +15,9 @@
 use std::io::{self, Read, Seek, Write};
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -40,6 +40,64 @@ const PRE_BUFFER_BYTES: usize = 16384;
 
 /// Maximum time `next_buffer()` spends trying to decode before yielding.
 const MAX_DECODE_LOOP_SECS: f64 = 2.0;
+
+// ---------------------------------------------------------------------------
+// Currently-playing download registry — exposes the active YouTube source's
+// temp file path so the save command can copy it without re-downloading.
+// ---------------------------------------------------------------------------
+
+/// Snapshot of the currently-playing YouTube download. Cloned (Arc) by the save
+/// command so it can read the temp file even if the source drops mid-copy.
+pub struct ActiveDownload {
+    pub video_id: String,
+    pub temp_path: PathBuf,
+    pub temp_ready: Arc<AtomicBool>,
+    /// File extension hint (e.g. "webm", "m4a") for naming the saved copy.
+    pub ext_hint: String,
+    pub metadata: TrackMetadata,
+    /// Saver count — Drop will skip deletion if any save is in progress, and
+    /// the last-decrementing saver becomes responsible for cleanup.
+    savers: AtomicU32,
+    /// Set by Drop when the source goes away — tells savers to clean up the
+    /// temp file when they finish.
+    drop_pending_cleanup: AtomicBool,
+}
+
+impl ActiveDownload {
+    pub fn temp_ready(&self) -> bool {
+        self.temp_ready.load(Ordering::Acquire)
+    }
+}
+
+fn registry() -> &'static Mutex<Option<Arc<ActiveDownload>>> {
+    static REG: OnceLock<Mutex<Option<Arc<ActiveDownload>>>> = OnceLock::new();
+    REG.get_or_init(|| Mutex::new(None))
+}
+
+/// Get the currently-playing YouTube download, if any.
+pub fn current_download() -> Option<Arc<ActiveDownload>> {
+    registry().lock().ok().and_then(|g| g.clone())
+}
+
+/// RAII guard returned by `begin_save` — keeps `savers` count above zero until
+/// dropped, and triggers temp-file cleanup on drop if the source has gone away.
+pub struct SaveGuard(Arc<ActiveDownload>);
+
+impl Drop for SaveGuard {
+    fn drop(&mut self) {
+        let prev = self.0.savers.fetch_sub(1, Ordering::AcqRel);
+        if prev == 1 && self.0.drop_pending_cleanup.load(Ordering::Acquire) {
+            let _ = std::fs::remove_file(&self.0.temp_path);
+        }
+    }
+}
+
+/// Begin a save operation against this download — increments the saver count
+/// so the source's Drop won't delete the temp file out from under us.
+pub fn begin_save(dl: &Arc<ActiveDownload>) -> SaveGuard {
+    dl.savers.fetch_add(1, Ordering::AcqRel);
+    SaveGuard(Arc::clone(dl))
+}
 
 // ---------------------------------------------------------------------------
 // Streaming buffer — for immediate playback
@@ -134,6 +192,8 @@ pub struct YouTubeSource {
     /// Set to true by the download thread when temp file is complete.
     temp_ready: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
+    /// Registry entry mirroring this source — used to coordinate save cleanup.
+    active: Arc<ActiveDownload>,
     _download_thread: Option<thread::JoinHandle<()>>,
 }
 
@@ -280,6 +340,21 @@ impl YouTubeSource {
         metadata.sample_rate = sample_rate;
         metadata.channels = channels;
 
+        // Publish to the active-download registry so the save command can find
+        // this temp file without re-downloading.
+        let active = Arc::new(ActiveDownload {
+            video_id: video_id.to_string(),
+            temp_path: temp_path.clone(),
+            temp_ready: Arc::clone(&temp_ready),
+            ext_hint: ext_hint.clone(),
+            metadata: metadata.clone(),
+            savers: AtomicU32::new(0),
+            drop_pending_cleanup: AtomicBool::new(false),
+        });
+        if let Ok(mut slot) = registry().lock() {
+            *slot = Some(Arc::clone(&active));
+        }
+
         Ok(Self {
             format,
             decoder,
@@ -293,6 +368,7 @@ impl YouTubeSource {
             temp_path,
             temp_ready,
             stop,
+            active,
             _download_thread: None, // detached
         })
     }
@@ -348,8 +424,25 @@ impl YouTubeSource {
 impl Drop for YouTubeSource {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        // Clean up temp file.
-        let _ = std::fs::remove_file(&self.temp_path);
+
+        // Unregister from the active-download registry — only clear the slot
+        // if it still points at us (a newer source may have already replaced
+        // us during a track-switch).
+        if let Ok(mut slot) = registry().lock() {
+            if let Some(current) = slot.as_ref() {
+                if Arc::ptr_eq(current, &self.active) {
+                    *slot = None;
+                }
+            }
+        }
+
+        // If a save is in progress, defer cleanup to the SaveGuard. Otherwise
+        // delete now.
+        if self.active.savers.load(Ordering::Acquire) > 0 {
+            self.active.drop_pending_cleanup.store(true, Ordering::Release);
+        } else {
+            let _ = std::fs::remove_file(&self.temp_path);
+        }
     }
 }
 

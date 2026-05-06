@@ -20,6 +20,7 @@ pub enum SourceType {
     /// An internet radio stream (HTTP/HTTPS URL).
     Stream,
     /// A Spotify track (spotify:track:<id> URI).
+    #[cfg(feature = "spotify")]
     Spotify,
     /// A YouTube track (youtube:<video_id>).
     YouTube,
@@ -49,6 +50,10 @@ pub struct Track {
     pub source_type: SourceType,
     /// For radio streams, the station name to display in the playlist.
     pub station_name: Option<String>,
+    /// Cached cover art bytes. Skipped from persistence — local sources
+    /// re-extract on open, and YouTube tracks re-download on play.
+    #[serde(skip)]
+    pub cover_art: Option<Vec<u8>>,
 }
 
 impl Track {
@@ -56,14 +61,29 @@ impl Track {
     /// call `load_metadata` or let the playlist manager handle it.
     pub fn from_path(id: TrackId, path: impl Into<String>) -> Self {
         let path = path.into();
-        let source_type = if path.starts_with("spotify:track:") {
-            SourceType::Spotify
-        } else if path.starts_with("youtube:") {
-            SourceType::YouTube
-        } else if path.starts_with("http://") || path.starts_with("https://") {
-            SourceType::Stream
-        } else {
-            SourceType::Local
+        let source_type = {
+            #[cfg(feature = "spotify")]
+            {
+                if path.starts_with("spotify:track:") {
+                    SourceType::Spotify
+                } else if path.starts_with("youtube:") {
+                    SourceType::YouTube
+                } else if path.starts_with("http://") || path.starts_with("https://") {
+                    SourceType::Stream
+                } else {
+                    SourceType::Local
+                }
+            }
+            #[cfg(not(feature = "spotify"))]
+            {
+                if path.starts_with("youtube:") {
+                    SourceType::YouTube
+                } else if path.starts_with("http://") || path.starts_with("https://") {
+                    SourceType::Stream
+                } else {
+                    SourceType::Local
+                }
+            }
         };
         Self {
             id,
@@ -81,6 +101,7 @@ impl Track {
             metadata_loaded: false,
             source_type,
             station_name: None,
+            cover_art: None,
         }
     }
 
@@ -90,6 +111,7 @@ impl Track {
     }
 
     /// Whether this track is a Spotify track.
+    #[cfg(feature = "spotify")]
     pub fn is_spotify(&self) -> bool {
         self.source_type == SourceType::Spotify
     }
@@ -141,7 +163,7 @@ impl Track {
             genre: self.genre.clone(),
             year: self.year,
             track_number: self.track_number,
-            cover_art: None,
+            cover_art: self.cover_art.clone(),
         }
     }
 

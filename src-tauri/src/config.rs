@@ -37,6 +37,7 @@ pub struct AppConfig {
     #[serde(default)]
     pub general: GeneralConfig,
 
+    #[cfg(feature = "spotify")]
     #[serde(default)]
     pub spotify: SpotifyConfig,
 
@@ -86,15 +87,20 @@ impl Default for EqConfig {
 /// Playback-related preferences.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlaybackConfig {
-    /// What to do when playing from the library: "append", "replace", or "ask".
+    /// What to do when adding tracks from any browser: "append", "replace", or "ask".
     #[serde(default = "default_append")]
     pub playlist_add_mode: String,
+
+    /// Whether to apply ReplayGain volume normalisation across all sources.
+    #[serde(default)]
+    pub normalize_volume: bool,
 }
 
 impl Default for PlaybackConfig {
     fn default() -> Self {
         Self {
             playlist_add_mode: "append".to_string(),
+            normalize_volume: false,
         }
     }
 }
@@ -149,11 +155,39 @@ pub struct RadioConfig {
 }
 
 /// Visualizer preferences.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VisualizerConfig {
     /// Last-used Butterchurn preset name, restored on next launch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_preset: Option<String>,
+    /// Whether the current preset is locked (auto-cycle disabled).
+    #[serde(default)]
+    pub lock_preset: bool,
+    /// Whether presets auto-cycle.
+    #[serde(default = "default_auto_cycle")]
+    pub auto_cycle: bool,
+    /// Seconds between automatic preset changes.
+    #[serde(default = "default_cycle_secs")]
+    pub cycle_secs: u32,
+    /// Blend duration in seconds (0 = hard cut).
+    #[serde(default = "default_blend_secs")]
+    pub blend_secs: f32,
+}
+
+fn default_auto_cycle() -> bool { true }
+fn default_cycle_secs() -> u32 { 30 }
+fn default_blend_secs() -> f32 { 2.0 }
+
+impl Default for VisualizerConfig {
+    fn default() -> Self {
+        Self {
+            last_preset: None,
+            lock_preset: false,
+            auto_cycle: true,
+            cycle_secs: 30,
+            blend_secs: 2.0,
+        }
+    }
 }
 
 /// General application preferences.
@@ -167,6 +201,7 @@ pub struct GeneralConfig {
 
 
 /// Spotify integration preferences.
+#[cfg(feature = "spotify")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpotifyConfig {
     /// Spotify Developer App Client ID. Required for Web API access.
@@ -185,20 +220,19 @@ pub struct SpotifyConfig {
     /// Whether Spotify Connect is enabled (advertise as a playback device).
     #[serde(default)]
     pub connect_enabled: bool,
-
-    /// Whether to apply Spotify's volume normalisation (ReplayGain).
-    #[serde(default)]
-    pub normalize_volume: bool,
 }
 
+#[cfg(feature = "spotify")]
 fn default_spotify_quality() -> String {
     "very_high".to_string()
 }
 
+#[cfg(feature = "spotify")]
 fn default_device_name() -> String {
     "RetroAmp".to_string()
 }
 
+#[cfg(feature = "spotify")]
 impl Default for SpotifyConfig {
     fn default() -> Self {
         Self {
@@ -206,7 +240,6 @@ impl Default for SpotifyConfig {
             quality: default_spotify_quality(),
             device_name: default_device_name(),
             connect_enabled: false,
-            normalize_volume: false,
         }
     }
 }
@@ -261,6 +294,7 @@ impl Default for YouTubeConfig {
 }
 
 /// Spotify browser window preferences.
+#[cfg(feature = "spotify")]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SpotifyBrowserConfig {
     /// Active tab: "home", "search", "library".
@@ -293,6 +327,7 @@ pub struct UiConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_browser: Option<WindowLayoutEntry>,
 
+    #[cfg(feature = "spotify")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spotify_browser: Option<WindowLayoutEntry>,
 

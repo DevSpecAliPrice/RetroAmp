@@ -181,6 +181,9 @@ impl PlaylistManager {
             track.duration = meta.duration;
             track.sample_rate = Some(meta.sample_rate);
             track.channels = Some(meta.channels);
+            if meta.cover_art.is_some() {
+                track.cover_art = meta.cover_art.clone();
+            }
             track.metadata_loaded = true;
         }
     }
@@ -221,6 +224,24 @@ impl PlaylistManager {
             .into_iter()
             .filter(|id| !self.selected.contains(id))
             .collect();
+    }
+
+    /// Keep only the selected tracks; remove everything else.
+    pub fn crop_to_selection(&mut self) {
+        if self.selected.is_empty() {
+            return;
+        }
+        let keep: std::collections::HashSet<TrackId> = self.selected.iter().copied().collect();
+        let removed: Vec<TrackId> = self.tracks.iter().map(|t| t.id).filter(|id| !keep.contains(id)).collect();
+        let current_id = self.current_track().map(|t| t.id);
+        self.tracks.retain(|t| keep.contains(&t.id));
+        self.current_index = current_id.and_then(|cid| self.tracks.iter().position(|t| t.id == cid));
+        self.queue.remove_tracks(&removed);
+    }
+
+    /// Add a track to the front of the queue (play next).
+    pub fn play_next(&mut self, id: TrackId) {
+        self.queue.add_next(id);
     }
 
     // -- Playback navigation --
@@ -371,6 +392,7 @@ impl PlaylistManager {
                 let source_type_str = match track.source_type {
                     crate::playlist::track::SourceType::Local => "local",
                     crate::playlist::track::SourceType::Stream => "stream",
+                    #[cfg(feature = "spotify")]
                     crate::playlist::track::SourceType::Spotify => "spotify",
                     crate::playlist::track::SourceType::YouTube => "youtube",
                 };

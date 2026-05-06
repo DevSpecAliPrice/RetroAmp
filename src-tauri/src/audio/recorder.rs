@@ -793,20 +793,22 @@ fn write_track_to_disk(
     std::fs::write(&path, data).map_err(|e| format!("write: {e}"))?;
 
     // Attempt to tag the file.
-    if let Err(e) = tag_file(&path, title, artist, station_name) {
+    if let Err(e) = tag_file(&path, title, artist, station_name, None) {
         log::warn!("[recorder] tagging failed for {}: {e}", path.display());
     }
 
     Ok(path)
 }
 
-/// Attempt to write ID3/Vorbis tags to the file.
-fn tag_file(
+/// Attempt to write ID3/Vorbis tags to the file. Optionally embeds cover art.
+pub(crate) fn tag_file(
     path: &Path,
     title: Option<&str>,
     artist: Option<&str>,
     album: Option<&str>,
+    cover_art: Option<&[u8]>,
 ) -> Result<(), String> {
+    use lofty::picture::{Picture, PictureType};
     use lofty::prelude::*;
     use lofty::tag::ItemKey;
 
@@ -832,9 +834,38 @@ fn tag_file(
     if let Some(album) = album {
         tag.insert_text(ItemKey::AlbumTitle, album.to_string());
     }
+    if let Some(art) = cover_art {
+        if let Some(mime) = sniff_image_mime(art) {
+            tag.push_picture(Picture::new_unchecked(
+                PictureType::CoverFront,
+                Some(mime),
+                None,
+                art.to_vec(),
+            ));
+        }
+    }
 
     tag.save_to_path(path, lofty::config::WriteOptions::default())
         .map_err(|e| format!("{e}"))
+}
+
+/// Detect image MIME from a few magic bytes. Returns None for unknown formats.
+fn sniff_image_mime(data: &[u8]) -> Option<lofty::picture::MimeType> {
+    use lofty::picture::MimeType;
+    if data.len() < 8 {
+        return None;
+    }
+    if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some(MimeType::Jpeg)
+    } else if data.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        Some(MimeType::Png)
+    } else if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
+        Some(MimeType::Gif)
+    } else if data.starts_with(b"BM") {
+        Some(MimeType::Bmp)
+    } else {
+        None
+    }
 }
 
 /// Generate a human-readable timestamp for filenames.

@@ -22,6 +22,8 @@
     "core:window:allow-create",
     "core:window:allow-internal-toggle-maximize",
     "core:webview:allow-create-webview",
-    "core:webview:allow-create-webview-window"
+    "core:webview:allow-create-webview-window",
+    "updater:default",
+    "process:default"
   ]
 }

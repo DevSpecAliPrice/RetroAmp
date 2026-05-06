@@ -14,6 +14,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import type { SkinData } from "./parser";
 import { showContextMenu } from "../nativeMenu";
+import { FEATURES } from "../features";
 
 // -- Interfaces --
 
@@ -25,6 +26,7 @@ interface PlaylistEntry {
   is_current: boolean;
   is_selected: boolean;
   is_stream: boolean;
+  source_type: "local" | "stream" | "spotify" | "youtube";
 }
 
 interface PlaylistState {
@@ -200,6 +202,19 @@ export default function PlaylistWindow({ skin, scale }: Props) {
     await invoke("playlist_play_index", { index });
   }, []);
 
+  const downloadYoutubeTrack = useCallback(async (track: PlaylistEntry) => {
+    if (!track.path.startsWith("youtube:")) return;
+    try {
+      const cmd = track.is_current ? "youtube_save_current_track" : "youtube_download_playlist_track";
+      const args = track.is_current ? {} : { trackId: track.id };
+      const path = await invoke<string>(cmd, args);
+      const filename = path.split(/[\\/]/).pop() ?? path;
+      console.log(`[playlist] saved YouTube track: ${filename}`);
+    } catch (e) {
+      console.error(`[playlist] download failed:`, e);
+    }
+  }, []);
+
   // Resize from bottom/top edge.
   const handleEdgeMouseDown = useCallback((e: React.MouseEvent) => {
     const h = window.innerHeight;
@@ -250,26 +265,57 @@ export default function PlaylistWindow({ skin, scale }: Props) {
       onMouseMove={handleMouseMove}
       onContextMenu={async (e) => {
         e.preventDefault();
+        const hasSelection = playlist.tracks.some((t) => t.is_selected);
+        const isEmpty = playlist.track_count === 0;
         const selected = await showContextMenu([
           { type: "item", id: "add_files", label: "Add Files..." },
+          { type: "item", id: "media_library", label: "Media Library..." },
           { type: "item", id: "radio_browser", label: "Radio Browser..." },
-          { type: "item", id: "spotify_browser", label: "Spotify..." },
+          { type: "item", id: "youtube_browser", label: "YouTube Music..." },
+          ...(FEATURES.spotify
+            ? ([{ type: "item" as const, id: "spotify_browser", label: "Spotify..." }])
+            : []),
           { type: "separator" },
           { type: "item", id: "load_playlist", label: "Load Playlist..." },
-          { type: "item", id: "save_playlist", label: "Save Playlist...", disabled: playlist.track_count === 0 },
+          { type: "item", id: "save_playlist", label: "Save Playlist...", disabled: isEmpty },
           { type: "separator" },
-          { type: "item", id: "remove_selected", label: "Remove Selected" },
-          { type: "item", id: "clear_playlist", label: "Clear Playlist" },
+          {
+            type: "submenu", label: "Selection", items: [
+              { type: "item", id: "select_all", label: "Select All", disabled: isEmpty },
+              { type: "item", id: "select_none", label: "Select None", disabled: !hasSelection },
+              { type: "item", id: "invert_selection", label: "Invert Selection", disabled: isEmpty },
+            ],
+          },
+          {
+            type: "submenu", label: "Sort", items: [
+              { type: "item", id: "sort_title", label: "Sort by Title", disabled: isEmpty },
+              { type: "item", id: "reverse", label: "Reverse Order", disabled: isEmpty },
+              { type: "item", id: "randomize", label: "Randomize", disabled: isEmpty },
+            ],
+          },
+          { type: "separator" },
+          { type: "item", id: "remove_selected", label: "Remove Selected", disabled: !hasSelection },
+          { type: "item", id: "crop", label: "Crop (Keep Selected)", disabled: !hasSelection },
+          { type: "item", id: "clear_playlist", label: "Clear Playlist", disabled: isEmpty },
           { type: "separator" },
           { type: "item", id: "preferences", label: "Preferences..." },
         ], e.clientX, e.clientY);
         if (!selected) return;
         if (selected === "add_files") openFiles();
+        else if (selected === "media_library") invoke("toggle_window", { windowId: "LibraryBrowser" }).catch(console.error);
         else if (selected === "radio_browser") invoke("toggle_window", { windowId: "RadioBrowser" }).catch(console.error);
-        else if (selected === "spotify_browser") invoke("toggle_window", { windowId: "SpotifyBrowser" }).catch(console.error);
+        else if (selected === "youtube_browser") invoke("toggle_window", { windowId: "YouTubeBrowser" }).catch(console.error);
+        else if (FEATURES.spotify && selected === "spotify_browser") invoke("toggle_window", { windowId: "SpotifyBrowser" }).catch(console.error);
         else if (selected === "load_playlist") loadPlaylist();
         else if (selected === "save_playlist") savePlaylist();
+        else if (selected === "select_all") invoke("playlist_select_all");
+        else if (selected === "select_none") invoke("playlist_select_none");
+        else if (selected === "invert_selection") invoke("playlist_invert_selection");
+        else if (selected === "sort_title") invoke("playlist_sort_by_title");
+        else if (selected === "reverse") invoke("playlist_reverse");
+        else if (selected === "randomize") invoke("playlist_randomize");
         else if (selected === "remove_selected") invoke("playlist_remove_selected");
+        else if (selected === "crop") invoke("playlist_crop");
         else if (selected === "clear_playlist") invoke("playlist_clear");
         else if (selected === "preferences") invoke("open_settings");
       }}
@@ -354,19 +400,42 @@ export default function PlaylistWindow({ skin, scale }: Props) {
                   if (!track.is_selected) {
                     invoke("playlist_select_track", { id: track.id });
                   }
+                  const isLocal = track.source_type === "local";
+                  const isYoutube = track.source_type === "youtube";
+                  const isSpotify = track.source_type === "spotify";
                   const items = [
                     { type: "item" as const, id: "play", label: "Play" },
+                    { type: "item" as const, id: "play_next", label: "Play Next" },
                     { type: "separator" as const },
-                    { type: "item" as const, id: "edit_tags", label: "Edit Tags...", disabled: track.is_stream },
-                    { type: "item" as const, id: "reveal", label: "Show in File Manager", disabled: track.is_stream },
+                    { type: "item" as const, id: "edit_tags", label: "Edit Tags...", disabled: !isLocal },
+                    { type: "item" as const, id: "reveal", label: "Show in File Manager", disabled: !isLocal },
+                    ...(!isLocal ? [{ type: "item" as const, id: "copy_url", label: "Copy URL" }] : []),
+                    ...(isYoutube ? [{ type: "item" as const, id: "download", label: "Download" }] : []),
+                    ...(isYoutube || isSpotify ? [{ type: "item" as const, id: "open_web", label: "Open in Browser" }] : []),
                     { type: "separator" as const },
                     { type: "item" as const, id: "remove", label: "Remove from Playlist" },
                   ];
                   const sel = await showContextMenu(items, e.clientX, e.clientY);
                   if (!sel) return;
                   if (sel === "play") playIndex(index);
+                  else if (sel === "play_next") invoke("playlist_play_next", { id: track.id });
                   else if (sel === "edit_tags") invoke("open_tag_editor", { path: track.path });
                   else if (sel === "reveal") invoke("reveal_in_file_manager", { path: track.path });
+                  else if (sel === "copy_url") {
+                    const url = isYoutube
+                      ? `https://music.youtube.com/watch?v=${track.path.slice("youtube:".length)}`
+                      : isSpotify
+                        ? `https://open.spotify.com/track/${track.path.slice("spotify:track:".length)}`
+                        : track.path;
+                    navigator.clipboard.writeText(url);
+                  }
+                  else if (sel === "open_web") {
+                    const url = isYoutube
+                      ? `https://music.youtube.com/watch?v=${track.path.slice("youtube:".length)}`
+                      : `https://open.spotify.com/track/${track.path.slice("spotify:track:".length)}`;
+                    invoke("open_url", { url }).catch(console.error);
+                  }
+                  else if (sel === "download") downloadYoutubeTrack(track);
                   else if (sel === "remove") invoke("playlist_remove_tracks", { ids: [track.id] });
                 }}
                 style={{

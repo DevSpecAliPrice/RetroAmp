@@ -3,9 +3,19 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { SkinData } from "../skin/parser";
 import SkinBrowser from "./SkinBrowser";
+import { FEATURES } from "../features";
 import "./settings.css";
 
-type Tab = "skins" | "shortcuts" | "library" | "spotify" | "youtube" | "general";
+type Tab =
+  | "skins"
+  | "shortcuts"
+  | "playback"
+  | "library"
+  | "visualizer"
+  | "spotify"
+  | "youtube"
+  | "general"
+  | "about";
 
 const SHORTCUTS: { section: string; bindings: [string, string][] }[] = [
   {
@@ -23,8 +33,8 @@ const SHORTCUTS: { section: string; bindings: [string, string][] }[] = [
     bindings: [
       ["R", "Cycle repeat mode"],
       ["S", "Toggle shuffle"],
-      ["\u2190 / \u2192", "Seek \u00b15 seconds"],
-      ["\u2191 / \u2193", "Volume \u00b12%"],
+      ["← / →", "Seek ±5 seconds"],
+      ["↑ / ↓", "Volume ±2%"],
     ],
   },
   {
@@ -36,7 +46,9 @@ const SHORTCUTS: { section: string; bindings: [string, string][] }[] = [
   },
 ];
 
-function ShortcutsTab({ colors }: { colors: { normal: string; current: string; normalbg: string; selectedbg: string } }) {
+type ColorProps = { normal: string; current: string; normalbg: string; selectedbg: string };
+
+function ShortcutsTab({ colors }: { colors: ColorProps }) {
   return (
     <div className="shortcuts-tab">
       {SHORTCUTS.map((group) => (
@@ -54,24 +66,82 @@ function ShortcutsTab({ colors }: { colors: { normal: string; current: string; n
           ))}
         </div>
       ))}
-      <div className="shortcuts-note" style={{ color: colors.normal }}>
-        Shortcuts are disabled while typing in text fields.
+      <div className="shortcuts-note" style={{ color: colors.normal, opacity: 0.6 }}>
+        These shortcuts are fixed in this version and cannot be reassigned. They are disabled while typing in text fields.
       </div>
     </div>
   );
 }
 
-type ColorProps = { normal: string; current: string; normalbg: string; selectedbg: string };
+// ---------------------------------------------------------------------------
+// Playback tab — global add-mode + ReplayGain
+// ---------------------------------------------------------------------------
+
+function PlaybackTab({ colors }: { colors: ColorProps }) {
+  const [addMode, setAddMode] = useState("append");
+  const [normalize, setNormalize] = useState(false);
+
+  useEffect(() => {
+    invoke<string>("get_playlist_add_mode").then(setAddMode).catch(() => {});
+    invoke<boolean>("get_normalize_volume").then(setNormalize).catch(() => {});
+  }, []);
+
+  const changeMode = useCallback(async (mode: string) => {
+    await invoke("set_playlist_add_mode", { mode });
+    setAddMode(mode);
+  }, []);
+
+  const changeNormalize = useCallback(async (enabled: boolean) => {
+    setNormalize(enabled);
+    try { await invoke("set_normalize_volume", { enabled }); }
+    catch (e) { console.error(e); }
+  }, []);
+
+  return (
+    <div className="shortcuts-tab">
+      <div className="shortcuts-group">
+        <div className="shortcuts-group-title" style={{ color: colors.current }}>Adding to Playlist</div>
+        <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
+          When you play a track from Media Library, Radio, YouTube Music, or Spotify:
+        </div>
+        {(["append", "replace"] as const).map((mode) => (
+          <label key={mode} className="shortcuts-row" style={{ cursor: "pointer", gap: 8 }}>
+            <input type="radio" name="addMode" checked={addMode === mode} onChange={() => changeMode(mode)}
+              style={{ accentColor: colors.current }} />
+            <span style={{ fontSize: 13 }}>
+              {mode === "append" ? "Add to current playlist" : "Replace current playlist"}
+            </span>
+          </label>
+        ))}
+      </div>
+
+      <div className="shortcuts-group">
+        <div className="shortcuts-group-title" style={{ color: colors.current }}>Volume Normalisation</div>
+        <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
+          Even out playback volume across tracks using ReplayGain or service-provided loudness data.
+        </div>
+        <label className="shortcuts-row" style={{ cursor: "pointer", gap: 8 }}>
+          <input type="checkbox" checked={normalize}
+            onChange={(e) => changeNormalize(e.target.checked)}
+            style={{ accentColor: colors.current }} />
+          <span style={{ fontSize: 13 }}>Normalize volume across all sources</span>
+        </label>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Library tab — watch folders + scan
+// ---------------------------------------------------------------------------
 
 function LibraryTab({ colors }: { colors: ColorProps }) {
   const [dirs, setDirs] = useState<string[]>([]);
-  const [addMode, setAddMode] = useState("append");
   const [scanning, setScanning] = useState(false);
   const [trackCount, setTrackCount] = useState(0);
 
   useEffect(() => {
     invoke<string[]>("get_library_dirs").then(setDirs).catch(() => {});
-    invoke<string>("get_playlist_add_mode").then(setAddMode).catch(() => {});
     invoke<number>("get_library_track_count").then(setTrackCount).catch(() => {});
     invoke<boolean>("get_scan_status").then(setScanning).catch(() => {});
   }, []);
@@ -88,11 +158,6 @@ function LibraryTab({ colors }: { colors: ColorProps }) {
   const removeDir = useCallback(async (path: string) => {
     await invoke("remove_library_dir", { path });
     setDirs((prev) => prev.filter((d) => d !== path));
-  }, []);
-
-  const changeMode = useCallback(async (mode: string) => {
-    await invoke("set_playlist_add_mode", { mode });
-    setAddMode(mode);
   }, []);
 
   const startScan = useCallback(async () => {
@@ -129,64 +194,99 @@ function LibraryTab({ colors }: { colors: ColorProps }) {
           {trackCount} track{trackCount !== 1 ? "s" : ""} indexed
         </div>
       </div>
-
-      <div className="shortcuts-group">
-        <div className="shortcuts-group-title" style={{ color: colors.current }}>Playlist Behavior</div>
-        <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
-          When playing from the library:
-        </div>
-        {(["append", "replace"] as const).map((mode) => (
-          <label key={mode} className="shortcuts-row" style={{ cursor: "pointer", gap: 8 }}>
-            <input type="radio" name="addMode" checked={addMode === mode} onChange={() => changeMode(mode)}
-              style={{ accentColor: colors.current }} />
-            <span style={{ fontSize: 13 }}>
-              {mode === "append" ? "Add to current playlist" : "Replace current playlist"}
-            </span>
-          </label>
-        ))}
-      </div>
     </div>
   );
 }
 
-function GeneralTab({ colors }: { colors: ColorProps }) {
-  const [downloadDir, setDownloadDir] = useState("");
+// ---------------------------------------------------------------------------
+// Visualizer tab
+// ---------------------------------------------------------------------------
+
+interface VisualizerSettingsData {
+  last_preset: string | null;
+  lock_preset: boolean;
+  auto_cycle: boolean;
+  cycle_secs: number;
+  blend_secs: number;
+}
+
+function VisualizerTab({ colors }: { colors: ColorProps }) {
+  const [s, setSettings] = useState<VisualizerSettingsData>({
+    last_preset: null, lock_preset: false, auto_cycle: true, cycle_secs: 30, blend_secs: 2.0,
+  });
 
   useEffect(() => {
-    invoke<string>("get_download_dir").then(setDownloadDir).catch(() => {});
+    invoke<VisualizerSettingsData>("get_visualizer_settings").then(setSettings).catch(() => {});
   }, []);
 
-  const pickFolder = useCallback(async () => {
-    const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
-    const selected = await openDialog({ directory: true, multiple: false });
-    if (selected && typeof selected === "string") {
-      await invoke("set_download_dir", { path: selected });
-      setDownloadDir(selected);
-    }
-  }, []);
+  const update = useCallback(async (next: Partial<VisualizerSettingsData>) => {
+    const merged = { ...s, ...next };
+    setSettings(merged);
+    try {
+      await invoke("set_visualizer_settings", {
+        lockPreset: merged.lock_preset,
+        autoCycle: merged.auto_cycle,
+        cycleSecs: merged.cycle_secs,
+        blendSecs: merged.blend_secs,
+      });
+      // Notify any open visualizer window so it picks up the change live.
+      const { emit } = await import("@tauri-apps/api/event");
+      emit("visualizer-settings-changed", merged).catch(() => {});
+    } catch (e) { console.error(e); }
+  }, [s]);
 
   return (
     <div className="shortcuts-tab">
       <div className="shortcuts-group">
-        <div className="shortcuts-group-title" style={{ color: colors.current }}>Downloads</div>
-        <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
-          Saved radio tracks are stored in this folder.
+        <div className="shortcuts-group-title" style={{ color: colors.current }}>Preset Cycling</div>
+        <label className="shortcuts-row" style={{ cursor: "pointer", gap: 8 }}>
+          <input type="checkbox" checked={s.auto_cycle}
+            onChange={(e) => update({ auto_cycle: e.target.checked })}
+            style={{ accentColor: colors.current }} />
+          <span style={{ fontSize: 13 }}>Auto-cycle through presets</span>
+        </label>
+        <label className="shortcuts-row" style={{ cursor: "pointer", gap: 8 }}>
+          <input type="checkbox" checked={s.lock_preset}
+            onChange={(e) => update({ lock_preset: e.target.checked })}
+            style={{ accentColor: colors.current }} />
+          <span style={{ fontSize: 13 }}>Lock current preset (overrides auto-cycle)</span>
+        </label>
+        <div className="shortcuts-row" style={{ gap: 8, marginTop: 4 }}>
+          <span style={{ fontSize: 12, opacity: 0.7, minWidth: 100 }}>Cycle interval</span>
+          <input type="number" min="5" max="600" value={s.cycle_secs}
+            onChange={(e) => update({ cycle_secs: Math.max(5, parseInt(e.target.value, 10) || 30) })}
+            style={{ width: 60, background: "rgba(255,255,255,0.08)", border: `1px solid ${colors.selectedbg}`, color: colors.normal, padding: "2px 6px", fontSize: 12 }} />
+          <span style={{ fontSize: 12, opacity: 0.7 }}>seconds</span>
         </div>
-        <div className="shortcuts-row" style={{ justifyContent: "space-between" }}>
-          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, fontSize: 12 }}>
-            {downloadDir || "Loading..."}
-          </span>
-          <span
-            onClick={pickFolder}
-            style={{ cursor: "pointer", padding: "2px 8px", color: colors.current, opacity: 0.7, fontSize: 12 }}
-          >
-            Browse
-          </span>
+      </div>
+
+      <div className="shortcuts-group">
+        <div className="shortcuts-group-title" style={{ color: colors.current }}>Transitions</div>
+        <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
+          How long to crossfade when switching presets. Set to 0 for hard cuts.
+        </div>
+        <div className="shortcuts-row" style={{ gap: 8 }}>
+          <span style={{ fontSize: 12, opacity: 0.7, minWidth: 100 }}>Blend duration</span>
+          <input type="number" min="0" max="10" step="0.5" value={s.blend_secs}
+            onChange={(e) => update({ blend_secs: Math.max(0, Math.min(10, parseFloat(e.target.value) || 0)) })}
+            style={{ width: 60, background: "rgba(255,255,255,0.08)", border: `1px solid ${colors.selectedbg}`, color: colors.normal, padding: "2px 6px", fontSize: 12 }} />
+          <span style={{ fontSize: 12, opacity: 0.7 }}>seconds</span>
+        </div>
+      </div>
+
+      <div className="shortcuts-group">
+        <div className="shortcuts-group-title" style={{ color: colors.current }}>Current Preset</div>
+        <div style={{ fontSize: 12, opacity: 0.7 }}>
+          {s.last_preset ?? "(none — open the visualizer to load one)"}
         </div>
       </div>
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Spotify tab — re-ordered: Account (with Setup) → Audio Quality → Connect
+// ---------------------------------------------------------------------------
 
 interface SpotifyStatus {
   connected: boolean;
@@ -199,13 +299,12 @@ interface SpotifySettingsData {
   quality: string;
   device_name: string;
   connect_enabled: boolean;
-  normalize_volume: boolean;
 }
 
 function SpotifyTab({ colors }: { colors: ColorProps }) {
   const [status, setStatus] = useState<SpotifyStatus>({ connected: false, username: null, account_type: null });
   const [settings, setSettings] = useState<SpotifySettingsData>({
-    client_id: null, quality: "very_high", device_name: "RetroAmp", connect_enabled: false, normalize_volume: false,
+    client_id: null, quality: "very_high", device_name: "RetroAmp", connect_enabled: false,
   });
   const [loggingIn, setLoggingIn] = useState(false);
 
@@ -235,7 +334,7 @@ function SpotifyTab({ colors }: { colors: ColorProps }) {
     }
   }, []);
 
-  const updateSetting = useCallback(async (key: keyof SpotifySettingsData, value: string | boolean) => {
+  const updateSetting = useCallback(async (key: keyof SpotifySettingsData, value: string | boolean | null) => {
     const updated = { ...settings, [key]: value };
     setSettings(updated);
     try {
@@ -249,9 +348,11 @@ function SpotifyTab({ colors }: { colors: ColorProps }) {
 
   return (
     <div className="shortcuts-tab">
-      {/* Client ID — required setup */}
+      {/* Account (with embedded Setup section) */}
       <div className="shortcuts-group">
-        <div className="shortcuts-group-title" style={{ color: colors.current }}>Setup</div>
+        <div className="shortcuts-group-title" style={{ color: colors.current }}>Account</div>
+
+        {/* Client ID always visible — required setup */}
         <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
           Spotify requires a Developer App for third-party access.
           See the <span style={{ color: colors.current }}>SPOTIFY_SETUP.md</span> guide in the docs folder for instructions.
@@ -267,47 +368,46 @@ function SpotifyTab({ colors }: { colors: ColorProps }) {
             }} />
         </div>
         {!hasClientId && (
-          <div style={{ fontSize: 11, color: "#ff6666", marginTop: 4 }}>
-            A Client ID is required to use Spotify. See the setup guide for details.
+          <div style={{ fontSize: 11, color: "#ff6666", marginTop: 4, marginBottom: 8 }}>
+            A Client ID is required to use Spotify.
           </div>
         )}
-      </div>
 
-      {/* Account section */}
-      <div className="shortcuts-group">
-        <div className="shortcuts-group-title" style={{ color: colors.current }}>Account</div>
-        {status.connected ? (
-          <>
-            <div className="shortcuts-row" style={{ gap: 8 }}>
-              <span style={{ fontSize: 12, opacity: 0.7 }}>Logged in as</span>
-              <span style={{ fontSize: 13, color: colors.current }}>{status.username || "Unknown"}</span>
-            </div>
-            {status.account_type && (
+        {/* Login state */}
+        <div style={{ marginTop: 12 }}>
+          {status.connected ? (
+            <>
               <div className="shortcuts-row" style={{ gap: 8 }}>
-                <span style={{ fontSize: 12, opacity: 0.7 }}>Account type</span>
-                <span style={{ fontSize: 13, color: colors.current, textTransform: "capitalize" as const }}>{status.account_type}</span>
+                <span style={{ fontSize: 12, opacity: 0.7 }}>Logged in as</span>
+                <span style={{ fontSize: 13, color: colors.current }}>{status.username || "Unknown"}</span>
               </div>
-            )}
-            <div style={{ marginTop: 8 }}>
-              <div onClick={logout}
-                style={{ display: "inline-block", padding: "4px 12px", background: colors.selectedbg, color: colors.current, cursor: "pointer", fontSize: 12 }}>
-                Log Out
+              {status.account_type && (
+                <div className="shortcuts-row" style={{ gap: 8 }}>
+                  <span style={{ fontSize: 12, opacity: 0.7 }}>Account type</span>
+                  <span style={{ fontSize: 13, color: colors.current, textTransform: "capitalize" as const }}>{status.account_type}</span>
+                </div>
+              )}
+              <div style={{ marginTop: 8 }}>
+                <div onClick={logout}
+                  style={{ display: "inline-block", padding: "4px 12px", background: colors.selectedbg, color: colors.current, cursor: "pointer", fontSize: 12 }}>
+                  Log Out
+                </div>
               </div>
-            </div>
-          </>
-        ) : (
-          <>
-            <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
-              {hasClientId
-                ? "Connect your Spotify Premium account to stream music through RetroAmp."
-                : "Enter a Client ID above to enable Spotify login."}
-            </div>
-            <div onClick={hasClientId && !loggingIn ? login : undefined}
-              style={{ display: "inline-block", padding: "4px 12px", background: colors.selectedbg, color: colors.current, cursor: hasClientId && !loggingIn ? "pointer" : "default", fontSize: 12, opacity: hasClientId && !loggingIn ? 1 : 0.3 }}>
-              {loggingIn ? "Waiting for browser..." : "Log In with Spotify"}
-            </div>
-          </>
-        )}
+            </>
+          ) : (
+            <>
+              <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
+                {hasClientId
+                  ? "Connect your Spotify Premium account to stream music through RetroAmp."
+                  : "Enter a Client ID above to enable Spotify login."}
+              </div>
+              <div onClick={hasClientId && !loggingIn ? login : undefined}
+                style={{ display: "inline-block", padding: "4px 12px", background: colors.selectedbg, color: colors.current, cursor: hasClientId && !loggingIn ? "pointer" : "default", fontSize: 12, opacity: hasClientId && !loggingIn ? 1 : 0.3 }}>
+                {loggingIn ? "Waiting for browser..." : "Log In with Spotify"}
+              </div>
+            </>
+          )}
+        </div>
       </div>
 
       {/* Audio Quality */}
@@ -348,21 +448,13 @@ function SpotifyTab({ colors }: { colors: ColorProps }) {
             }} />
         </div>
       </div>
-
-      {/* Volume Normalisation */}
-      <div className="shortcuts-group">
-        <div className="shortcuts-group-title" style={{ color: colors.current }}>Playback</div>
-        <label className="shortcuts-row" style={{ cursor: "pointer", gap: 8 }}>
-          <input type="checkbox" checked={settings.normalize_volume}
-            onChange={(e) => updateSetting("normalize_volume", e.target.checked)}
-            style={{ accentColor: colors.current }} />
-          <span style={{ fontSize: 13 }}>Normalize volume (ReplayGain)</span>
-        </label>
-      </div>
-
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// YouTube tab — re-ordered to match Spotify: Account → Audio Quality → yt-dlp
+// ---------------------------------------------------------------------------
 
 interface YouTubeSettingsData {
   quality: string;
@@ -386,6 +478,7 @@ function YouTubeTab({ colors }: { colors: ColorProps }) {
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [loggingIn, setLoggingIn] = useState(false);
+  const [updatingYtdlp, setUpdatingYtdlp] = useState(false);
 
   useEffect(() => {
     invoke<YouTubeSettingsData>("get_youtube_settings").then(setSettings).catch(() => {});
@@ -463,30 +556,40 @@ function YouTubeTab({ colors }: { colors: ColorProps }) {
     }
   }, []);
 
+  const pickYtdlp = useCallback(async () => {
+    const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
+    const selected = await openDialog({ multiple: false, filters: [{ name: "yt-dlp binary", extensions: ["*"] }] });
+    if (selected && typeof selected === "string") {
+      saveSettings({ ytdlp_path: selected });
+      // Re-query for fresh status string.
+      invoke<YouTubeSettingsData>("get_youtube_settings").then(setSettings).catch(() => {});
+    }
+  }, [saveSettings]);
+
+  const clearYtdlpPath = useCallback(async () => {
+    saveSettings({ ytdlp_path: null });
+    invoke<YouTubeSettingsData>("get_youtube_settings").then(setSettings).catch(() => {});
+  }, [saveSettings]);
+
+  const updateYtdlp = useCallback(async () => {
+    setUpdatingYtdlp(true);
+    setStatusMsg("Checking for yt-dlp updates...");
+    try {
+      const newStatus = await invoke<string>("youtube_update_ytdlp");
+      setSettings((prev) => ({ ...prev, ytdlp_status: newStatus }));
+      setStatusMsg("yt-dlp update check complete");
+    } catch (e) {
+      setStatusMsg(`Update failed: ${e}`);
+    } finally {
+      setUpdatingYtdlp(false);
+    }
+  }, []);
+
   return (
     <div className="shortcuts-tab">
-      {/* Audio Quality */}
-      <div className="shortcuts-group">
-        <div className="shortcuts-group-title" style={{ color: colors.current }}>Audio Quality</div>
-        <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
-          Controls the bitrate of audio streamed from YouTube Music.
-        </div>
-        {([
-          ["high", "High (best available — Opus ~160 kbps or AAC ~256 kbps)"],
-          ["low", "Low (reduced bandwidth, ~48 kbps)"],
-        ] as const).map(([value, label]) => (
-          <label key={value} className="shortcuts-row" style={{ cursor: "pointer", gap: 8 }}>
-            <input type="radio" name="yt-quality" checked={settings.quality === value || (settings.quality === "medium" && value === "high")}
-              onChange={() => saveSettings({ quality: value })}
-              style={{ accentColor: colors.current }} />
-            <span style={{ fontSize: 13 }}>{label}</span>
-          </label>
-        ))}
-      </div>
-
       {/* YouTube Music Account */}
       <div className="shortcuts-group">
-        <div className="shortcuts-group-title" style={{ color: colors.current }}>YouTube Music Account</div>
+        <div className="shortcuts-group-title" style={{ color: colors.current }}>Account</div>
         <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
           Logging in is optional — search and browsing work without an account.
           Sign in to access your personal library, liked songs, playlists, and listening history.
@@ -528,7 +631,7 @@ function YouTubeTab({ colors }: { colors: ColorProps }) {
             <div style={{ marginTop: 14 }}>
               <div onClick={() => setShowAdvanced(!showAdvanced)}
                 style={{ fontSize: 12, opacity: 0.8, cursor: "pointer", fontWeight: "bold" }}>
-                {showAdvanced ? "\u25BC" : "\u25B6"} Manual Login (Advanced)
+                {showAdvanced ? "▼" : "▶"} Manual Login (Advanced)
               </div>
               <div style={{ fontSize: 12, opacity: 0.6, marginTop: 4, marginBottom: showAdvanced ? 8 : 0 }}>
                 Use this if you have a Brand Account, multiple YouTube channels under one Google account,
@@ -572,32 +675,192 @@ function YouTubeTab({ colors }: { colors: ColorProps }) {
           </>
         )}
         {statusMsg && (
-          <div style={{ fontSize: 11, marginTop: 8, color: statusMsg.includes("failed") || statusMsg.includes("Failed") ? "#ff6666" : colors.current }}>
+          <div style={{ fontSize: 11, marginTop: 8, color: statusMsg.toLowerCase().includes("fail") ? "#ff6666" : colors.current }}>
             {statusMsg}
           </div>
         )}
       </div>
 
-      {/* yt-dlp Status */}
+      {/* Audio Quality */}
+      <div className="shortcuts-group">
+        <div className="shortcuts-group-title" style={{ color: colors.current }}>Audio Quality</div>
+        <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
+          Controls the bitrate of audio streamed from YouTube Music.
+        </div>
+        {([
+          ["high", "High (best available — Opus ~160 kbps or AAC ~256 kbps)"],
+          ["low", "Low (reduced bandwidth, ~48 kbps)"],
+        ] as const).map(([value, label]) => (
+          <label key={value} className="shortcuts-row" style={{ cursor: "pointer", gap: 8 }}>
+            <input type="radio" name="yt-quality" checked={settings.quality === value || (settings.quality === "medium" && value === "high")}
+              onChange={() => saveSettings({ quality: value })}
+              style={{ accentColor: colors.current }} />
+            <span style={{ fontSize: 13 }}>{label}</span>
+          </label>
+        ))}
+      </div>
+
+      {/* yt-dlp Section */}
       <div className="shortcuts-group">
         <div className="shortcuts-group-title" style={{ color: colors.current }}>yt-dlp</div>
         <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
-          RetroAmp uses yt-dlp to extract audio streams from YouTube. It is downloaded
-          automatically if not found on your system.
+          RetroAmp uses yt-dlp to extract audio streams. It is downloaded automatically if not found on your system.
         </div>
         <div className="shortcuts-row" style={{ gap: 8 }}>
           <span style={{ fontSize: 12, opacity: 0.7 }}>Status</span>
           <span style={{ fontSize: 12, color: colors.current }}>{settings.ytdlp_status}</span>
+        </div>
+        <div className="shortcuts-row" style={{ gap: 8, marginTop: 4 }}>
+          <span style={{ fontSize: 12, opacity: 0.7 }}>Custom binary</span>
+          <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12 }}>
+            {settings.ytdlp_path && settings.ytdlp_path !== "yt-dlp" ? settings.ytdlp_path : "(auto-detected)"}
+          </span>
+        </div>
+        <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+          <div onClick={pickYtdlp}
+            style={{ padding: "4px 12px", background: colors.selectedbg, color: colors.current, cursor: "pointer", fontSize: 12 }}>
+            Choose Binary...
+          </div>
+          {settings.ytdlp_path && (
+            <div onClick={clearYtdlpPath}
+              style={{ padding: "4px 12px", background: colors.selectedbg, color: colors.current, cursor: "pointer", fontSize: 12, opacity: 0.7 }}>
+              Use Auto
+            </div>
+          )}
+          <div onClick={!updatingYtdlp ? updateYtdlp : undefined}
+            style={{ padding: "4px 12px", background: colors.selectedbg, color: colors.current, cursor: !updatingYtdlp ? "pointer" : "default", fontSize: 12, opacity: updatingYtdlp ? 0.5 : 1 }}>
+            {updatingYtdlp ? "Checking..." : "Check for Updates"}
+          </div>
         </div>
       </div>
     </div>
   );
 }
 
+// ---------------------------------------------------------------------------
+// General tab — downloads folder
+// ---------------------------------------------------------------------------
+
+function GeneralTab({ colors }: { colors: ColorProps }) {
+  const [downloadDir, setDownloadDir] = useState("");
+
+  useEffect(() => {
+    invoke<string>("get_download_dir").then(setDownloadDir).catch(() => {});
+  }, []);
+
+  const pickFolder = useCallback(async () => {
+    const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
+    const selected = await openDialog({ directory: true, multiple: false });
+    if (selected && typeof selected === "string") {
+      await invoke("set_download_dir", { path: selected });
+      setDownloadDir(selected);
+    }
+  }, []);
+
+  return (
+    <div className="shortcuts-tab">
+      <div className="shortcuts-group">
+        <div className="shortcuts-group-title" style={{ color: colors.current }}>Downloads</div>
+        <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
+          Where saved tracks (radio recordings, YouTube downloads) are stored.
+        </div>
+        <div className="shortcuts-row" style={{ justifyContent: "space-between" }}>
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, fontSize: 12 }}>
+            {downloadDir || "Loading..."}
+          </span>
+          <span
+            onClick={pickFolder}
+            style={{ cursor: "pointer", padding: "2px 8px", color: colors.current, opacity: 0.7, fontSize: 12 }}
+          >
+            Browse
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// About tab
+// ---------------------------------------------------------------------------
+
+function AboutTab({ colors }: { colors: ColorProps }) {
+  const [version, setVersion] = useState<string>("");
+
+  useEffect(() => {
+    invoke<string>("get_app_version").then(setVersion).catch(() => {});
+  }, []);
+
+  const openLink = (url: string) => invoke("open_url", { url }).catch(console.error);
+
+  return (
+    <div className="shortcuts-tab">
+      <div className="shortcuts-group" style={{ textAlign: "center" }}>
+        <div style={{ fontSize: 16, color: colors.current, fontWeight: "bold", marginTop: 12 }}>
+          RetroAmp
+        </div>
+        <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>
+          {version ? `Version ${version}` : ""}
+        </div>
+        <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>
+          Cross-platform desktop audio player inspired by Winamp 2.x.
+        </div>
+      </div>
+
+      <div className="shortcuts-group">
+        <div className="shortcuts-group-title" style={{ color: colors.current }}>Built With</div>
+        <div className="shortcuts-row" style={{ justifyContent: "space-between", fontSize: 12 }}>
+          <span style={{ opacity: 0.7 }}>Tauri</span>
+          <span style={{ color: colors.current, cursor: "pointer" }} onClick={() => openLink("https://tauri.app")}>tauri.app</span>
+        </div>
+        <div className="shortcuts-row" style={{ justifyContent: "space-between", fontSize: 12 }}>
+          <span style={{ opacity: 0.7 }}>React + TypeScript</span>
+          <span style={{ color: colors.current, cursor: "pointer" }} onClick={() => openLink("https://react.dev")}>react.dev</span>
+        </div>
+        <div className="shortcuts-row" style={{ justifyContent: "space-between", fontSize: 12 }}>
+          <span style={{ opacity: 0.7 }}>Symphonia (audio decoding)</span>
+          <span style={{ color: colors.current, cursor: "pointer" }} onClick={() => openLink("https://github.com/pdeljanov/Symphonia")}>github</span>
+        </div>
+        <div className="shortcuts-row" style={{ justifyContent: "space-between", fontSize: 12 }}>
+          <span style={{ opacity: 0.7 }}>Butterchurn (visualizer)</span>
+          <span style={{ color: colors.current, cursor: "pointer" }} onClick={() => openLink("https://butterchurnviz.com")}>butterchurnviz.com</span>
+        </div>
+        <div className="shortcuts-row" style={{ justifyContent: "space-between", fontSize: 12 }}>
+          <span style={{ opacity: 0.7 }}>yt-dlp (YouTube extraction)</span>
+          <span style={{ color: colors.current, cursor: "pointer" }} onClick={() => openLink("https://github.com/yt-dlp/yt-dlp")}>github</span>
+        </div>
+      </div>
+
+      <div className="shortcuts-group">
+        <div className="shortcuts-group-title" style={{ color: colors.current }}>License</div>
+        <div style={{ fontSize: 12, opacity: 0.7 }}>
+          MIT License. Skin format compatibility based on the Winamp 2.x reference. Not affiliated with Nullsoft.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Window shell
+// ---------------------------------------------------------------------------
+
 interface Props {
   skin: SkinData | null;
   scale: number;
 }
+
+const TABS: { id: Tab; label: string; show?: () => boolean }[] = [
+  { id: "skins", label: "Skins" },
+  { id: "shortcuts", label: "Shortcuts" },
+  { id: "playback", label: "Playback" },
+  { id: "library", label: "Library" },
+  { id: "visualizer", label: "Visualizer" },
+  { id: "spotify", label: "Spotify", show: () => FEATURES.spotify },
+  { id: "youtube", label: "YouTube" },
+  { id: "general", label: "General" },
+  { id: "about", label: "About" },
+];
 
 export default function SettingsWindow({ skin, scale }: Props) {
   const [activeTab, setActiveTab] = useState<Tab>("skins");
@@ -624,6 +887,8 @@ export default function SettingsWindow({ skin, scale }: Props) {
     backgroundRepeat: dir,
     backgroundSize: dir === "repeat-x" ? "auto 100%" : "100% auto",
   });
+
+  const visibleTabs = TABS.filter((t) => !t.show || t.show());
 
   return (
     <div
@@ -676,74 +941,30 @@ export default function SettingsWindow({ skin, scale }: Props) {
         <div className="settings-root" style={{ background: ps.normalbg }}>
           <div style={{ padding: `${3 * s}px ${4 * s}px`, fontFamily: `"${ps.font}", Arial, sans-serif`, fontSize: Math.max(8, Math.round(9 * s)), color: ps.normal, textAlign: "center", userSelect: "none", flexShrink: 0, borderBottom: `1px solid ${ps.selectedbg}` }}>PREFERENCES</div>
           <div className="settings-tabs" style={{ borderBottomColor: ps.selectedbg }}>
-            <button
-              className={`settings-tab ${activeTab === "skins" ? "active" : ""}`}
-              style={{
-                color: activeTab === "skins" ? ps.current : ps.normal,
-                borderBottomColor: activeTab === "skins" ? ps.current : "transparent",
-              }}
-              onClick={() => setActiveTab("skins")}
-            >
-              Skins
-            </button>
-            <button
-              className={`settings-tab ${activeTab === "shortcuts" ? "active" : ""}`}
-              style={{
-                color: activeTab === "shortcuts" ? ps.current : ps.normal,
-                borderBottomColor: activeTab === "shortcuts" ? ps.current : "transparent",
-              }}
-              onClick={() => setActiveTab("shortcuts")}
-            >
-              Shortcuts
-            </button>
-            <button
-              className={`settings-tab ${activeTab === "library" ? "active" : ""}`}
-              style={{
-                color: activeTab === "library" ? ps.current : ps.normal,
-                borderBottomColor: activeTab === "library" ? ps.current : "transparent",
-              }}
-              onClick={() => setActiveTab("library")}
-            >
-              Library
-            </button>
-            <button
-              className={`settings-tab ${activeTab === "spotify" ? "active" : ""}`}
-              style={{
-                color: activeTab === "spotify" ? ps.current : ps.normal,
-                borderBottomColor: activeTab === "spotify" ? ps.current : "transparent",
-              }}
-              onClick={() => setActiveTab("spotify")}
-            >
-              Spotify
-            </button>
-            <button
-              className={`settings-tab ${activeTab === "youtube" ? "active" : ""}`}
-              style={{
-                color: activeTab === "youtube" ? ps.current : ps.normal,
-                borderBottomColor: activeTab === "youtube" ? ps.current : "transparent",
-              }}
-              onClick={() => setActiveTab("youtube")}
-            >
-              YouTube
-            </button>
-            <button
-              className={`settings-tab ${activeTab === "general" ? "active" : ""}`}
-              style={{
-                color: activeTab === "general" ? ps.current : ps.normal,
-                borderBottomColor: activeTab === "general" ? ps.current : "transparent",
-              }}
-              onClick={() => setActiveTab("general")}
-            >
-              General
-            </button>
+            {visibleTabs.map((t) => (
+              <button
+                key={t.id}
+                className={`settings-tab ${activeTab === t.id ? "active" : ""}`}
+                style={{
+                  color: activeTab === t.id ? ps.current : ps.normal,
+                  borderBottomColor: activeTab === t.id ? ps.current : "transparent",
+                }}
+                onClick={() => setActiveTab(t.id)}
+              >
+                {t.label}
+              </button>
+            ))}
           </div>
           <div className="settings-content" style={{ color: ps.normal }}>
             {activeTab === "skins" && <SkinBrowser playlistStyle={ps} />}
             {activeTab === "shortcuts" && <ShortcutsTab colors={ps} />}
+            {activeTab === "playback" && <PlaybackTab colors={ps} />}
             {activeTab === "library" && <LibraryTab colors={ps} />}
-            {activeTab === "spotify" && <SpotifyTab colors={ps} />}
+            {activeTab === "visualizer" && <VisualizerTab colors={ps} />}
+            {FEATURES.spotify && activeTab === "spotify" && <SpotifyTab colors={ps} />}
             {activeTab === "youtube" && <YouTubeTab colors={ps} />}
             {activeTab === "general" && <GeneralTab colors={ps} />}
+            {activeTab === "about" && <AboutTab colors={ps} />}
           </div>
         </div>
 

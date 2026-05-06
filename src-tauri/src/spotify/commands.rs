@@ -120,7 +120,6 @@ pub struct SpotifySettings {
     pub quality: String,
     pub device_name: String,
     pub connect_enabled: bool,
-    pub normalize_volume: bool,
 }
 
 /// Get the current Spotify settings.
@@ -132,7 +131,6 @@ pub fn get_spotify_settings() -> SpotifySettings {
         quality: cfg.spotify.quality,
         device_name: cfg.spotify.device_name,
         connect_enabled: cfg.spotify.connect_enabled,
-        normalize_volume: cfg.spotify.normalize_volume,
     }
 }
 
@@ -144,7 +142,6 @@ pub fn set_spotify_settings(settings: SpotifySettings) -> Result<(), String> {
     cfg.spotify.quality = settings.quality;
     cfg.spotify.device_name = settings.device_name;
     cfg.spotify.connect_enabled = settings.connect_enabled;
-    cfg.spotify.normalize_volume = settings.normalize_volume;
     cfg.save()
 }
 
@@ -346,6 +343,63 @@ pub async fn spotify_get_artist_albums(
     })
     .await
     .map_err(|e| format!("Artist albums task failed: {e}"))?
+}
+
+/// Save (like) a Spotify track.
+#[tauri::command]
+pub async fn spotify_like_track(
+    spotify: State<'_, Arc<SpotifyPlayer>>,
+    track_id: String,
+) -> Result<(), String> {
+    let token = spotify.api_access_token().ok_or("Spotify not connected")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::spotify::api::save_track(&token, &track_id)
+    })
+    .await
+    .map_err(|e| format!("Like task failed: {e}"))?
+}
+
+/// Unsave (unlike) a Spotify track.
+#[tauri::command]
+pub async fn spotify_unlike_track(
+    spotify: State<'_, Arc<SpotifyPlayer>>,
+    track_id: String,
+) -> Result<(), String> {
+    let token = spotify.api_access_token().ok_or("Spotify not connected")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::spotify::api::unsave_track(&token, &track_id)
+    })
+    .await
+    .map_err(|e| format!("Unlike task failed: {e}"))?
+}
+
+/// Check whether tracks are in the user's saved library.
+#[tauri::command]
+pub async fn spotify_check_saved(
+    spotify: State<'_, Arc<SpotifyPlayer>>,
+    track_ids: Vec<String>,
+) -> Result<Vec<bool>, String> {
+    let token = spotify.api_access_token().ok_or("Spotify not connected")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::spotify::api::check_saved_tracks(&token, &track_ids)
+    })
+    .await
+    .map_err(|e| format!("Check saved task failed: {e}"))?
+}
+
+/// Add a track to a Spotify user playlist.
+#[tauri::command]
+pub async fn spotify_add_to_user_playlist(
+    spotify: State<'_, Arc<SpotifyPlayer>>,
+    playlist_id: String,
+    track_uri: String,
+) -> Result<(), String> {
+    let token = spotify.api_access_token().ok_or("Spotify not connected")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::spotify::api::add_to_user_playlist(&token, &playlist_id, &track_uri)
+    })
+    .await
+    .map_err(|e| format!("Add to playlist task failed: {e}"))?
 }
 
 /// Get the user's recently played tracks.

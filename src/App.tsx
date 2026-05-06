@@ -11,8 +11,10 @@ import RadioBrowserWindow from "./skin/RadioBrowserWindow";
 import LibraryBrowserWindow from "./skin/LibraryBrowserWindow";
 import SpotifyBrowserWindow from "./skin/SpotifyBrowserWindow";
 import YouTubeBrowserWindow from "./skin/YouTubeBrowserWindow";
+import { FEATURES } from "./features";
 import TagEditorWindow from "./tageditor/TagEditorWindow";
 import VisualizerWindow from "./visualizer/VisualizerWindow";
+import { checkForUpdates } from "./updater";
 
 const DEFAULT_SKIN_NAME = "RetroAmp Default";
 
@@ -95,6 +97,16 @@ function App() {
       }
     })();
   }, []);
+
+  // Auto-check for updates on the main window only, after a short delay so
+  // it doesn't compete with startup work. Failures are silent.
+  useEffect(() => {
+    if (panel !== "main") return;
+    const t = setTimeout(() => {
+      checkForUpdates({ silent: true }).catch(() => {});
+    }, 5000);
+    return () => clearTimeout(t);
+  }, [panel]);
 
   // Listen for catalog sync progress events from the backend.
   useEffect(() => {
@@ -341,6 +353,7 @@ function App() {
     case "librarybrowser":
       return <LibraryBrowserWindow skin={skin} scale={scale} />;
     case "spotifybrowser":
+      if (!FEATURES.spotify) return null;
       return <SpotifyBrowserWindow skin={skin} scale={scale} />;
     case "youtubebrowser":
       return <YouTubeBrowserWindow skin={skin} scale={scale} />;

@@ -29,6 +29,17 @@ impl Default for YouTubeWebviewState {
 // Playback commands
 // ---------------------------------------------------------------------------
 
+/// Convert an incoming `duration_ms` from the frontend into an `Option<Duration>`.
+/// A value of 0 means "unknown" (the frontend uses `?? 0` when it doesn't have
+/// a duration), so we map it to None rather than displaying it as "0:00".
+fn duration_from_ms(duration_ms: u64) -> Option<std::time::Duration> {
+    if duration_ms == 0 {
+        None
+    } else {
+        Some(std::time::Duration::from_millis(duration_ms))
+    }
+}
+
 /// Play a YouTube track by video ID. Adds it to the playlist and plays it.
 #[tauri::command]
 pub fn youtube_play_track(
@@ -53,7 +64,7 @@ pub fn youtube_play_track(
             title: Some(title),
             artist: Some(artist),
             album: Some(album),
-            duration: Some(std::time::Duration::from_millis(duration_ms)),
+            duration: duration_from_ms(duration_ms),
             sample_rate: 44100,
             channels: 2,
             bitrate: None,
@@ -98,7 +109,7 @@ pub fn youtube_add_to_playlist(
             title: Some(title),
             artist: Some(artist),
             album: Some(album),
-            duration: Some(std::time::Duration::from_millis(duration_ms)),
+            duration: duration_from_ms(duration_ms),
             sample_rate: 44100,
             channels: 2,
             bitrate: None,
@@ -132,7 +143,7 @@ pub fn youtube_add_tracks(
             title: Some(t.title.clone()),
             artist: Some(t.artist.clone()),
             album: Some(t.album.clone()),
-            duration: Some(std::time::Duration::from_millis(t.duration_ms)),
+            duration: duration_from_ms(t.duration_ms),
             sample_rate: 44100,
             channels: 2,
             bitrate: None,
@@ -169,9 +180,99 @@ pub struct YtTrackInput {
     pub thumbnail_url: Option<String>,
 }
 
+// ---------------------------------------------------------------------------
+// Save / download commands
+// ---------------------------------------------------------------------------
+
+/// Save the currently-playing YouTube track to the user's download directory.
+///
+/// Reuses the temp file the audio source has already downloaded — no second
+/// network round-trip. Returns the saved file path on success.
+#[tauri::command]
+pub async fn youtube_save_current_track() -> Result<String, String> {
+    let active = crate::audio::youtube::current_download()
+        .ok_or_else(|| "no YouTube track is currently playing".to_string())?;
+
+    let path = tauri::async_runtime::spawn_blocking(move || {
+        crate::youtube::save::save_active(active)
+    })
+    .await
+    .map_err(|e| format!("save task panicked: {e}"))??;
+
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Download a YouTube track that's already in the playlist (looked up by
+/// track id). Reuses the metadata/cover art the playlist already holds.
+///
+/// If the requested track is the currently-playing one, the caller should
+/// prefer `youtube_save_current_track` to avoid the second yt-dlp run — but
+/// this command works in either case as a safe fallback.
+#[tauri::command]
+pub async fn youtube_download_playlist_track(
+    playlist: tauri::State<'_, Arc<std::sync::Mutex<crate::playlist::manager::PlaylistManager>>>,
+    track_id: u64,
+) -> Result<String, String> {
+    let (video_id, metadata) = {
+        let pl = playlist.lock().map_err(|e| e.to_string())?;
+        let track = pl.get_track(track_id).ok_or("track not found")?;
+        if !track.path.starts_with("youtube:") {
+            return Err("not a YouTube track".into());
+        }
+        let video_id = track.path.trim_start_matches("youtube:").to_string();
+        (video_id, track.to_source_metadata())
+    };
+
+    let path = tauri::async_runtime::spawn_blocking(move || {
+        crate::youtube::save::download_and_save(&video_id, &metadata, None)
+    })
+    .await
+    .map_err(|e| format!("download task panicked: {e}"))??;
+
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Download a YouTube track headlessly (no playback) and save it to the
+/// download directory with metadata + cover art tagged in.
+#[tauri::command]
+pub async fn youtube_download_track(
+    video_id: String,
+    title: String,
+    artist: String,
+    album: String,
+    duration_ms: u64,
+    thumbnail_url: Option<String>,
+) -> Result<String, String> {
+    let metadata = crate::audio::source::TrackMetadata {
+        title: Some(title),
+        artist: Some(artist),
+        album: Some(album),
+        duration: duration_from_ms(duration_ms),
+        sample_rate: 44100,
+        channels: 2,
+        bitrate: None,
+        genre: None,
+        year: None,
+        track_number: None,
+        cover_art: None,
+    };
+
+    let path = tauri::async_runtime::spawn_blocking(move || {
+        crate::youtube::save::download_and_save(
+            &video_id,
+            &metadata,
+            thumbnail_url.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| format!("download task panicked: {e}"))??;
+
+    Ok(path.to_string_lossy().into_owned())
+}
+
 /// Download a thumbnail image and return its bytes.
 /// Returns None on any failure (non-blocking to caller).
-fn download_thumbnail(url: &str) -> Option<Vec<u8>> {
+pub(crate) fn download_thumbnail(url: &str) -> Option<Vec<u8>> {
     use std::io::Read;
     let response = ureq::get(url)
         .header("User-Agent", "RetroAmp/0.1")
@@ -402,6 +503,22 @@ pub fn set_youtube_settings(quality: String, auth_user: u32, ytdlp_path: Option<
     cfg.save()
 }
 
+/// Manually trigger a yt-dlp update check (downloads new binary if available).
+#[tauri::command]
+pub async fn youtube_update_ytdlp() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        crate::youtube::ytdlp::check_for_update();
+        // Re-resolve the path/version info after update.
+        match crate::youtube::ytdlp::find() {
+            Some(p) if p.to_str() == Some("yt-dlp") => "System PATH".to_string(),
+            Some(p) => format!("Installed: {}", p.display()),
+            None => "Not installed".to_string(),
+        }
+    })
+    .await
+    .map_err(|e| format!("update task failed: {e}"))
+}
+
 /// Save a YouTube Music cookie for authenticated access.
 /// Also fetches the DATASYNC_ID for channel identification and
 /// reinitializes the API client.
@@ -461,8 +578,6 @@ fn fetch_datasync_id(cookie: &str) -> Option<String> {
         Some(processed)
     }
 }
-
-use std::io::Read as _;
 
 /// Pre-create the hidden Google sign-in WebView (`youtube_login`) at
 /// app startup.

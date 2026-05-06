@@ -16,6 +16,7 @@ pub enum WindowId {
     Settings,
     RadioBrowser,
     LibraryBrowser,
+    #[cfg(feature = "spotify")]
     SpotifyBrowser,
     YouTubeBrowser,
     Visualizer,
@@ -31,6 +32,7 @@ impl WindowId {
             WindowId::Settings => "settings",
             WindowId::RadioBrowser => "radiobrowser",
             WindowId::LibraryBrowser => "librarybrowser",
+            #[cfg(feature = "spotify")]
             WindowId::SpotifyBrowser => "spotifybrowser",
             WindowId::YouTubeBrowser => "youtubebrowser",
             WindowId::Visualizer => "visualizer",
@@ -46,6 +48,7 @@ impl WindowId {
             WindowId::Settings => "/?window=settings",
             WindowId::RadioBrowser => "/?window=radiobrowser",
             WindowId::LibraryBrowser => "/?window=librarybrowser",
+            #[cfg(feature = "spotify")]
             WindowId::SpotifyBrowser => "/?window=spotifybrowser",
             WindowId::YouTubeBrowser => "/?window=youtubebrowser",
             WindowId::Visualizer => "/?window=visualizer",
@@ -71,6 +74,7 @@ impl WindowId {
             WindowId::Settings => 500,
             WindowId::RadioBrowser => 300,
             WindowId::LibraryBrowser => 350,
+            #[cfg(feature = "spotify")]
             WindowId::SpotifyBrowser => 350,
             WindowId::YouTubeBrowser => 350,
             WindowId::Visualizer => 400,
@@ -82,8 +86,10 @@ impl WindowId {
         match self {
             WindowId::Main | WindowId::Equalizer => false,
             WindowId::Playlist | WindowId::Settings | WindowId::RadioBrowser
-            | WindowId::LibraryBrowser | WindowId::SpotifyBrowser
-            | WindowId::YouTubeBrowser | WindowId::Visualizer => true,
+            | WindowId::LibraryBrowser | WindowId::YouTubeBrowser
+            | WindowId::Visualizer => true,
+            #[cfg(feature = "spotify")]
+            WindowId::SpotifyBrowser => true,
         }
     }
 }
@@ -120,6 +126,7 @@ impl WindowManager {
         states.insert(WindowId::Playlist, false);
         states.insert(WindowId::RadioBrowser, false);
         states.insert(WindowId::LibraryBrowser, false);
+        #[cfg(feature = "spotify")]
         states.insert(WindowId::SpotifyBrowser, false);
         states.insert(WindowId::Visualizer, false);
 

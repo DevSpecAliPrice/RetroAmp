@@ -219,32 +219,6 @@ macro_rules! yt_query {
     }};
 }
 
-impl YtClient {
-    /// Run a library query (requires BrowserToken / LoggedIn).
-    /// Returns an error if the client is not authenticated.
-    async fn library_query<Q>(&self, q: Q) -> Result<Q::Output, String>
-    where
-        Q: ytmapi_rs::query::Query<BrowserToken>,
-    {
-        match self {
-            YtClient::Browser(c) => c.query(q).await.map_err(|e| format!("{e}")),
-            YtClient::NoAuth(_) => Err("Not logged in — library queries require authentication".into()),
-        }
-    }
-
-    /// Run a library query and return the raw JSON string (pre-parsing).
-    /// Use this when ytmapi-rs's parser fails due to YouTube response changes.
-    async fn library_raw_json<Q>(&self, q: Q) -> Result<String, String>
-    where
-        Q: ytmapi_rs::query::Query<BrowserToken>,
-    {
-        match self {
-            YtClient::Browser(c) => c.raw_json_query(q).await.map_err(|e| format!("{e}")),
-            YtClient::NoAuth(_) => Err("Not logged in — library queries require authentication".into()),
-        }
-    }
-}
-
 static YT_CLIENT: OnceLock<Mutex<Option<YtClient>>> = OnceLock::new();
 
 /// SOCS consent cookie — bypasses GDPR consent wall on music.youtube.com.
@@ -763,59 +737,6 @@ pub async fn get_library_songs() -> Result<Vec<YtTrack>, String> {
         find_messages(&json, &mut messages);
         if !messages.is_empty() {
             log::info!("[youtube] liked songs messages: {messages:?}");
-            return Err(messages.join("; "));
-        }
-    }
-
-    Ok(tracks)
-}
-
-/// Fetch tracks from any browse ID using raw JSON.
-/// Works for library browse IDs (FEmusic_*), playlist IDs, and auto-playlists.
-async fn browse_tracks_raw(browse_id: &str) -> Result<Vec<YtTrack>, String> {
-    let client = get_client().await?;
-
-    // Use GetPlaylistDetailsQuery as a generic browse — it sends a browse
-    // request with the given ID, which works for any browse endpoint.
-    let json_str: String = match &client {
-        YtClient::Browser(c) => c
-            .raw_json_query(GetPlaylistTracksQuery::new(
-                PlaylistID::from_raw(browse_id),
-            ))
-            .await
-            .map_err(|e| format!("{e}"))?,
-        YtClient::NoAuth(c) => c
-            .raw_json_query(GetPlaylistTracksQuery::new(
-                PlaylistID::from_raw(browse_id),
-            ))
-            .await
-            .map_err(|e| format!("{e}"))?,
-    };
-
-    let json: serde_json::Value = serde_json::from_str(&json_str)
-        .map_err(|e| format!("Failed to parse browse JSON: {e}"))?;
-
-    // Dump for debugging if cache dir available.
-    if let Some(cache_dir) = dirs::cache_dir() {
-        let safe_id = browse_id.replace('/', "_");
-        let dump_path = cache_dir
-            .join("retroamp")
-            .join(format!("yt_browse_{safe_id}_debug.json"));
-        let _ = std::fs::create_dir_all(dump_path.parent().unwrap());
-        let _ = std::fs::write(&dump_path, &json_str);
-    }
-
-    let tracks = extract_tracks_from_browse_response(&json);
-    log::info!(
-        "[youtube] browse {browse_id}: extracted {} tracks from raw JSON",
-        tracks.len()
-    );
-
-    if tracks.is_empty() {
-        let mut messages = Vec::new();
-        find_messages(&json, &mut messages);
-        if !messages.is_empty() {
-            log::warn!("[youtube] browse {browse_id} messages: {messages:?}");
             return Err(messages.join("; "));
         }
     }
@@ -1455,56 +1376,6 @@ fn parse_playlist_renderer(renderer: &serde_json::Value) -> Option<YtPlaylist> {
 // ---------------------------------------------------------------------------
 // Type conversion helpers
 // ---------------------------------------------------------------------------
-
-fn convert_table_list_song(s: ytmapi_rs::parse::TableListSong) -> YtTrack {
-    let duration_ms = parse_duration_str(&s.duration);
-    YtTrack {
-        video_id: s.video_id.get_raw().to_string(),
-        title: s.title,
-        artists: s
-            .artists
-            .into_iter()
-            .map(|a| YtArtistRef {
-                browse_id: a.id.map(|id| id.get_raw().to_string()),
-                name: a.name,
-            })
-            .collect(),
-        album: Some(YtAlbumRefSimple {
-            browse_id: s.album.id.get_raw().to_string(),
-            name: s.album.name,
-        }),
-        duration: Some(s.duration),
-        duration_ms,
-        thumbnail_url: best_thumbnail(&s.thumbnails),
-        explicit: s.explicit == ytmapi_rs::common::Explicit::IsExplicit,
-        set_video_id: None,
-    }
-}
-
-fn convert_history_song(s: ytmapi_rs::parse::HistoryItemSong) -> YtTrack {
-    let duration_ms = parse_duration_str(&s.duration);
-    YtTrack {
-        video_id: s.video_id.get_raw().to_string(),
-        title: s.title,
-        artists: s
-            .artists
-            .into_iter()
-            .map(|a| YtArtistRef {
-                browse_id: a.id.map(|id| id.get_raw().to_string()),
-                name: a.name,
-            })
-            .collect(),
-        album: Some(YtAlbumRefSimple {
-            browse_id: s.album.id.get_raw().to_string(),
-            name: s.album.name,
-        }),
-        duration: Some(s.duration),
-        duration_ms,
-        thumbnail_url: best_thumbnail(&s.thumbnails),
-        explicit: s.explicit == ytmapi_rs::common::Explicit::IsExplicit,
-        set_video_id: None,
-    }
-}
 
 fn convert_search_song(s: ytmapi_rs::parse::SearchResultSong) -> YtTrack {
     let duration_ms = parse_duration_str(&s.duration);

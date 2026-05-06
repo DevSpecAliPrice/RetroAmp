@@ -15,7 +15,6 @@ use std::time::Duration;
 use ringbuf::traits::{Consumer, Observer, Producer, Split};
 use ringbuf::HeapRb;
 
-use librespot::core::config::SessionConfig;
 use librespot::core::session::Session;
 use librespot::core::spotify_uri::SpotifyUri;
 use librespot::playback::audio_backend::{Sink, SinkResult};

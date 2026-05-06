@@ -338,9 +338,33 @@ export default function EqualizerWindow({ skin, scale }: Props) {
   // Show native EQ context menu.
   const openEqContextMenu = useCallback(async (e: React.MouseEvent) => {
     e.preventDefault();
+
+    const presetItems: NativeMenuEntry[] = [
+      { type: "item", id: "save_preset", label: "Save Preset..." },
+      { type: "separator" },
+      ...PRESETS.map((p) => ({
+        type: "item" as const, id: `preset:${p.name}`, label: p.name,
+      })),
+    ];
+    if (customPresets.length > 0) {
+      presetItems.push({ type: "separator" });
+      presetItems.push({
+        type: "submenu", label: "Custom Presets", items: customPresets.flatMap((p) => [
+          {
+            type: "submenu" as const, label: p.name, items: [
+              { type: "item" as const, id: `custom:${p.name}`, label: "Apply" },
+              { type: "item" as const, id: `delete_preset:${p.name}`, label: "Delete" },
+            ],
+          },
+        ]),
+      });
+    }
+
     const selected = await showContextMenu([
       { type: "item", id: "toggle_eq", label: settings.enabled ? "Disable EQ" : "Enable EQ" },
       { type: "item", id: "reset_flat", label: "Reset to Flat" },
+      { type: "separator" },
+      { type: "submenu", label: "Presets", items: presetItems },
       { type: "separator" },
       { type: "item", id: "preferences", label: "Preferences..." },
     ], e.clientX, e.clientY);
@@ -348,8 +372,25 @@ export default function EqualizerWindow({ skin, scale }: Props) {
 
     if (selected === "toggle_eq") applySettings({ ...settings, enabled: !settings.enabled });
     else if (selected === "reset_flat") applySettings({ ...settings, gains: [0,0,0,0,0,0,0,0,0,0], preamp: 0 });
+    else if (selected === "save_preset") {
+      setPresetName(""); setSaveDialog(true);
+      setTimeout(() => saveInputRef.current?.focus(), 50);
+    }
+    else if (selected.startsWith("preset:")) {
+      const name = selected.slice(7);
+      const p = PRESETS.find((pr) => pr.name === name);
+      if (p) applySettings({ ...settings, gains: [...p.gains], preamp: p.preamp });
+    }
+    else if (selected.startsWith("custom:")) {
+      const name = selected.slice(7);
+      const p = customPresets.find((pr) => pr.name === name);
+      if (p) applySettings({ ...settings, gains: [...p.gains], preamp: p.preamp });
+    }
+    else if (selected.startsWith("delete_preset:")) {
+      deletePreset(selected.slice(14));
+    }
     else if (selected === "preferences") invoke("open_settings");
-  }, [settings, applySettings]);
+  }, [settings, applySettings, customPresets, deletePreset]);
 
   // -- Sprite helpers --
 

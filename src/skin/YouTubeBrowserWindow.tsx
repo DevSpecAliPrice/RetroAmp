@@ -76,6 +76,16 @@ function formatDuration(ms: number): string {
   return `${mins}:${secs.toString().padStart(2, "0")}`;
 }
 
+/** Parse a "M:SS" or "H:MM:SS" string into milliseconds, or undefined if it can't be parsed. */
+function parseDurationStr(s: string | undefined | null): number | undefined {
+  if (!s) return undefined;
+  const parts = s.split(":").map(p => parseInt(p.trim(), 10));
+  if (parts.some(n => Number.isNaN(n))) return undefined;
+  if (parts.length === 2) return (parts[0] * 60 + parts[1]) * 1000;
+  if (parts.length === 3) return (parts[0] * 3600 + parts[1] * 60 + parts[2]) * 1000;
+  return undefined;
+}
+
 function artistNames(artists: YtArtistRef[]): string {
   return artists.map((a) => a.name).join(", ") || "Unknown Artist";
 }
@@ -322,6 +332,72 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
     statusTimer.current = setTimeout(() => setStatusMsg(null), ms);
   }, []);
 
+  // --- Now-playing bar state ---
+  // Stash the most recent YT track we kicked off; used as the now-playing
+  // display when a YT track is the current playlist entry.
+  const [lastYtTrack, setLastYtTrack] = useState<YtTrack | null>(null);
+  const [ytIsCurrent, setYtIsCurrent] = useState(false);
+  type SaveState = "idle" | "saving" | "saved" | "error";
+  const [saveState, setSaveState] = useState<SaveState>("idle");
+
+  // Poll the playlist to detect when a YouTube track is current.
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      try {
+        const pl = await invoke<{ tracks: Array<{ path: string; is_current: boolean }> }>("get_playlist");
+        const current = pl.tracks.find((t) => t.is_current);
+        const isYt = !!current && current.path.startsWith("youtube:");
+        if (alive) setYtIsCurrent(isYt);
+      } catch { /* ignore */ }
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+
+  // Reset the save button when the playing YT track changes.
+  useEffect(() => {
+    setSaveState("idle");
+  }, [lastYtTrack?.video_id]);
+
+  const saveCurrentTrack = useCallback(async () => {
+    if (saveState === "saving" || saveState === "saved") return;
+    setSaveState("saving");
+    // Long timeout — the backend may need to wait for the temp file to
+    // finish downloading before it can copy. We update the status on
+    // completion either way.
+    showStatus("Saving track...", 600000);
+    try {
+      const path = await invoke<string>("youtube_save_current_track");
+      const filename = path.split(/[\\/]/).pop() ?? path;
+      setSaveState("saved");
+      showStatus(`Saved: ${filename}`);
+    } catch (e) {
+      setSaveState("error");
+      showStatus(`Save failed: ${e}`);
+    }
+  }, [saveState, showStatus]);
+
+  const downloadTrack = useCallback(async (track: YtTrack) => {
+    if (!track.video_id) return;
+    showStatus(`Downloading ${track.title}...`, 60000);
+    try {
+      const path = await invoke<string>("youtube_download_track", {
+        videoId: track.video_id,
+        title: track.title,
+        artist: artistNames(track.artists),
+        album: track.album?.name ?? "",
+        durationMs: track.duration_ms ?? 0,
+        thumbnailUrl: track.thumbnail_url ?? null,
+      });
+      const filename = path.split(/[\\/]/).pop() ?? path;
+      showStatus(`Saved: ${filename}`);
+    } catch (e) {
+      showStatus(`Download failed: ${e}`);
+    }
+  }, [showStatus]);
+
   // --- Like state (optimistic, session-local) ---
   const [likedIds, setLikedIds] = useState<Set<string>>(new Set());
   const [subscribedIds, setSubscribedIds] = useState<Set<string>>(new Set());
@@ -335,6 +411,7 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
   const playTrack = useCallback(async (track: YtTrack) => {
     if (!track.video_id) return;
     showStatus(`Loading ${track.title}...`, 30000);
+    setLastYtTrack(track);
     try {
       await invoke("youtube_play_track", {
         videoId: track.video_id,
@@ -365,6 +442,7 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
 
   const addTracks = useCallback(async (tracks: YtTrack[], playFirst: boolean) => {
     if (tracks.length === 0) return;
+    if (playFirst) setLastYtTrack(tracks[0]);
     try {
       await invoke("youtube_add_tracks", {
         tracks: tracks.filter(t => t.video_id).map(t => ({
@@ -419,6 +497,7 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
     const items: NativeMenuEntry[] = [
       { type: "item", id: "play", label: "Play" },
       { type: "item", id: "add", label: "Add to Playlist" },
+      { type: "item", id: "download", label: "Download" },
     ];
     if (authenticated) {
       items.push({ type: "separator" });
@@ -440,10 +519,16 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
       if (!track.album?.browse_id) items.push({ type: "separator" });
       items.push({ type: "item", id: "artist", label: "Go to Artist" });
     }
+
+    items.push({ type: "separator" });
+    items.push({ type: "item", id: "copy_link", label: "Copy Video Link" });
+    items.push({ type: "item", id: "open_web", label: "Open in Browser" });
+
     const sel = await showContextMenu(items, mx, my);
     if (!sel) return;
     if (sel === "play") playTrack(track);
     else if (sel === "add") addToPlaylist(track);
+    else if (sel === "download") downloadTrack(track);
     else if (sel === "like") likeTrack(track);
     else if (sel === "unlike") unlikeTrack(track);
     else if (sel === "album" && track.album?.browse_id) pushDetail({ type: "album", id: track.album.browse_id, name: track.album.name });
@@ -466,6 +551,13 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
         } catch (e) { showStatus(`Error: ${e}`); }
       }
     }
+    else if (sel === "copy_link") {
+      navigator.clipboard.writeText(`https://music.youtube.com/watch?v=${track.video_id}`);
+      showStatus("Link copied");
+    }
+    else if (sel === "open_web") {
+      invoke("open_url", { url: `https://music.youtube.com/watch?v=${track.video_id}` }).catch(console.error);
+    }
     else if (sel === "yt_pl_new") {
       setCreatePlaylistFor(track);
       setShowCreatePlaylistDialog(true);
@@ -476,7 +568,7 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
         showStatus("Added to YouTube playlist");
       } catch (e) { showStatus(`Error: ${e}`); }
     }
-  }, [playTrack, addToPlaylist, pushDetail, likeTrack, unlikeTrack, authenticated, likedIds, libPlaylists, showStatus]);
+  }, [playTrack, addToPlaylist, downloadTrack, pushDetail, likeTrack, unlikeTrack, authenticated, likedIds, libPlaylists, showStatus]);
 
   // --- Rendering helpers ---
   const renderTrackRow = useCallback((track: YtTrack, index: number) => (
@@ -902,7 +994,7 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
                         else if (rendered.type === "album") pushDetail({ type: "album", id: rendered.browseId, name: rendered.title });
                         else pushDetail({ type: "playlist", id: rendered.browseId, name: rendered.title });
                       } else if (rendered.videoId) {
-                        playTrack({ video_id: rendered.videoId, title: rendered.title, artists: [{ browse_id: null, name: rendered.subtitle }], duration_ms: 0, explicit: false } as YtTrack);
+                        playTrack({ video_id: rendered.videoId, title: rendered.title, artists: [{ browse_id: null, name: rendered.subtitle }], duration_ms: rendered.durationMs, explicit: false } as YtTrack);
                       }
                     }}
                     style={{
@@ -1122,6 +1214,71 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
             {renderContent()}
           </div>
 
+          {/* Now-playing bar (visible only when a YT track is current) */}
+          {ytIsCurrent && lastYtTrack && (
+            <div style={{
+              flexShrink: 0,
+              display: "flex",
+              alignItems: "center",
+              gap: 6 * s,
+              padding: `${3 * s}px ${5 * s}px`,
+              borderTop: `1px solid ${ps.selectedbg}66`,
+              background: `${ps.selectedbg}22`,
+            }}>
+              {lastYtTrack.thumbnail_url && (
+                <Thumb
+                  src={lastYtTrack.thumbnail_url}
+                  style={{
+                    width: 24 * s, height: 24 * s, flexShrink: 0,
+                    objectFit: "cover",
+                  }}
+                />
+              )}
+              <div style={{ flex: 1, minWidth: 0, lineHeight: 1.2 }}>
+                <div style={{
+                  color: ps.current, fontSize: Math.round(9 * s),
+                  whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                }}>{lastYtTrack.title}</div>
+                <div style={{
+                  color: ps.normal, fontSize: Math.round(8 * s), opacity: 0.85,
+                  whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                }}>{artistNames(lastYtTrack.artists)}</div>
+              </div>
+              {(() => {
+                const label =
+                  saveState === "saving" ? "Saving..." :
+                  saveState === "saved" ? "Saved" :
+                  saveState === "error" ? "Retry" :
+                  "Save";
+                const disabled = saveState === "saving" || saveState === "saved";
+                return (
+                  <div
+                    role="button"
+                    aria-label="Save track to download folder"
+                    title={
+                      saveState === "saving" ? "Saving..." :
+                      saveState === "saved" ? "Saved to download folder" :
+                      saveState === "error" ? "Save failed \u2014 click to retry" :
+                      "Save to download folder"
+                    }
+                    onClick={disabled ? undefined : saveCurrentTrack}
+                    style={{
+                      flexShrink: 0,
+                      padding: `${3 * s}px ${10 * s}px`,
+                      background: ps.selectedbg,
+                      color: ps.current,
+                      cursor: saveState === "saving" ? "wait" : disabled ? "default" : "pointer",
+                      fontSize: Math.round(9 * s),
+                      opacity: saveState === "saving" ? 0.7 : 1,
+                      userSelect: "none",
+                      whiteSpace: "nowrap",
+                    }}
+                  >{label}</div>
+                );
+              })()}
+            </div>
+          )}
+
           {/* Status bar */}
           <div style={{ flexShrink: 0, padding: `${2 * s}px ${4 * s}px`, fontSize: Math.round(8 * s), borderTop: `1px solid ${ps.selectedbg}33`, minHeight: Math.round(10 * s) }}>
             {statusMsg ? <span style={{ color: ps.current }}>{statusMsg}</span> : "\u00a0"}
@@ -1154,6 +1311,7 @@ interface HomeItem {
   thumbnailUrl?: string;
   browseId?: string;
   videoId?: string;
+  durationMs?: number;
 }
 
 /** Recursively find musicCarouselShelfRenderer nodes. */
@@ -1203,9 +1361,12 @@ function parseHomeItem(item: any): HomeItem | null {
     const subtitle = columns[1]?.musicResponsiveListItemFlexColumnRenderer?.text?.runs?.[0]?.text ?? "";
     const thumbs = listItem?.thumbnail?.musicThumbnailRenderer?.thumbnail?.thumbnails ?? [];
     const thumbnailUrl = thumbs.length > 0 ? normalizeThumbUrl(thumbs[thumbs.length - 1]?.url) : undefined;
+    const durationStr = listItem?.fixedColumns?.[0]?.musicResponsiveListItemFixedColumnRenderer?.text?.runs?.[0]?.text
+      ?? columns[2]?.musicResponsiveListItemFlexColumnRenderer?.text?.runs?.[0]?.text;
+    const durationMs = parseDurationStr(durationStr);
 
     if (!title) return null;
-    return { type: "track", title, subtitle, thumbnailUrl, videoId };
+    return { type: "track", title, subtitle, thumbnailUrl, videoId, durationMs };
   }
 
   return null;

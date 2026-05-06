@@ -16,8 +16,14 @@ interface Props {
   scale: number;
 }
 
-const PRESET_CYCLE_SECS = 30;
-const BLEND_SECS = 2.0;
+interface VisualizerSettings {
+  last_preset: string | null;
+  lock_preset: boolean;
+  auto_cycle: boolean;
+  cycle_secs: number;
+  blend_secs: number;
+}
+
 const RESIZE_EDGE = 5;
 
 export default function VisualizerWindow({ skin, scale }: Props) {
@@ -40,6 +46,37 @@ export default function VisualizerWindow({ skin, scale }: Props) {
   const presetNamesRef = useRef<string[]>([]);
   const presetIndexRef = useRef(0);
   const fadeTimerRef = useRef<ReturnType<typeof setTimeout>>(0 as unknown as ReturnType<typeof setTimeout>);
+
+  const [vizSettings, setVizSettings] = useState<VisualizerSettings>({
+    last_preset: null, lock_preset: false, auto_cycle: true, cycle_secs: 30, blend_secs: 2.0,
+  });
+  const vizSettingsRef = useRef(vizSettings);
+  useEffect(() => { vizSettingsRef.current = vizSettings; }, [vizSettings]);
+  const blendSecs = () => vizSettingsRef.current.blend_secs;
+
+  // Listen for settings changes — emitted from the prefs window when the user updates them.
+  useEffect(() => {
+    invoke<VisualizerSettings>("get_visualizer_settings").then(setVizSettings).catch(() => {});
+    let unlisten: (() => void) | undefined;
+    import("@tauri-apps/api/event").then(({ listen }) => {
+      listen<VisualizerSettings>("visualizer-settings-changed", (e) => setVizSettings(e.payload))
+        .then((fn) => { unlisten = fn; });
+    });
+    return () => { unlisten?.(); };
+  }, []);
+
+  const persistSettings = useCallback(async (next: Partial<VisualizerSettings>) => {
+    const merged = { ...vizSettingsRef.current, ...next };
+    setVizSettings(merged);
+    try {
+      await invoke("set_visualizer_settings", {
+        lockPreset: merged.lock_preset,
+        autoCycle: merged.auto_cycle,
+        cycleSecs: merged.cycle_secs,
+        blendSecs: merged.blend_secs,
+      });
+    } catch (e) { console.error("save visualizer settings failed:", e); }
+  }, []);
 
   const bg = (name: string) => ({
     backgroundImage: sp[name] ? `url(${sp[name]})` : "none",
@@ -76,18 +113,34 @@ export default function VisualizerWindow({ skin, scale }: Props) {
   }, [loadPresetByIndex]);
 
   const nextPreset = useCallback(() => {
-    loadPresetByIndex(presetIndexRef.current + 1, BLEND_SECS);
+    loadPresetByIndex(presetIndexRef.current + 1, blendSecs());
   }, [loadPresetByIndex]);
 
   const prevPreset = useCallback(() => {
-    loadPresetByIndex(presetIndexRef.current - 1, BLEND_SECS);
+    loadPresetByIndex(presetIndexRef.current - 1, blendSecs());
   }, [loadPresetByIndex]);
 
   const randomPreset = useCallback(() => {
     const names = presetNamesRef.current;
     if (!names.length) return;
-    loadPresetByIndex(Math.floor(Math.random() * names.length), BLEND_SECS);
+    loadPresetByIndex(Math.floor(Math.random() * names.length), blendSecs());
   }, [loadPresetByIndex]);
+
+  // Restart cycle timer when interval changes after init.
+  useEffect(() => {
+    if (!initDoneRef.current) return;
+    clearInterval(cycleTimerRef.current);
+    const tick = () => {
+      const cfg = vizSettingsRef.current;
+      if (!cfg.auto_cycle || cfg.lock_preset) return;
+      const names = presetNamesRef.current;
+      if (names.length > 0) {
+        const next = Math.floor(Math.random() * names.length);
+        loadPresetByIndex(next, cfg.blend_secs);
+      }
+    };
+    cycleTimerRef.current = setInterval(tick, vizSettings.cycle_secs * 1000);
+  }, [vizSettings.cycle_secs, loadPresetByIndex]);
 
   /**
    * Initialise Butterchurn. Called once the canvas has real dimensions
@@ -188,14 +241,17 @@ export default function VisualizerWindow({ skin, scale }: Props) {
       };
       fetchRafRef.current = requestAnimationFrame(fetchLoop);
 
-      // Auto-cycle presets
-      cycleTimerRef.current = setInterval(() => {
+      // Auto-cycle presets — gated by user settings.
+      const tick = () => {
+        const cfg = vizSettingsRef.current;
+        if (!cfg.auto_cycle || cfg.lock_preset) return;
         const names = presetNamesRef.current;
         if (names.length > 0) {
           const next = Math.floor(Math.random() * names.length);
-          loadPresetByIndex(next, BLEND_SECS);
+          loadPresetByIndex(next, cfg.blend_secs);
         }
-      }, PRESET_CYCLE_SECS * 1000);
+      };
+      cycleTimerRef.current = setInterval(tick, vizSettingsRef.current.cycle_secs * 1000);
 
       console.log("[visualizer] init complete");
     } catch (e) {
@@ -306,18 +362,32 @@ export default function VisualizerWindow({ skin, scale }: Props) {
     return { type: "submenu", label: "Presets", items: submenus };
   }, []);
 
+  const toggleFullscreen = useCallback(async () => {
+    const win = getCurrentWindow();
+    const isFs = await win.isFullscreen();
+    await win.setFullscreen(!isFs);
+  }, []);
+
   // Context menu
   const handleContextMenu = useCallback(
     async (e: React.MouseEvent) => {
       e.preventDefault();
       e.stopPropagation();
 
+      const cfg = vizSettingsRef.current;
       const items: NativeMenuEntry[] = [
         { type: "item", id: "next", label: "Next Preset →" },
         { type: "item", id: "prev", label: "← Previous Preset" },
         { type: "item", id: "random", label: "Random Preset" },
         { type: "separator" },
+        { type: "item", id: "lock", label: cfg.lock_preset ? "Unlock Current Preset" : "Lock Current Preset" },
+        { type: "item", id: "auto_cycle", label: `${cfg.auto_cycle ? "✓ " : "    "}Auto-Cycle Presets` },
+        { type: "item", id: "hard_cut", label: `${cfg.blend_secs === 0 ? "✓ " : "    "}Hard Cut (no blend)` },
+        { type: "separator" },
         buildPresetMenu(),
+        { type: "separator" },
+        { type: "item", id: "fullscreen", label: "Toggle Fullscreen" },
+        { type: "item", id: "preferences", label: "Preferences..." },
         { type: "separator" },
         { type: "item", id: "close", label: "Close Visualizer" },
       ];
@@ -328,10 +398,15 @@ export default function VisualizerWindow({ skin, scale }: Props) {
       if (selected === "next") nextPreset();
       else if (selected === "prev") prevPreset();
       else if (selected === "random") randomPreset();
+      else if (selected === "lock") persistSettings({ lock_preset: !cfg.lock_preset });
+      else if (selected === "auto_cycle") persistSettings({ auto_cycle: !cfg.auto_cycle });
+      else if (selected === "hard_cut") persistSettings({ blend_secs: cfg.blend_secs === 0 ? 2.0 : 0 });
+      else if (selected === "fullscreen") toggleFullscreen();
+      else if (selected === "preferences") invoke("open_settings");
       else if (selected === "close") invoke("toggle_window", { windowId: "Visualizer" }).catch(console.error);
-      else if (selected.startsWith("preset:")) loadPresetByName(selected.slice(7), BLEND_SECS);
+      else if (selected.startsWith("preset:")) loadPresetByName(selected.slice(7), blendSecs());
     },
-    [nextPreset, prevPreset, randomPreset, buildPresetMenu, loadPresetByName]
+    [nextPreset, prevPreset, randomPreset, buildPresetMenu, loadPresetByName, persistSettings, toggleFullscreen]
   );
 
   // Edge resize (top/bottom edges)
