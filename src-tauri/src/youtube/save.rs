@@ -21,8 +21,11 @@ use crate::audio::recorder::{get_download_dir, tag_file};
 use crate::audio::source::TrackMetadata;
 use crate::audio::youtube::{begin_save, ActiveDownload};
 
-/// Maximum time to wait for an in-progress download to finish before giving up.
-const TEMP_READY_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long to wait for the streaming temp file to finish before falling back
+/// to a full-speed yt-dlp download. YouTube throttles stream URLs to roughly
+/// playback bitrate, so a partway-through track can take minutes to fully
+/// download — yt-dlp can fetch the same file in a few seconds instead.
+const TEMP_READY_GRACE: Duration = Duration::from_secs(5);
 
 /// Sanitize a string for use as a filename (mirrors the recorder's rules).
 fn sanitize_filename(s: &str) -> String {
@@ -183,30 +186,40 @@ fn process_for_save(
     Ok(final_path)
 }
 
-/// Copy the currently-playing YouTube temp file to the download directory and
-/// tag it. Waits up to 2 minutes for the download to complete if it hasn't yet.
+/// Save the currently-playing YouTube track to the user's download directory.
+///
+/// Fast path: when the streaming temp file is already (or almost) complete,
+/// copy + tag it without re-downloading. Otherwise fall back to a full-speed
+/// yt-dlp download, which is much faster than waiting for the throttled
+/// stream URL to finish.
 pub fn save_active(active: Arc<ActiveDownload>) -> Result<PathBuf, String> {
-    let _guard = begin_save(&active);
+    let guard = begin_save(&active);
 
-    let deadline = Instant::now() + TEMP_READY_TIMEOUT;
-    while !active.temp_ready() {
-        if Instant::now() > deadline {
-            return Err("download is still in progress — try again shortly".into());
-        }
+    let deadline = Instant::now() + TEMP_READY_GRACE;
+    while !active.temp_ready() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(200));
     }
 
-    let download_dir = get_download_dir();
-    let stem = build_stem(&active.metadata, &format!("YouTube {}", active.video_id));
+    if active.temp_ready() {
+        let download_dir = get_download_dir();
+        let stem = build_stem(&active.metadata, &format!("YouTube {}", active.video_id));
+        return process_for_save(
+            &active.temp_path,
+            &active.ext_hint,
+            &download_dir,
+            &stem,
+            &active.metadata,
+            active.metadata.cover_art.as_deref(),
+        );
+    }
 
-    process_for_save(
-        &active.temp_path,
-        &active.ext_hint,
-        &download_dir,
-        &stem,
-        &active.metadata,
-        active.metadata.cover_art.as_deref(),
-    )
+    // Stream still throttled. Drop the save guard before yt-dlp runs so the
+    // streaming source's Drop can proceed normally if the user changes track.
+    drop(guard);
+    log::info!(
+        "[yt-save] temp file not ready (streaming throttled) — using yt-dlp for full-speed download"
+    );
+    download_and_save(&active.video_id, &active.metadata, None)
 }
 
 /// Run yt-dlp to download the audio for `video_id` (no playback), then process

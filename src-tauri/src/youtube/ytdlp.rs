@@ -28,6 +28,53 @@ const GITHUB_LATEST_URL: &str =
 /// File that stores the version tag of the managed binary.
 const VERSION_FILE: &str = "yt-dlp.version";
 
+/// Write the user's saved YouTube cookie to a Netscape-format cookies file
+/// for yt-dlp to use. Returns the path on success, None when no cookie is
+/// configured or the file can't be written.
+///
+/// yt-dlp's `--cookies` flag expects this exact format (tab-separated). The
+/// cookie string we have is in HTTP `Cookie:` header form (`name=value; ...`).
+pub fn cookies_file() -> Option<PathBuf> {
+    let cfg = crate::config::AppConfig::load();
+    let cookie = cfg.youtube.cookie.as_ref()?;
+    if cookie.is_empty() {
+        return None;
+    }
+
+    let cache_dir = dirs::cache_dir()?.join("retroamp");
+    if let Err(e) = fs::create_dir_all(&cache_dir) {
+        log::warn!("[ytdlp] cannot create cookie cache dir: {e}");
+        return None;
+    }
+    let path = cache_dir.join("youtube_cookies.txt");
+
+    let mut content = String::from("# Netscape HTTP Cookie File\n");
+    for pair in cookie.split(';') {
+        let pair = pair.trim();
+        if pair.is_empty() {
+            continue;
+        }
+        if let Some((name, value)) = pair.split_once('=') {
+            let name = name.trim();
+            let value = value.trim();
+            if name.is_empty() {
+                continue;
+            }
+            // domain | include_subdomains | path | secure | expiry | name | value
+            content.push_str(&format!(
+                ".youtube.com\tTRUE\t/\tTRUE\t2147483647\t{name}\t{value}\n",
+            ));
+        }
+    }
+
+    if let Err(e) = fs::write(&path, content) {
+        log::warn!("[ytdlp] cannot write cookie file: {e}");
+        return None;
+    }
+
+    Some(path)
+}
+
 /// Get the path to a working yt-dlp binary.
 ///
 /// Checks (in order): managed binary in app dir, system PATH.

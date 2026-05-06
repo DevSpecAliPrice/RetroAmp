@@ -333,28 +333,66 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
   }, []);
 
   // --- Now-playing bar state ---
-  // Stash the most recent YT track we kicked off; used as the now-playing
-  // display when a YT track is the current playlist entry.
+  // Cache of YT tracks we've seen (added/played from this window), keyed by
+  // video_id. Used to look up rich metadata (thumbnail, artists) when the
+  // playlist advances to a track via skip/double-click without going through
+  // the browser's play handlers.
+  const ytTrackCache = useRef<Map<string, YtTrack>>(new Map());
+  const cacheYtTracks = useCallback((tracks: YtTrack[]) => {
+    for (const t of tracks) {
+      if (t.video_id) ytTrackCache.current.set(t.video_id, t);
+    }
+  }, []);
+
   const [lastYtTrack, setLastYtTrack] = useState<YtTrack | null>(null);
   const [ytIsCurrent, setYtIsCurrent] = useState(false);
   type SaveState = "idle" | "saving" | "saved" | "error";
   const [saveState, setSaveState] = useState<SaveState>("idle");
 
-  // Poll the playlist to detect when a YouTube track is current.
+  /** Build a fallback YtTrack stub from a playlist entry's display name —
+   *  used when the cache doesn't have the video_id (e.g. restored playlist).
+   *  display_name is typically "Artist - Title". */
+  const stubFromDisplayName = useCallback((videoId: string, displayName: string): YtTrack => {
+    const dashIdx = displayName.indexOf(" - ");
+    const artist = dashIdx > 0 ? displayName.slice(0, dashIdx) : "";
+    const title = dashIdx > 0 ? displayName.slice(dashIdx + 3) : displayName;
+    return {
+      video_id: videoId,
+      title: title || displayName || videoId,
+      artists: artist ? [{ browse_id: null, name: artist }] : [],
+      thumbnail_url: undefined,
+      explicit: false,
+    };
+  }, []);
+
+  // Poll the playlist to detect the current track and keep the now-playing
+  // bar in sync with whatever's actually playing.
   useEffect(() => {
     let alive = true;
+    let lastVideoId: string | null = null;
     const tick = async () => {
       try {
-        const pl = await invoke<{ tracks: Array<{ path: string; is_current: boolean }> }>("get_playlist");
+        const pl = await invoke<{ tracks: Array<{ path: string; display_name: string; is_current: boolean }> }>("get_playlist");
         const current = pl.tracks.find((t) => t.is_current);
         const isYt = !!current && current.path.startsWith("youtube:");
-        if (alive) setYtIsCurrent(isYt);
+        if (!alive) return;
+        setYtIsCurrent(isYt);
+        if (isYt && current) {
+          const videoId = current.path.slice("youtube:".length);
+          if (videoId !== lastVideoId) {
+            lastVideoId = videoId;
+            const cached = ytTrackCache.current.get(videoId);
+            setLastYtTrack(cached ?? stubFromDisplayName(videoId, current.display_name));
+          }
+        } else {
+          lastVideoId = null;
+        }
       } catch { /* ignore */ }
     };
     tick();
     const id = setInterval(tick, 1000);
     return () => { alive = false; clearInterval(id); };
-  }, []);
+  }, [stubFromDisplayName]);
 
   // Reset the save button when the playing YT track changes.
   useEffect(() => {
@@ -411,6 +449,7 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
   const playTrack = useCallback(async (track: YtTrack) => {
     if (!track.video_id) return;
     showStatus(`Loading ${track.title}...`, 30000);
+    cacheYtTracks([track]);
     setLastYtTrack(track);
     try {
       await invoke("youtube_play_track", {
@@ -423,10 +462,11 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
       });
       showStatus(`Playing: ${track.title}`);
     } catch (e) { showStatus(`Error: ${e}`); }
-  }, [showStatus]);
+  }, [showStatus, cacheYtTracks]);
 
   const addToPlaylist = useCallback(async (track: YtTrack) => {
     if (!track.video_id) return;
+    cacheYtTracks([track]);
     try {
       await invoke("youtube_add_to_playlist", {
         videoId: track.video_id,
@@ -438,10 +478,11 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
       });
       showStatus("Added to playlist");
     } catch (e) { showStatus(`Error: ${e}`); }
-  }, [showStatus]);
+  }, [showStatus, cacheYtTracks]);
 
   const addTracks = useCallback(async (tracks: YtTrack[], playFirst: boolean) => {
     if (tracks.length === 0) return;
+    cacheYtTracks(tracks);
     if (playFirst) setLastYtTrack(tracks[0]);
     try {
       await invoke("youtube_add_tracks", {
@@ -457,7 +498,7 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
       });
       showStatus(playFirst ? "Playing..." : `Added ${tracks.length} tracks`);
     } catch (e) { showStatus(`Error: ${e}`); }
-  }, [showStatus]);
+  }, [showStatus, cacheYtTracks]);
 
   const likeTrack = useCallback(async (track: YtTrack) => {
     if (!authenticated || !track.video_id) return;
