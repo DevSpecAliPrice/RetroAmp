@@ -1175,8 +1175,14 @@ pub fn is_url(s: &str) -> bool {
 }
 
 /// Play a radio stream URL.
+///
+/// The HTTP connect + pre-buffer can take up to ~25 seconds for slow or
+/// flaky stations, so the heavy work runs on a blocking task and the IPC
+/// thread is freed as soon as it's queued. Otherwise the frontend's
+/// `await invoke("play_url")` would back up subsequent IPC calls and the
+/// radio browser window would appear frozen.
 #[tauri::command]
-pub fn play_url(
+pub async fn play_url(
     engine: State<'_, Arc<AudioEngine>>,
     playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
     recorder_state: State<'_, Arc<Mutex<Option<Arc<RadioRecorder>>>>>,
@@ -1184,15 +1190,15 @@ pub fn play_url(
     url: String,
     name: Option<String>,
 ) -> Result<(), String> {
-    let mut pl = playlist.lock().map_err(|e| e.to_string())?;
-    let id = pl.add_track(&url);
-
-    if let Some(name) = &name {
-        pl.update_display_name(id, name);
-    }
-
-    pl.play_track(id);
-    drop(pl);
+    let id = {
+        let mut pl = playlist.lock().map_err(|e| e.to_string())?;
+        let id = pl.add_track(&url);
+        if let Some(name) = &name {
+            pl.update_display_name(id, name);
+        }
+        pl.play_track(id);
+        id
+    };
 
     // Finalize any in-progress recording before switching sources.
     finalize_previous_recorder(&recorder_state);
@@ -1217,11 +1223,20 @@ pub fn play_url(
             .ok();
     }
 
-    let source = RadioSource::connect_with_name_and_recorder(
-        &url,
-        name.as_deref(),
-        Arc::clone(&recorder),
-    )
+    // Run the blocking connect on a worker thread; the IPC thread returns
+    // to the runtime while we wait on the join handle.
+    let url_for_connect = url.clone();
+    let name_for_connect = name.clone();
+    let recorder_for_connect = Arc::clone(&recorder);
+    let source = tauri::async_runtime::spawn_blocking(move || {
+        RadioSource::connect_with_name_and_recorder(
+            &url_for_connect,
+            name_for_connect.as_deref(),
+            recorder_for_connect,
+        )
+    })
+    .await
+    .map_err(|e| format!("connect task panicked: {e}"))?
     .map_err(|e| e.to_string())?;
 
     // Store the recorder in managed state so commands can access it.

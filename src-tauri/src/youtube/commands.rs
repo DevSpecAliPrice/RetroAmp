@@ -3,10 +3,27 @@
 //! No authentication required — YouTube Music search and browse work anonymously.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use super::types::*;
+
+/// Shared state for the pre-created YouTube helper WebViews
+/// (`youtube_login`, `youtube_cookie_refresh`).
+///
+/// `login_extracted` is reset to `false` before each new login attempt so the
+/// page-load handler will extract cookies on the first music.youtube.com load
+/// after the user signs in, and ignore subsequent loads on the same session.
+pub struct YouTubeWebviewState {
+    pub login_extracted: Arc<AtomicBool>,
+}
+
+impl Default for YouTubeWebviewState {
+    fn default() -> Self {
+        Self { login_extracted: Arc::new(AtomicBool::new(false)) }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Playback commands
@@ -447,262 +464,168 @@ fn fetch_datasync_id(cookie: &str) -> Option<String> {
 
 use std::io::Read as _;
 
-/// Open a WebView-based login window for YouTube Music.
+/// Pre-create the hidden Google sign-in WebView (`youtube_login`) at
+/// app startup.
 ///
-/// Opens Google's login page in a fresh WebView (cookies cleared first).
-/// After the user signs in and lands on music.youtube.com, cookies and
-/// DATASYNC_ID are automatically extracted, saved, and the window closes.
-///
-/// This works for primary Google accounts. Users with Brand Accounts or
-/// sub-channels should use the Advanced manual cookie login in Settings.
-#[tauri::command]
-pub async fn youtube_login_webview(app: AppHandle) -> Result<(), String> {
+/// On Wayland (GTK3 + WebKitGTK), creating a new WebView at runtime while
+/// other WebViews are alive corrupts GTK's internal pointer-event state and
+/// permanently breaks dragging, close, and right-click context menus on
+/// every existing window.  The login window must therefore be created
+/// during `setup` alongside the panel windows, then reused via `navigate()`
+/// — never built or destroyed at runtime.
+pub fn precreate_helper_windows(app: &AppHandle) {
     use tauri::webview::PageLoadEvent;
     use tauri::WebviewWindowBuilder;
 
-    // If a login window already exists, focus it.
-    if let Some(existing) = app.get_webview_window("youtube_login") {
-        let _ = existing.set_focus();
-        return Ok(());
+    // Install shared state once.
+    if app.try_state::<YouTubeWebviewState>().is_none() {
+        app.manage(YouTubeWebviewState::default());
     }
+    let extracted = app
+        .state::<YouTubeWebviewState>()
+        .login_extracted
+        .clone();
 
-    // Clear previous WebView browsing data so the user gets a fresh
-    // Google login prompt (not auto-signed-in from a previous session).
-    {
-        if let Ok(temp) = WebviewWindowBuilder::new(
-            &app,
-            "youtube_login_temp",
+    if app.get_webview_window("youtube_login").is_none() {
+        let app_for_handler = app.clone();
+        let extracted_for_handler = extracted.clone();
+        let builder = WebviewWindowBuilder::new(
+            app,
+            "youtube_login",
             tauri::WebviewUrl::External("about:blank".parse().unwrap()),
         )
+        .title("YouTube Music — Sign In")
+        .inner_size(500.0, 700.0)
+        .center()
         .visible(false)
-        .inner_size(1.0, 1.0)
-        .build()
-        {
-            let _ = temp.clear_all_browsing_data();
-            let _ = temp.destroy();
-        }
-    }
+        .skip_taskbar(true)
+        .on_page_load(move |webview, payload| {
+            if payload.event() != PageLoadEvent::Finished {
+                return;
+            }
+            let url = payload.url().to_string();
+            if !url.starts_with("https://music.youtube.com") {
+                return;
+            }
 
-    let login_url = "https://accounts.google.com/ServiceLogin?continue=https%3A%2F%2Fmusic.youtube.com";
-    let app_handle = app.clone();
-    let extracted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let extracted_clone = extracted.clone();
+            // Only extract once per login attempt; reset by `youtube_login_webview`.
+            if extracted_for_handler.swap(true, Ordering::Relaxed) {
+                return;
+            }
 
-    WebviewWindowBuilder::new(
-        &app,
-        "youtube_login",
-        tauri::WebviewUrl::External(login_url.parse().unwrap()),
-    )
-    .title("YouTube Music — Sign In")
-    .inner_size(500.0, 700.0)
-    .center()
-    .on_page_load(move |webview, payload| {
-        if payload.event() != PageLoadEvent::Finished {
-            return;
-        }
+            log::info!("[youtube] login WebView reached music.youtube.com, extracting...");
 
-        let url = payload.url().to_string();
-        if !url.starts_with("https://music.youtube.com") {
-            return;
-        }
+            let app = app_for_handler.clone();
+            let webview_clone = webview.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
 
-        // Only extract once.
-        if extracted_clone.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            return;
-        }
+                let cookies = match webview_clone.cookies_for_url(
+                    "https://music.youtube.com".parse().unwrap(),
+                ) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        log::error!("[youtube] failed to get cookies: {e}");
+                        let _ = app.emit("youtube-login-result", serde_json::json!({
+                            "success": false, "error": format!("{e}")
+                        }));
+                        return;
+                    }
+                };
 
-        log::info!("[youtube] login WebView reached music.youtube.com, extracting...");
+                let cookie_str: String = cookies
+                    .iter()
+                    .map(|c| format!("{}={}", c.name(), c.value()))
+                    .collect::<Vec<_>>()
+                    .join("; ");
 
-        let app = app_handle.clone();
-        let webview_clone = webview.clone();
-
-        tauri::async_runtime::spawn(async move {
-            // Brief delay to let the page fully initialize cookies.
-            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-
-            // Get cookies from the WebView.
-            let cookies = match webview_clone.cookies_for_url(
-                "https://music.youtube.com".parse().unwrap(),
-            ) {
-                Ok(c) => c,
-                Err(e) => {
-                    log::error!("[youtube] failed to get cookies: {e}");
+                if cookie_str.is_empty() {
+                    log::warn!("[youtube] no cookies extracted");
                     let _ = app.emit("youtube-login-result", serde_json::json!({
-                        "success": false, "error": format!("{e}")
+                        "success": false, "error": "No cookies found after login"
                     }));
                     return;
                 }
-            };
 
-            let cookie_str: String = cookies
-                .iter()
-                .map(|c| format!("{}={}", c.name(), c.value()))
-                .collect::<Vec<_>>()
-                .join("; ");
+                log::info!("[youtube] extracted {} cookies ({} chars)", cookies.len(), cookie_str.len());
 
-            if cookie_str.is_empty() {
-                log::warn!("[youtube] no cookies extracted");
-                let _ = app.emit("youtube-login-result", serde_json::json!({
-                    "success": false, "error": "No cookies found after login"
-                }));
-                return;
-            }
+                let datasync_id = fetch_datasync_id(&cookie_str);
 
-            log::info!("[youtube] extracted {} cookies ({} chars)", cookies.len(), cookie_str.len());
-
-            // Fetch DATASYNC_ID via ureq (using the extracted cookies).
-            let datasync_id = fetch_datasync_id(&cookie_str);
-
-            // Login with the API client.
-            if let Err(e) = crate::youtube::api::login_with_cookie(&cookie_str).await {
-                log::error!("[youtube] API init failed: {e}");
-                let _ = app.emit("youtube-login-result", serde_json::json!({
-                    "success": false, "error": format!("API init failed: {e}")
-                }));
-                return;
-            }
-
-            // Save to config.
-            let mut cfg = crate::config::AppConfig::load();
-            cfg.youtube.cookie = Some(cookie_str);
-            cfg.youtube.datasync_id = datasync_id.clone();
-            let _ = cfg.save();
-
-            log::info!("[youtube] login complete, datasync_id={datasync_id:?}");
-
-            let _ = app.emit("youtube-login-result", serde_json::json!({
-                "success": true
-            }));
-
-            // Close the login window.
-            if let Some(win) = app.get_webview_window("youtube_login") {
-                let _ = win.close();
-            }
-        });
-    })
-    .build()
-    .map_err(|e| format!("Failed to create login window: {e}"))?;
-
-    Ok(())
-}
-
-/// Refresh YouTube Music session cookies using a hidden WebView.
-///
-/// Called on app startup and periodically. Creates a hidden WebView that
-/// loads music.youtube.com with the existing cookies, which causes YouTube
-/// to refresh the session cookies. We then re-extract the cookies.
-pub fn refresh_session_cookies(app: &AppHandle) {
-    let cfg = crate::config::AppConfig::load();
-    let Some(ref _cookie) = cfg.youtube.cookie else {
-        return; // Not logged in.
-    };
-
-    // Check if a refresh is needed (skip if done recently).
-    // We use a simple file timestamp check.
-    if let Some(cache_dir) = dirs::cache_dir() {
-        let marker = cache_dir.join("retroamp").join("yt_cookie_refresh.timestamp");
-        if let Ok(meta) = std::fs::metadata(&marker) {
-            if let Ok(modified) = meta.modified() {
-                let age = std::time::SystemTime::now()
-                    .duration_since(modified)
-                    .unwrap_or_default();
-                if age < std::time::Duration::from_secs(4 * 3600) {
-                    log::debug!("[youtube] cookie refresh skipped (last {}h ago)", age.as_secs() / 3600);
+                if let Err(e) = crate::youtube::api::login_with_cookie(&cookie_str).await {
+                    log::error!("[youtube] API init failed: {e}");
+                    let _ = app.emit("youtube-login-result", serde_json::json!({
+                        "success": false, "error": format!("API init failed: {e}")
+                    }));
                     return;
                 }
-            }
-        }
-    }
 
-    log::info!("[youtube] refreshing session cookies via hidden WebView...");
-
-    use tauri::webview::PageLoadEvent;
-    use tauri::WebviewWindowBuilder;
-
-    let app_clone = app.clone();
-
-    let builder = WebviewWindowBuilder::new(
-        app,
-        "youtube_cookie_refresh",
-        tauri::WebviewUrl::External(
-            "https://music.youtube.com".parse().unwrap(),
-        ),
-    )
-    .title("Cookie Refresh")
-    .inner_size(1.0, 1.0)
-    .visible(false)
-    .on_page_load(move |webview, payload| {
-        if payload.event() != PageLoadEvent::Finished {
-            return;
-        }
-        let url = payload.url().to_string();
-        if !url.starts_with("https://music.youtube.com") {
-            return;
-        }
-
-        let app = app_clone.clone();
-        let webview_clone = webview.clone();
-
-        tauri::async_runtime::spawn(async move {
-            let cookies = match webview_clone.cookies_for_url(
-                "https://music.youtube.com".parse().unwrap(),
-            ) {
-                Ok(c) => c,
-                Err(e) => {
-                    log::warn!("[youtube] cookie refresh failed to get cookies: {e}");
-                    return;
-                }
-            };
-
-            let cookie_str: String = cookies
-                .iter()
-                .map(|c| format!("{}={}", c.name(), c.value()))
-                .collect::<Vec<_>>()
-                .join("; ");
-
-            if cookie_str.is_empty() || cookies.len() < 5 {
-                log::warn!("[youtube] cookie refresh got too few cookies, skipping");
-                // Close the hidden window.
-                if let Some(win) = app.get_webview_window("youtube_cookie_refresh") {
-                    let _ = win.destroy();
-                }
-                return;
-            }
-
-            // Extract fresh DATASYNC_ID.
-            let datasync_id = fetch_datasync_id(&cookie_str);
-
-            // Re-login with fresh cookies.
-            if let Err(e) = crate::youtube::api::login_with_cookie(&cookie_str).await {
-                log::warn!("[youtube] cookie refresh re-login failed: {e}");
-            } else {
-                // Save refreshed cookies.
                 let mut cfg = crate::config::AppConfig::load();
                 cfg.youtube.cookie = Some(cookie_str);
-                if let Some(dsid) = datasync_id {
-                    cfg.youtube.datasync_id = Some(dsid);
-                }
+                cfg.youtube.datasync_id = datasync_id.clone();
                 let _ = cfg.save();
-                log::info!("[youtube] session cookies refreshed successfully");
-            }
 
-            // Update timestamp marker.
-            if let Some(cache_dir) = dirs::cache_dir() {
-                let marker = cache_dir.join("retroamp").join("yt_cookie_refresh.timestamp");
-                let _ = std::fs::create_dir_all(marker.parent().unwrap());
-                let _ = std::fs::write(&marker, "");
-            }
+                log::info!("[youtube] login complete, datasync_id={datasync_id:?}");
 
-            // Close the hidden window.
-            if let Some(win) = app.get_webview_window("youtube_cookie_refresh") {
-                let _ = win.destroy();
-            }
+                let _ = app.emit("youtube-login-result", serde_json::json!({
+                    "success": true
+                }));
+
+                // Hide instead of close — the window is reused across logins.
+                if let Some(win) = app.get_webview_window("youtube_login") {
+                    let _ = win.hide();
+                }
+            });
         });
-    });
 
-    if let Err(e) = builder.build() {
-        log::warn!("[youtube] failed to create cookie refresh window: {e}");
+        if let Err(e) = builder.build() {
+            log::warn!("[youtube] failed to pre-create login window: {e}");
+        }
     }
+}
+
+/// Open the WebView-based login window for YouTube Music.
+///
+/// The window is pre-created at startup (see `precreate_helper_windows`) and
+/// reused for every login — we never build or destroy a WebView at runtime
+/// because doing so corrupts GTK pointer state on Wayland.
+///
+/// Each invocation clears stored browsing data (so the user gets a fresh
+/// Google login prompt rather than auto-signed-in from a previous session)
+/// and navigates to Google's sign-in page.  After the user signs in and
+/// lands on music.youtube.com, the page-load handler extracts cookies,
+/// saves them, emits `youtube-login-result`, and hides the window.
+#[tauri::command]
+pub async fn youtube_login_webview(
+    app: AppHandle,
+    state: State<'_, YouTubeWebviewState>,
+) -> Result<(), String> {
+    let win = app
+        .get_webview_window("youtube_login")
+        .ok_or_else(|| "Login window not pre-created at startup".to_string())?;
+
+    // If the user re-clicked while a previous login is still in flight,
+    // just refocus rather than tearing down the in-progress page.
+    if win.is_visible().unwrap_or(false) {
+        let _ = win.set_focus();
+        return Ok(());
+    }
+
+    // Reset the extraction flag so the page-load handler will pick up
+    // cookies on the next music.youtube.com load.
+    state.login_extracted.store(false, Ordering::Relaxed);
+
+    // Clear stored browsing data so the Google login prompt isn't
+    // auto-filled from a prior session.
+    let _ = win.clear_all_browsing_data();
+
+    let login_url = "https://accounts.google.com/ServiceLogin?continue=https%3A%2F%2Fmusic.youtube.com";
+    let parsed = login_url
+        .parse()
+        .map_err(|e| format!("invalid login URL: {e}"))?;
+    win.navigate(parsed).map_err(|e| format!("navigate failed: {e}"))?;
+    let _ = win.show();
+    let _ = win.set_focus();
+    Ok(())
 }
 
 /// Clear the saved YouTube Music cookie and revert to anonymous mode.

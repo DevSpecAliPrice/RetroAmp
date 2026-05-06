@@ -132,6 +132,7 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
 
   // --- Auth state ---
   const [authenticated, setAuthenticated] = useState(false);
+  const [sessionExpired, setSessionExpired] = useState(false);
   const recheckAuth = useCallback(() => {
     invoke<{ authenticated: boolean }>("youtube_auth_status")
       .then((s) => {
@@ -145,24 +146,38 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
     recheckAuth();
     // Re-check on focus (catches login from other windows).
     window.addEventListener("focus", recheckAuth);
-    // Listen for the login-result event (fired by WebView login flow).
-    let unlisten: (() => void) | undefined;
+    // Listen for login + session-expired events fired by Rust.
+    const unlistenFns: Array<() => void> = [];
     import("@tauri-apps/api/event").then(({ listen }) => {
       listen<{ success: boolean }>("youtube-login-result", (event) => {
         console.log("[YT Browser] login-result event received:", event.payload);
         if (event.payload.success) {
           setAuthenticated(true);
+          setSessionExpired(false);
         }
-      }).then((fn) => { unlisten = fn; });
+      }).then((fn) => { unlistenFns.push(fn); });
+
+      listen("youtube-session-expired", () => {
+        console.warn("[YT Browser] session-expired event received");
+        setAuthenticated(false);
+        setSessionExpired(true);
+      }).then((fn) => { unlistenFns.push(fn); });
     });
     // Also poll every 5 seconds in case focus events are missed.
     const interval = setInterval(recheckAuth, 5000);
     return () => {
       window.removeEventListener("focus", recheckAuth);
-      unlisten?.();
+      unlistenFns.forEach((fn) => fn());
       clearInterval(interval);
     };
   }, [recheckAuth]);
+
+  const handleSignIn = useCallback(() => {
+    invoke("youtube_login_webview").catch((e) => {
+      console.error("[YT Browser] sign-in failed:", e);
+      setStatusMsg(`Sign-in failed: ${e}`);
+    });
+  }, []);
 
   // --- Tab & navigation state ---
   type Tab = "search" | "home" | "explore" | "library";
@@ -770,17 +785,30 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
         <div style={{ padding: 12 * s, textAlign: "center" }}>
           <div style={{ fontSize: Math.round(10 * s), marginBottom: 6 * s }}>Not logged in</div>
           <div style={{ fontSize: Math.round(9 * s), opacity: 0.6, marginBottom: 10 * s }}>
-            Log in with your YouTube Music cookies in Preferences to access your library, liked songs, and playlists.
+            Sign in with your Google account to access your library, liked songs, and playlists.
           </div>
-          <div
-            onClick={() => invoke("open_settings").catch(console.error)}
-            style={{
-              display: "inline-block", padding: `${4 * s}px ${12 * s}px`,
-              background: ps.selectedbg, color: ps.current, cursor: "pointer",
-              fontSize: Math.round(9 * s),
-            }}
-          >
-            Open Preferences
+          <div style={{ display: "flex", gap: 6 * s, justifyContent: "center" }}>
+            <div
+              onClick={handleSignIn}
+              style={{
+                padding: `${4 * s}px ${12 * s}px`,
+                background: ps.selectedbg, color: ps.current, cursor: "pointer",
+                fontSize: Math.round(9 * s),
+              }}
+            >
+              Sign In
+            </div>
+            <div
+              onClick={() => invoke("open_settings").catch(console.error)}
+              style={{
+                padding: `${4 * s}px ${12 * s}px`,
+                background: "transparent", color: ps.normal, cursor: "pointer",
+                fontSize: Math.round(9 * s),
+                border: `1px solid ${ps.selectedbg}`,
+              }}
+            >
+              Preferences
+            </div>
           </div>
         </div>
       );
@@ -1041,6 +1069,38 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
           <div style={{ padding: `${2 * s}px ${4 * s}px`, fontSize: Math.round(9 * s), textAlign: "center", flexShrink: 0, borderBottom: `1px solid ${ps.selectedbg}` }}>
             YOUTUBE MUSIC
           </div>
+
+          {/* Session-expired banner */}
+          {sessionExpired && (
+            <div style={{
+              flexShrink: 0,
+              padding: `${4 * s}px ${6 * s}px`,
+              background: "#3a1a1a",
+              color: "#ffb3b3",
+              fontSize: Math.round(9 * s),
+              display: "flex",
+              alignItems: "center",
+              gap: 6 * s,
+              borderBottom: `1px solid ${ps.selectedbg}`,
+            }}>
+              <span style={{ flex: 1 }}>
+                YouTube session expired — sign in to restore your library.
+              </span>
+              <span
+                onClick={handleSignIn}
+                style={{
+                  padding: `${2 * s}px ${8 * s}px`,
+                  background: ps.selectedbg,
+                  color: ps.current,
+                  cursor: "pointer",
+                  fontSize: Math.round(9 * s),
+                  whiteSpace: "nowrap",
+                }}
+              >
+                Sign In
+              </span>
+            </div>
+          )}
 
           {/* Tabs */}
           <div style={{ display: "flex", flexShrink: 0, borderBottom: `1px solid ${ps.selectedbg}33` }}>

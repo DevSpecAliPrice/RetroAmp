@@ -6,9 +6,11 @@
 //!
 //! Two decode paths are supported:
 //! - **Symphonia probe**: for formats Symphonia can auto-detect (MP3, OGG, FLAC, …)
-//! - **ADTS direct**: for raw AAC/AAC+ streams (ADTS framing) which Symphonia
-//!   lacks a native format reader for. We parse ADTS headers ourselves and feed
-//!   raw AAC payloads to Symphonia's AAC decoder.
+//! - **fdk-aac for ADTS**: for raw AAC / HE-AAC / HE-AACv2 streams. Symphonia's
+//!   AAC decoder only implements the AAC-LC profile, so HE-AAC streams (which
+//!   encode stereo as mono base + Parametric Stereo metadata) decode with a
+//!   silent right channel. libfdk-aac handles SBR and PS correctly. It also
+//!   parses ADTS framing internally, so we feed it raw stream bytes.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,7 +18,7 @@ use std::time::Duration;
 
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{
-    CodecParameters, CodecType, DecoderOptions, CODEC_TYPE_AAC, CODEC_TYPE_ALAC,
+    CodecType, DecoderOptions, CODEC_TYPE_AAC, CODEC_TYPE_ALAC,
     CODEC_TYPE_FLAC, CODEC_TYPE_MP3, CODEC_TYPE_NULL, CODEC_TYPE_VORBIS,
 };
 use symphonia::core::errors::Error as SymphoniaError;
@@ -25,7 +27,7 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
-use crate::audio::adts::{self, AdtsFrameReader};
+use crate::audio::adts;
 use crate::audio::error::AudioError;
 use crate::audio::icy::{self, IcyMetadata};
 use crate::audio::recorder::RadioRecorder;
@@ -42,11 +44,12 @@ const MAX_DECODE_LOOP_SECS: f64 = 2.0;
 /// give up and signal the track as finished.
 const MAX_CONSECUTIVE_EMPTY: u32 = 5;
 
-/// Samples per AAC frame (LC-AAC = 1024).
-const AAC_SAMPLES_PER_FRAME: u64 = 1024;
+/// Largest output buffer fdk-aac can request — 8 channels × 2048 samples
+/// (HE-AAC max) leaves comfortable headroom for any practical AAC stream.
+const FDK_PCM_BUF_SAMPLES: usize = 8 * 2048;
 
 // ---------------------------------------------------------------------------
-// Decode pipeline — Symphonia probe vs. our ADTS parser
+// Decode pipeline — Symphonia probe vs. fdk-aac for ADTS streams
 // ---------------------------------------------------------------------------
 
 enum DecodePipeline {
@@ -55,10 +58,17 @@ enum DecodePipeline {
         decoder: Box<dyn symphonia::core::codecs::Decoder>,
         track_id: u32,
     },
-    Adts {
-        frame_reader: AdtsFrameReader<StreamBufReader>,
-        decoder: Box<dyn symphonia::core::codecs::Decoder>,
-        timestamp: u64,
+    FdkAac {
+        reader: StreamBufReader,
+        decoder: fdk_aac::dec::Decoder,
+        /// Bytes read from the network but not yet consumed by the decoder.
+        pending_input: Vec<u8>,
+        /// Reusable PCM output buffer (i16) for `decode_frame`.
+        pcm_buf: Vec<i16>,
+        /// Buffer decoded during construction so we could learn the
+        /// post-SBR/PS rate and channels — emitted on the first
+        /// `next_buffer()` call.
+        initial_buffer: Option<AudioBuffer>,
     },
 }
 
@@ -193,12 +203,11 @@ impl RadioSource {
             );
         }
 
-        let (pipeline, sample_rate, channels) = if let Some(ref hdr) = adts_header {
-            build_adts_pipeline(
+        let (pipeline, sample_rate, channels) = if adts_header.is_some() {
+            build_fdk_aac_pipeline(
                 consumer,
                 stop_flag,
                 Arc::clone(&reader_alive),
-                hdr,
                 &content_type_str,
             )?
         } else {
@@ -216,7 +225,7 @@ impl RadioSource {
             sample_rate,
             channels,
             match &pipeline {
-                DecodePipeline::Adts { .. } => "codec: AAC (ADTS)",
+                DecodePipeline::FdkAac { .. } => "codec: AAC via libfdk-aac",
                 DecodePipeline::Symphonia { .. } => "probed by Symphonia",
             },
             content_type_str,
@@ -442,53 +451,89 @@ impl AudioSource for RadioSource {
                 }
             }
 
-            DecodePipeline::Adts {
-                frame_reader,
+            DecodePipeline::FdkAac {
+                reader,
                 decoder,
-                timestamp,
-            } => loop {
-                if std::time::Instant::now() > deadline {
-                    return yield_or_give_up(
-                        &mut self.consecutive_empty,
-                        &mut self.state,
-                        self.sample_rate,
-                        self.channels,
+                pending_input,
+                pcm_buf,
+                initial_buffer,
+            } => {
+                if let Some(buf) = initial_buffer.take() {
+                    self.elapsed += Duration::from_secs_f64(
+                        (buf.samples.len() / buf.channels.max(1) as usize) as f64
+                            / buf.sample_rate as f64,
                     );
+                    self.consecutive_empty = 0;
+                    return Ok(Some(buf));
                 }
-                match frame_reader.next_frame() {
-                    Ok(Some(data)) => {
-                        let ts = *timestamp;
-                        *timestamp += AAC_SAMPLES_PER_FRAME;
-                        let packet =
-                            Packet::new_from_slice(0, ts, AAC_SAMPLES_PER_FRAME, &data);
-                        if let Some(buf) = try_decode(
-                            decoder.as_mut(),
-                            &packet,
-                            &mut self.sample_buf,
-                            &mut self.elapsed,
+
+                loop {
+                    if std::time::Instant::now() > deadline {
+                        return yield_or_give_up(
                             &mut self.consecutive_empty,
-                        ) {
-                            return Ok(Some(buf));
-                        }
-                        continue;
+                            &mut self.state,
+                            self.sample_rate,
+                            self.channels,
+                        );
                     }
-                    Ok(None) | Err(_) => {
-                        if !self.reader_alive.load(Ordering::Relaxed) {
-                            log::warn!("[radio] reader thread exited — ending stream");
-                            self.state = SourceState::Error;
-                            return Ok(None);
+
+                    match decoder.decode_frame(pcm_buf.as_mut_slice()) {
+                        Ok(()) => {
+                            let info = decoder.stream_info();
+                            let n_ch = info.numChannels.max(0) as usize;
+                            let frames = info.frameSize.max(0) as usize;
+                            if n_ch == 0 || frames == 0 {
+                                continue;
+                            }
+                            let n_samples = frames * n_ch;
+                            let samples: Vec<f32> = pcm_buf[..n_samples]
+                                .iter()
+                                .map(|&s| s as f32 / 32768.0)
+                                .collect();
+                            let actual_rate = info.sampleRate.max(1) as u32;
+                            self.elapsed += Duration::from_secs_f64(
+                                frames as f64 / actual_rate as f64,
+                            );
+                            self.consecutive_empty = 0;
+                            return Ok(Some(AudioBuffer {
+                                samples,
+                                sample_rate: actual_rate,
+                                channels: n_ch as u16,
+                            }));
                         }
-                        if !self.connected.load(Ordering::Relaxed) {
-                            return Ok(Some(make_silence(
-                                self.sample_rate,
-                                self.channels,
-                            )));
+                        Err(e) if e == fdk_aac::dec::DecoderError::NOT_ENOUGH_BITS
+                            || e == fdk_aac::dec::DecoderError::TRANSPORT_SYNC_ERROR =>
+                        {
+                            if !refill_fdk_aac_decoder(
+                                reader,
+                                decoder,
+                                pending_input,
+                            )? {
+                                // Underlying reader stalled — emit silence so the
+                                // output keeps flowing, and try again next call.
+                                if !self.reader_alive.load(Ordering::Relaxed) {
+                                    log::warn!(
+                                        "[radio] reader thread exited — ending stream"
+                                    );
+                                    self.state = SourceState::Error;
+                                    return Ok(None);
+                                }
+                                return Ok(Some(make_silence(
+                                    self.sample_rate,
+                                    self.channels,
+                                )));
+                            }
                         }
-                        std::thread::sleep(Duration::from_millis(5));
-                        continue;
+                        Err(e) => {
+                            // CRC / parse / decode-frame errors are recoverable —
+                            // libfdk-aac re-syncs on the next frame. The deadline
+                            // guard above prevents infinite spin if errors are
+                            // persistent.
+                            log::debug!("[radio] fdk-aac: {e}");
+                        }
                     }
                 }
-            },
+            }
         }
     }
 
@@ -505,63 +550,205 @@ impl AudioSource for RadioSource {
 // Pipeline builders
 // ---------------------------------------------------------------------------
 
-fn build_adts_pipeline(
+fn build_fdk_aac_pipeline(
     consumer: ringbuf::HeapCons<u8>,
     stop_flag: Arc<AtomicBool>,
     reader_alive: Arc<AtomicBool>,
-    hdr: &adts::AdtsHeader,
     content_type: &str,
 ) -> Result<(DecodePipeline, u32, u16), AudioError> {
-    let sample_rate = hdr.sample_rate;
-    let channels = hdr.channels as u16;
+    let reader = StreamBufReader::new(consumer, stop_flag, reader_alive);
+    let mut decoder = fdk_aac::dec::Decoder::new(fdk_aac::dec::Transport::Adts);
 
-    // Note: HE-AAC (AAC+) uses SBR which ideally doubles the output rate.
-    // However, Symphonia's AAC decoder does NOT implement SBR — it decodes
-    // only the base AAC-LC layer and outputs at the ADTS base rate. Using
-    // the base rate here is correct; the audio will play but without the
-    // SBR high-frequency enhancement.
-    if content_type.to_lowercase().contains("aacp") && sample_rate <= 24000 {
-        log::info!(
-            "[radio] HE-AAC stream at {}Hz (SBR not supported by decoder, \
-             playing base layer only)",
-            sample_rate,
-        );
-    }
+    // Force stereo output. For HE-AACv2 streams the decoder synthesises
+    // the right channel via Parametric Stereo. For mono base layers
+    // libfdk-aac duplicates to both channels. Without these, mono content
+    // would emit a single-channel buffer which the engine treats as
+    // interleaved stereo and plays as garbled fast-mono.
+    decoder
+        .set_min_output_channels(2)
+        .map_err(|e| AudioError::Decode(format!("fdk-aac set_min channels: {e}")))?;
+    decoder
+        .set_max_output_channels(2)
+        .map_err(|e| AudioError::Decode(format!("fdk-aac set_max channels: {e}")))?;
 
-    let asc = adts::build_audio_specific_config(hdr);
+    // Probe for the first frame so the engine can configure the output
+    // device with the post-SBR/PS rate up front, avoiding a reconfigure
+    // glitch a few frames in. The decoded buffer is cached and emitted
+    // by the first `next_buffer()` call.
+    let mut pending_input: Vec<u8> = Vec::with_capacity(8192);
+    let mut pcm_buf: Vec<i16> = vec![0; FDK_PCM_BUF_SAMPLES];
 
-    let mut params = CodecParameters::new();
-    params.for_codec(CODEC_TYPE_AAC).with_sample_rate(sample_rate);
+    let mut bytes_fed = 0usize;
+    const PROBE_BYTE_BUDGET: usize = 256 * 1024;
 
-    let ch_layout = match hdr.channels {
-        1 => symphonia::core::audio::Channels::FRONT_CENTRE,
-        _ => {
-            symphonia::core::audio::Channels::FRONT_LEFT
-                | symphonia::core::audio::Channels::FRONT_RIGHT
+    let initial_buffer = loop {
+        match decoder.decode_frame(pcm_buf.as_mut_slice()) {
+            Ok(()) => {
+                let info = decoder.stream_info();
+                let n_ch = info.numChannels.max(0) as usize;
+                let frames = info.frameSize.max(0) as usize;
+                if n_ch == 0 || frames == 0 {
+                    // Decoder reported no output yet — treat as "need more bits".
+                    bytes_fed += refill_fdk_aac_probe(
+                        &reader,
+                        &mut decoder,
+                        &mut pending_input,
+                    )?;
+                    if bytes_fed > PROBE_BYTE_BUDGET {
+                        return Err(AudioError::Decode(
+                            "fdk-aac probe ran out of byte budget without a \
+                             valid frame"
+                                .into(),
+                        ));
+                    }
+                    continue;
+                }
+                let n_samples = frames * n_ch;
+                let samples: Vec<f32> = pcm_buf[..n_samples]
+                    .iter()
+                    .map(|&s| s as f32 / 32768.0)
+                    .collect();
+                let sample_rate = info.sampleRate.max(1) as u32;
+                let channels = n_ch as u16;
+                let buf = AudioBuffer {
+                    samples,
+                    sample_rate,
+                    channels,
+                };
+                let aot = info.aot as i32;
+                log::info!(
+                    "[radio] fdk-aac locked on: {}Hz {}ch (AOT={}, \
+                     content-type: {})",
+                    sample_rate,
+                    channels,
+                    aot,
+                    content_type,
+                );
+                break buf;
+            }
+            Err(e) if e == fdk_aac::dec::DecoderError::NOT_ENOUGH_BITS
+                || e == fdk_aac::dec::DecoderError::TRANSPORT_SYNC_ERROR =>
+            {
+                bytes_fed += refill_fdk_aac_probe(
+                    &reader,
+                    &mut decoder,
+                    &mut pending_input,
+                )?;
+                if bytes_fed > PROBE_BYTE_BUDGET {
+                    return Err(AudioError::Decode(
+                        "fdk-aac probe ran out of byte budget without a \
+                         valid frame"
+                            .into(),
+                    ));
+                }
+            }
+            Err(e) => {
+                // Recoverable bitstream error during probe — feed more and retry.
+                log::debug!("[radio] fdk-aac probe error (recoverable): {e}");
+                bytes_fed += refill_fdk_aac_probe(
+                    &reader,
+                    &mut decoder,
+                    &mut pending_input,
+                )?;
+                if bytes_fed > PROBE_BYTE_BUDGET {
+                    return Err(AudioError::Decode(format!(
+                        "fdk-aac probe failed: {e}"
+                    )));
+                }
+            }
         }
     };
-    params.with_channels(ch_layout).with_extra_data(asc);
 
-    let decoder = crate::audio::get_codecs()
-        .make(&params, &DecoderOptions::default())
-        .map_err(|e| {
-            AudioError::UnsupportedFormat(format!(
-                "AAC decoder unavailable (content-type: {content_type}): {e}"
-            ))
-        })?;
-
-    let buf_reader = StreamBufReader::new(consumer, stop_flag, reader_alive);
-    let frame_reader = AdtsFrameReader::new(buf_reader);
+    let sample_rate = initial_buffer.sample_rate;
+    let channels = initial_buffer.channels;
 
     Ok((
-        DecodePipeline::Adts {
-            frame_reader,
+        DecodePipeline::FdkAac {
+            reader,
             decoder,
-            timestamp: 0,
+            pending_input,
+            pcm_buf,
+            initial_buffer: Some(initial_buffer),
         },
         sample_rate,
         channels,
     ))
+}
+
+/// Pull more bytes out of `reader` and feed them into the decoder.
+/// Used during the probe at construction time, when blocking on the
+/// inner reader is acceptable. Returns the number of bytes read.
+fn refill_fdk_aac_probe(
+    reader: &StreamBufReader,
+    decoder: &mut fdk_aac::dec::Decoder,
+    pending_input: &mut Vec<u8>,
+) -> Result<usize, AudioError> {
+    use std::io::Read;
+    if pending_input.is_empty() {
+        let mut buf = [0u8; 8192];
+        // The pre-buffer in connect_inner guarantees data is available;
+        // a blocking read here is fine.
+        let mut handle = StreamBufReaderHandle(reader);
+        let n = handle
+            .read(&mut buf)
+            .map_err(|e| AudioError::Decode(format!("read during probe: {e}")))?;
+        if n == 0 {
+            return Err(AudioError::ConnectionFailed(
+                "stream ended before fdk-aac could lock onto a frame".into(),
+            ));
+        }
+        pending_input.extend_from_slice(&buf[..n]);
+    }
+    let consumed = decoder
+        .fill(pending_input)
+        .map_err(|e| AudioError::Decode(format!("fdk-aac fill: {e}")))?;
+    pending_input.drain(..consumed);
+    Ok(consumed)
+}
+
+/// Adapter so we can call the blocking `Read::read` impl on a `&StreamBufReader`
+/// without taking ownership of it.
+struct StreamBufReaderHandle<'a>(&'a StreamBufReader);
+
+impl<'a> std::io::Read for StreamBufReaderHandle<'a> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        // Spin until try_read returns or the reader is torn down.
+        loop {
+            let n = self.0.try_read(buf);
+            if n > 0 {
+                return Ok(n);
+            }
+            if !self.0.reader_alive() {
+                return Ok(0);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+/// Steady-state refill used from `next_buffer()`. Pulls *whatever bytes
+/// are immediately available* from the reader and feeds them to the
+/// decoder. Returns `Ok(true)` if any new bytes were consumed, `Ok(false)`
+/// if the reader had nothing for us right now — the caller distinguishes
+/// "true EOF" from "network stall" by inspecting `reader_alive`.
+fn refill_fdk_aac_decoder(
+    reader: &StreamBufReader,
+    decoder: &mut fdk_aac::dec::Decoder,
+    pending_input: &mut Vec<u8>,
+) -> Result<bool, AudioError> {
+    if pending_input.is_empty() {
+        let mut buf = [0u8; 8192];
+        let n = reader.try_read(&mut buf);
+        if n == 0 {
+            return Ok(false);
+        }
+        pending_input.extend_from_slice(&buf[..n]);
+    }
+    let consumed = decoder
+        .fill(pending_input)
+        .map_err(|e| AudioError::Decode(format!("fdk-aac fill: {e}")))?;
+    pending_input.drain(..consumed);
+    Ok(consumed > 0)
 }
 
 fn build_symphonia_pipeline(

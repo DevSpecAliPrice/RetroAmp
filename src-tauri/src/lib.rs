@@ -275,25 +275,25 @@ pub fn run() {
             // YouTube startup tasks (non-blocking):
             // 1. Check for yt-dlp updates
             // 2. Restore authenticated session from saved cookie
-            // 3. Refresh session cookies via hidden WebView (prevents 24h expiry)
+            //
+            // We deliberately do NOT auto-refresh session cookies via a hidden
+            // WebView here.  Loading music.youtube.com in a background WebView
+            // saturates the WebKitGTK main loop and freezes user input on the
+            // visible windows (right-click menus etc.) on Wayland.  When the
+            // saved cookie eventually expires, `innertube_request` emits
+            // `youtube-session-expired` and the YouTube browser shows a
+            // "Sign In" banner so the user can re-authenticate on demand.
             {
-                let app_for_yt = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
-                    // yt-dlp update check (blocking I/O).
                     let _ = tauri::async_runtime::spawn_blocking(|| {
                         crate::youtube::ytdlp::check_for_update();
                     }).await;
 
-                    // Restore YouTube Music cookie session if saved.
                     let cfg = crate::config::AppConfig::load();
                     if let Some(ref cookie) = cfg.youtube.cookie {
                         log::info!("[youtube] restoring authenticated session from saved cookie...");
                         match crate::youtube::api::login_with_cookie(cookie).await {
-                            Ok(()) => {
-                                log::info!("[youtube] authenticated session restored");
-                                // Refresh session cookies to prevent 24h expiry.
-                                crate::youtube::commands::refresh_session_cookies(&app_for_yt);
-                            }
+                            Ok(()) => log::info!("[youtube] authenticated session restored"),
                             Err(e) => log::warn!("[youtube] cookie restore failed: {e}"),
                         }
                     }
@@ -562,6 +562,16 @@ pub fn run() {
                     Err(e) => eprintln!("[retroamp] failed to create tag editor: {e}"),
                 }
             }
+
+            // Pre-create the YouTube helper WebViews (login + cookie refresh).
+            // Same Wayland constraint as the panels above: WebViews must not
+            // be built or destroyed at runtime.
+            youtube::commands::precreate_helper_windows(app.handle());
+            eprintln!("[retroamp] pre-created youtube helper webviews");
+
+            // Install the AppHandle for session-expired event emission from
+            // synchronous (non-command) code paths in `youtube::api`.
+            youtube::api::set_app_handle(app.handle().clone());
 
             // Set up system tray (non-fatal).
             match tray::setup(app.handle()) {

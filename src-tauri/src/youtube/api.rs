@@ -9,6 +9,7 @@
 
 use std::sync::OnceLock;
 
+use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
 use ytmapi_rs::auth::BrowserToken;
 use ytmapi_rs::auth::noauth::NoAuthToken;
@@ -20,6 +21,29 @@ use ytmapi_rs::query::{
 use ytmapi_rs::YtMusic;
 
 use super::types::*;
+
+// ---------------------------------------------------------------------------
+// Session-expired event plumbing
+// ---------------------------------------------------------------------------
+
+/// AppHandle stored at startup so non-Tauri-command code paths
+/// (the synchronous `innertube_request` etc.) can emit Tauri events.
+static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
+
+/// Called once during Tauri `setup` to install the global emitter handle.
+pub fn set_app_handle(app: AppHandle) {
+    let _ = APP_HANDLE.set(app);
+}
+
+/// Notify the frontend that the saved YouTube cookie is no longer valid
+/// (HTTP 401 from InnerTube, or a "Sign in" interstitial in the JSON
+/// response).  The YouTube browser window listens for this and prompts
+/// the user to re-authenticate.
+fn emit_session_expired() {
+    if let Some(app) = APP_HANDLE.get() {
+        let _ = app.emit("youtube-session-expired", ());
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Direct InnerTube API client for library queries
@@ -102,7 +126,7 @@ fn innertube_request(
     let body_str = serde_json::to_string(&body)
         .map_err(|e| format!("Failed to serialize request: {e}"))?;
 
-    let response = ureq::post(&url)
+    let response = match ureq::post(&url)
         .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:88.0) Gecko/20100101 Firefox/88.0")
         .header("Cookie", cookie)
         .header("Authorization", &auth_header)
@@ -112,7 +136,14 @@ fn innertube_request(
         .header("Referer", YTM_ORIGIN)
         .header("Content-Type", "application/json")
         .send(&body_str)
-        .map_err(|e| format!("InnerTube {endpoint} request failed: {e}"))?;
+    {
+        Ok(r) => r,
+        Err(ureq::Error::StatusCode(401)) | Err(ureq::Error::StatusCode(403)) => {
+            emit_session_expired();
+            return Err("Session expired — please log in again.".into());
+        }
+        Err(e) => return Err(format!("InnerTube {endpoint} request failed: {e}")),
+    };
 
     let body_str = response
         .into_body()
@@ -122,12 +153,14 @@ fn innertube_request(
     let json: serde_json::Value = serde_json::from_str(&body_str)
         .map_err(|e| format!("Failed to parse InnerTube JSON: {e}"))?;
 
-    // Detect expired sessions.
+    // Detect expired sessions surfaced as a "Sign in" interstitial in the
+    // JSON body rather than an HTTP error.
     {
         let mut messages = Vec::new();
         find_messages(&json, &mut messages);
         if messages.iter().any(|m| m == "Sign in") {
-            return Err("Session expired — please log in again in Preferences > YouTube.".into());
+            emit_session_expired();
+            return Err("Session expired — please log in again.".into());
         }
     }
 

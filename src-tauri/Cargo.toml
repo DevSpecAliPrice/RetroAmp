@@ -76,5 +76,11 @@ reqwest = { version = "0.13", default-features = false, features = ["cookies"] }
 chrono = { version = "0.4", default-features = false, features = ["now"] }
 audiopus = "0.2"
 
+# HE-AAC (SBR + Parametric Stereo) decoder. Symphonia's AAC decoder only
+# implements AAC-LC, so HE-AACv1/v2 streams (e.g. Radio Paradise) decode
+# with a silent right channel. fdk-aac vendors libfdk-aac as C++ source
+# and builds it via the `cc` crate, so no system library is required.
+fdk-aac = "0.8"
+
 [features]
 custom-protocol = ["tauri/custom-protocol"]

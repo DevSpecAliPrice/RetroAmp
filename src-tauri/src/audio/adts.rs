@@ -1,10 +1,10 @@
-//! ADTS (Audio Data Transport Stream) frame parser for raw AAC internet radio.
+//! ADTS (Audio Data Transport Stream) sniffer for raw AAC internet radio.
 //!
-//! Many internet radio stations stream AAC/AAC+ as raw ADTS frames over HTTP.
-//! Symphonia lacks a native ADTS format reader, so we parse ADTS headers
-//! ourselves and feed raw AAC payloads to Symphonia's AAC decoder.
-
-use std::io::{self, Read};
+//! We sniff for ADTS sync words to decide whether to route a stream
+//! through libfdk-aac (which handles ADTS framing internally) or through
+//! Symphonia's probe (for MP3, OGG, FLAC, etc.). ADTS sync (0xFFF, layer=00)
+//! overlaps with MP3 sync (0xFFE), so without this check Symphonia's MP3
+//! demuxer falsely accepts AAC streams.
 
 /// ADTS sample rate table (frequency index → Hz).
 const SAMPLE_RATES: [u32; 13] = [
@@ -12,7 +12,8 @@ const SAMPLE_RATES: [u32; 13] = [
     11025, 8000, 7350,
 ];
 
-/// Parsed ADTS frame header.
+/// Parsed ADTS frame header. Most fields are kept for diagnostics; only
+/// `sample_rate` and `channels` are read by current callers.
 #[derive(Debug, Clone)]
 pub struct AdtsHeader {
     /// AAC profile (0=Main, 1=LC, 2=SSR, 3=LTP).
@@ -47,7 +48,6 @@ pub fn detect_adts(data: &[u8]) -> Option<AdtsHeader> {
     for i in 0..limit.saturating_sub(7) {
         if is_adts_sync(data[i], data[i + 1]) {
             if let Some(header) = parse_header(&data[i..]) {
-                // Verify: the next frame should also start with ADTS sync.
                 let next = i + header.frame_length;
                 if next + 2 <= data.len()
                     && is_adts_sync(data[next], data[next + 1])
@@ -93,133 +93,6 @@ pub fn parse_header(bytes: &[u8]) -> Option<AdtsHeader> {
     })
 }
 
-/// Build an ISO 14496-3 AudioSpecificConfig from ADTS header parameters.
-///
-/// For LC-AAC, the ASC is 2 bytes:
-///   5 bits: audioObjectType  (profile + 1; LC = 2)
-///   4 bits: samplingFrequencyIndex
-///   4 bits: channelConfiguration
-///   3 bits: padding zeros
-pub fn build_audio_specific_config(header: &AdtsHeader) -> Box<[u8]> {
-    let obj_type = (header.profile + 1) as u16;
-    let freq_idx = header.freq_index as u16;
-    let chan_cfg = header.channels as u16;
-    let val: u16 = (obj_type << 11) | (freq_idx << 7) | (chan_cfg << 3);
-    Box::new([(val >> 8) as u8, (val & 0xFF) as u8])
-}
-
-/// Reads ADTS frames from a byte stream and returns raw AAC payloads.
-pub struct AdtsFrameReader<R: Read> {
-    reader: R,
-    /// Reusable read buffer.
-    buf: Vec<u8>,
-}
-
-impl<R: Read> AdtsFrameReader<R> {
-    pub fn new(reader: R) -> Self {
-        Self {
-            reader,
-            buf: vec![0u8; 8192],
-        }
-    }
-
-    /// Read the next ADTS frame's raw AAC payload (header stripped).
-    ///
-    /// Returns `Ok(None)` on clean EOF, `Err` on I/O or sync errors.
-    pub fn next_frame(&mut self) -> io::Result<Option<Vec<u8>>> {
-        // Read the 7-byte fixed header.
-        if !self.fill_exact(7)? {
-            return Ok(None); // EOF
-        }
-
-        if !is_adts_sync(self.buf[0], self.buf[1]) {
-            return self.resync();
-        }
-
-        let header = match parse_header(&self.buf[..7]) {
-            Some(h) => h,
-            None => return self.resync(),
-        };
-
-        // Read CRC bytes if present.
-        if header.header_size == 9 {
-            self.reader.read_exact(&mut self.buf[7..9])?;
-        }
-
-        let payload_len = header.frame_length - header.header_size;
-        if payload_len == 0 {
-            return self.next_frame();
-        }
-
-        // Read the AAC payload.
-        if self.buf.len() < payload_len {
-            self.buf.resize(payload_len, 0);
-        }
-        self.reader.read_exact(&mut self.buf[..payload_len])?;
-
-        Ok(Some(self.buf[..payload_len].to_vec()))
-    }
-
-    /// Try to read exactly `n` bytes into `self.buf`. Returns `false` on clean
-    /// EOF (first byte read returned 0), propagates other errors.
-    fn fill_exact(&mut self, n: usize) -> io::Result<bool> {
-        if self.buf.len() < n {
-            self.buf.resize(n, 0);
-        }
-        // Read first byte separately to distinguish EOF from mid-read error.
-        match self.reader.read(&mut self.buf[..1]) {
-            Ok(0) => return Ok(false),
-            Ok(_) => {}
-            Err(e) => return Err(e),
-        }
-        if n > 1 {
-            self.reader.read_exact(&mut self.buf[1..n])?;
-        }
-        Ok(true)
-    }
-
-    /// Scan forward for the next ADTS sync word and return that frame.
-    fn resync(&mut self) -> io::Result<Option<Vec<u8>>> {
-        log::debug!("[adts] lost sync, scanning...");
-        let mut prev = 0u8;
-        let mut one = [0u8; 1];
-
-        for _ in 0..65536 {
-            match self.reader.read(&mut one) {
-                Ok(0) => return Ok(None), // EOF during resync
-                Ok(_) => {}
-                Err(e) => return Err(e),
-            }
-
-            if prev == 0xFF && is_adts_sync(0xFF, one[0]) {
-                self.buf[0] = 0xFF;
-                self.buf[1] = one[0];
-                self.reader.read_exact(&mut self.buf[2..7])?;
-
-                if let Some(header) = parse_header(&self.buf[..7]) {
-                    if header.header_size == 9 {
-                        self.reader.read_exact(&mut self.buf[7..9])?;
-                    }
-                    let payload_len = header.frame_length - header.header_size;
-                    if payload_len > 0 {
-                        if self.buf.len() < payload_len {
-                            self.buf.resize(payload_len, 0);
-                        }
-                        self.reader.read_exact(&mut self.buf[..payload_len])?;
-                        return Ok(Some(self.buf[..payload_len].to_vec()));
-                    }
-                }
-            }
-            prev = one[0];
-        }
-
-        Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "could not find ADTS sync after 64 KB",
-        ))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,34 +119,18 @@ mod tests {
         // frame_length=100, buffer_fullness=0x7FF, num_frames=0
         let mut header = [0u8; 7];
         header[0] = 0xFF;
-        header[1] = 0xF1; // sync + ID=0 + layer=00 + protection=1
-        header[2] = (1 << 6) | (4 << 2); // profile=1(LC), freq=4(44100)
-        header[3] = (0 << 7) | (2 << 6) | ((100 >> 11) as u8 & 0x03); // private=0, chan=2, frame_len high
+        header[1] = 0xF1;
+        header[2] = (1 << 6) | (4 << 2);
+        header[3] = (0 << 7) | (2 << 6) | ((100 >> 11) as u8 & 0x03);
         header[4] = ((100 >> 3) & 0xFF) as u8;
-        header[5] = ((100 & 0x07) << 5) as u8 | 0x1F; // frame_len low + buffer_fullness high
-        header[6] = 0xFC; // buffer_fullness low + num_frames=0
+        header[5] = ((100 & 0x07) << 5) as u8 | 0x1F;
+        header[6] = 0xFC;
 
         let parsed = parse_header(&header).unwrap();
-        assert_eq!(parsed.profile, 1); // LC
+        assert_eq!(parsed.profile, 1);
         assert_eq!(parsed.sample_rate, 44100);
         assert_eq!(parsed.channels, 2);
         assert_eq!(parsed.frame_length, 100);
-        assert_eq!(parsed.header_size, 7); // protection_absent=1
-    }
-
-    #[test]
-    fn audio_specific_config() {
-        let header = AdtsHeader {
-            profile: 1, // LC
-            freq_index: 4, // 44100
-            sample_rate: 44100,
-            channels: 2,
-            frame_length: 0,
-            header_size: 7,
-        };
-        let asc = build_audio_specific_config(&header);
-        // audioObjectType=2 (LC, profile+1), freq_index=4, channels=2
-        // 00010 0100 0010 000 = 0x1210
-        assert_eq!(&*asc, &[0x12, 0x10]);
+        assert_eq!(parsed.header_size, 7);
     }
 }

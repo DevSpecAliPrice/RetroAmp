@@ -250,6 +250,10 @@ impl Drop for StreamReader {
 ///
 /// Reads from the HTTP stream and pushes bytes into the ring buffer.
 /// On disconnect, attempts reconnection with exponential backoff.
+///
+/// `reconnect_attempts` counts reconnects since the last byte was received,
+/// not per-call. A server that hands us a fresh connection but immediately
+/// closes the body must not be allowed to spin us forever.
 fn reader_thread_main(
     mut reader: Box<dyn Read + Send>,
     mut producer: ringbuf::HeapProd<u8>,
@@ -287,6 +291,7 @@ fn reader_thread_main(
                 }
             }
             Ok(n) => {
+                // Real data flowing — reset the give-up counter.
                 reconnect_attempts = 0;
 
                 // Recording tap — copy bytes to recorder buffer.
@@ -340,9 +345,17 @@ fn reader_thread_main(
     }
 }
 
-/// Attempt to reconnect to the stream with exponential backoff.
+/// Attempt to reconnect to the stream, with backoff that grows across calls.
 ///
-/// Returns the new reader on success, or `None` if we should give up.
+/// `attempts` is owned by the caller and survives across reconnect cycles.
+/// It is *not* reset here on a successful HTTP handshake — only sustained
+/// data flow (the caller resetting it on `Ok(n > 0)`) counts as progress.
+/// Without that, a server that accepts the connection and immediately
+/// closes the body would keep us reconnecting once a second forever.
+///
+/// Returns the new reader, or `None` if we should give up (either the
+/// stop flag was set or we've reconnected `MAX_RECONNECT_ATTEMPTS` times
+/// without any bytes flowing).
 fn attempt_reconnect(
     url: &str,
     icy_metadata: &Arc<Mutex<IcyMetadata>>,
@@ -350,28 +363,32 @@ fn attempt_reconnect(
     attempts: &mut u32,
     stop: &Arc<AtomicBool>,
 ) -> Option<Box<dyn Read + Send>> {
-    for _ in 0..MAX_RECONNECT_ATTEMPTS {
+    loop {
         if stop.load(Ordering::Relaxed) {
+            return None;
+        }
+        if *attempts >= MAX_RECONNECT_ATTEMPTS as u32 {
+            log::error!(
+                "[radio] gave up after {MAX_RECONNECT_ATTEMPTS} reconnects \
+                 without receiving data"
+            );
             return None;
         }
 
         *attempts += 1;
         let delay = Duration::from_secs((*attempts as u64).min(30));
         log::info!(
-            "[radio] reconnecting in {}s (attempt {})...",
+            "[radio] reconnecting in {}s (attempt {}/{MAX_RECONNECT_ATTEMPTS})...",
             delay.as_secs(),
-            attempts
+            attempts,
         );
-        thread::sleep(delay);
-
-        if stop.load(Ordering::Relaxed) {
+        if !interruptible_sleep(delay, stop) {
             return None;
         }
 
         match make_stream_request(url, icy_metadata, metaint) {
             Ok(reader) => {
-                log::info!("[radio] reconnected successfully");
-                *attempts = 0;
+                log::info!("[radio] reconnected (no progress yet)");
                 return Some(reader);
             }
             Err(e) => {
@@ -379,9 +396,21 @@ fn attempt_reconnect(
             }
         }
     }
+}
 
-    log::error!("[radio] gave up reconnecting after {MAX_RECONNECT_ATTEMPTS} attempts");
-    None
+/// Sleep up to `duration`, polling the stop flag every 100ms so that
+/// `StreamReader::stop()` can join the reader thread quickly even when
+/// it's mid-backoff. Returns `false` if the stop flag was set.
+fn interruptible_sleep(duration: Duration, stop: &Arc<AtomicBool>) -> bool {
+    let deadline = std::time::Instant::now() + duration;
+    while std::time::Instant::now() < deadline {
+        if stop.load(Ordering::Relaxed) {
+            return false;
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        thread::sleep(remaining.min(Duration::from_millis(100)));
+    }
+    !stop.load(Ordering::Relaxed)
 }
 
 /// Make a fresh HTTP request to the stream URL.
@@ -474,6 +503,23 @@ impl StreamBufReader {
             stop,
             reader_alive,
         }
+    }
+
+    /// Non-blocking read: copies whatever's currently in the ring buffer
+    /// into `buf` and returns the byte count (0 if the buffer is empty).
+    /// Unlike `Read::read`, this never blocks waiting for the network —
+    /// the caller is expected to interpret a 0 as "stalled" (if the
+    /// reader thread is alive) or "EOF" (if it isn't).
+    pub fn try_read(&self, buf: &mut [u8]) -> usize {
+        let mut consumer = self.consumer.lock().unwrap();
+        consumer.pop_slice(buf)
+    }
+
+    /// Whether the HTTP reader thread is still running. Used by callers
+    /// that hold a `StreamBufReader` directly (rather than via the `Read`
+    /// trait) to distinguish a network stall from a true end-of-stream.
+    pub fn reader_alive(&self) -> bool {
+        self.reader_alive.load(Ordering::Relaxed)
     }
 }
 
