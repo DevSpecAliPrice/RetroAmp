@@ -13,7 +13,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import type { SkinData } from "./parser";
-import { showContextMenu } from "../nativeMenu";
+import { showContextMenu, type NativeMenuEntry } from "../nativeMenu";
 import { FEATURES } from "../features";
 
 // -- Interfaces --
@@ -36,6 +36,15 @@ interface PlaylistState {
   repeat: "Off" | "Track" | "Playlist";
   total_duration: number | null;
   track_count: number;
+}
+
+interface YtLibPlaylist {
+  browse_id: string;
+  title: string;
+}
+
+interface YtAuthStatus {
+  is_authenticated: boolean;
 }
 
 interface Props {
@@ -68,6 +77,23 @@ export default function PlaylistWindow({ skin, scale }: Props) {
   const [scrollNeeded, setScrollNeeded] = useState(false);
   const [dragging, setDragging] = useState(false);
   const dragStartRef = useRef<{ startY: number; startRatio: number } | null>(null);
+
+  // Transient status text shown in the bottom bar (e.g. download progress).
+  const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const statusTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const showStatus = useCallback((msg: string, ms = 4000) => {
+    setStatusMsg(msg);
+    clearTimeout(statusTimer.current);
+    statusTimer.current = setTimeout(() => setStatusMsg(null), ms);
+  }, []);
+
+  // YouTube library data — fetched lazily once any YT track is in the playlist
+  // so the right-click menu can show Like/Unlike + Add-to-Playlist for YT
+  // tracks without each menu open paying the network cost.
+  const [ytAuth, setYtAuth] = useState(false);
+  const [ytLikedIds, setYtLikedIds] = useState<Set<string>>(new Set());
+  const [ytPlaylists, setYtPlaylists] = useState<YtLibPlaylist[]>([]);
+  const ytPrefetchedRef = useRef(false);
 
   const ps = skin.playlistStyle;
   const sp = skin.sprites;
@@ -157,6 +183,38 @@ export default function PlaylistWindow({ skin, scale }: Props) {
     return () => clearInterval(interval);
   }, []);
 
+  // Eagerly prefetch YT auth + library data the first time any YT track
+  // appears in the playlist. Refresh after Like/Unlike below so the menu
+  // toggle stays accurate.
+  const refreshYtLikedIds = useCallback(async () => {
+    try {
+      const liked = await invoke<{ video_id: string }[]>("youtube_get_library_songs");
+      setYtLikedIds(new Set(liked.map((t) => t.video_id)));
+    } catch (e) { console.error("[playlist] refresh liked failed:", e); }
+  }, []);
+
+  useEffect(() => {
+    if (ytPrefetchedRef.current) return;
+    const hasYt = playlist.tracks.some((t) => t.source_type === "youtube");
+    if (!hasYt) return;
+    ytPrefetchedRef.current = true;
+    (async () => {
+      try {
+        const status = await invoke<YtAuthStatus>("youtube_auth_status");
+        setYtAuth(status.is_authenticated);
+        if (!status.is_authenticated) return;
+        const [pls, liked] = await Promise.all([
+          invoke<YtLibPlaylist[]>("youtube_get_library_playlists"),
+          invoke<{ video_id: string }[]>("youtube_get_library_songs"),
+        ]);
+        setYtPlaylists(pls);
+        setYtLikedIds(new Set(liked.map((t) => t.video_id)));
+      } catch (e) {
+        console.error("[playlist] YT prefetch failed:", e);
+      }
+    })();
+  }, [playlist.tracks]);
+
   // Auto-scroll to current track when it changes.
   useEffect(() => {
     if (playlist.current_index == null || !trackListRef.current) return;
@@ -204,16 +262,19 @@ export default function PlaylistWindow({ skin, scale }: Props) {
 
   const downloadYoutubeTrack = useCallback(async (track: PlaylistEntry) => {
     if (!track.path.startsWith("youtube:")) return;
+    const label = track.display_name || "track";
+    showStatus(`Downloading ${label}...`, 600000);
     try {
       const cmd = track.is_current ? "youtube_save_current_track" : "youtube_download_playlist_track";
       const args = track.is_current ? {} : { trackId: track.id };
       const path = await invoke<string>(cmd, args);
       const filename = path.split(/[\\/]/).pop() ?? path;
-      console.log(`[playlist] saved YouTube track: ${filename}`);
+      showStatus(`Saved: ${filename}`);
     } catch (e) {
       console.error(`[playlist] download failed:`, e);
+      showStatus(`Download failed: ${e}`, 6000);
     }
-  }, []);
+  }, [showStatus]);
 
   // Resize from bottom/top edge.
   const handleEdgeMouseDown = useCallback((e: React.MouseEvent) => {
@@ -403,18 +464,39 @@ export default function PlaylistWindow({ skin, scale }: Props) {
                   const isLocal = track.source_type === "local";
                   const isYoutube = track.source_type === "youtube";
                   const isSpotify = track.source_type === "spotify";
-                  const items = [
-                    { type: "item" as const, id: "play", label: "Play" },
-                    { type: "item" as const, id: "play_next", label: "Play Next" },
-                    { type: "separator" as const },
-                    { type: "item" as const, id: "edit_tags", label: "Edit Tags...", disabled: !isLocal },
-                    { type: "item" as const, id: "reveal", label: "Show in File Manager", disabled: !isLocal },
+                  const ytVideoId = isYoutube ? track.path.slice("youtube:".length) : "";
+                  const ytIsLiked = isYoutube && ytLikedIds.has(ytVideoId);
+
+                  const items: NativeMenuEntry[] = [
+                    { type: "item", id: "play", label: "Play" },
+                    { type: "item", id: "play_next", label: "Play Next" },
+                    { type: "separator" },
+                    { type: "item", id: "edit_tags", label: "Edit Tags...", disabled: !isLocal },
+                    { type: "item", id: "reveal", label: "Show in File Manager", disabled: !isLocal },
                     ...(!isLocal ? [{ type: "item" as const, id: "copy_url", label: "Copy URL" }] : []),
                     ...(isYoutube ? [{ type: "item" as const, id: "download", label: "Download" }] : []),
                     ...(isYoutube || isSpotify ? [{ type: "item" as const, id: "open_web", label: "Open in Browser" }] : []),
-                    { type: "separator" as const },
-                    { type: "item" as const, id: "remove", label: "Remove from Playlist" },
                   ];
+
+                  if (isYoutube && ytAuth) {
+                    items.push({ type: "separator" });
+                    items.push({ type: "item", id: ytIsLiked ? "yt_unlike" : "yt_like", label: ytIsLiked ? "Unlike" : "Like" });
+                    if (ytPlaylists.length > 0) {
+                      items.push({
+                        type: "submenu",
+                        label: "Add to YouTube Playlist",
+                        items: ytPlaylists.map((pl) => ({
+                          type: "item" as const,
+                          id: `yt_pl_${pl.browse_id}`,
+                          label: pl.title,
+                        })),
+                      });
+                    }
+                  }
+
+                  items.push({ type: "separator" });
+                  items.push({ type: "item", id: "remove", label: "Remove from Playlist" });
+
                   const sel = await showContextMenu(items, e.clientX, e.clientY);
                   if (!sel) return;
                   if (sel === "play") playIndex(index);
@@ -423,7 +505,7 @@ export default function PlaylistWindow({ skin, scale }: Props) {
                   else if (sel === "reveal") invoke("reveal_in_file_manager", { path: track.path });
                   else if (sel === "copy_url") {
                     const url = isYoutube
-                      ? `https://music.youtube.com/watch?v=${track.path.slice("youtube:".length)}`
+                      ? `https://music.youtube.com/watch?v=${ytVideoId}`
                       : isSpotify
                         ? `https://open.spotify.com/track/${track.path.slice("spotify:track:".length)}`
                         : track.path;
@@ -431,12 +513,40 @@ export default function PlaylistWindow({ skin, scale }: Props) {
                   }
                   else if (sel === "open_web") {
                     const url = isYoutube
-                      ? `https://music.youtube.com/watch?v=${track.path.slice("youtube:".length)}`
+                      ? `https://music.youtube.com/watch?v=${ytVideoId}`
                       : `https://open.spotify.com/track/${track.path.slice("spotify:track:".length)}`;
                     invoke("open_url", { url }).catch(console.error);
                   }
                   else if (sel === "download") downloadYoutubeTrack(track);
-                  else if (sel === "remove") invoke("playlist_remove_tracks", { ids: [track.id] });
+                  else if (sel === "yt_like" && ytVideoId) {
+                    try {
+                      await invoke("youtube_like_track", { videoId: ytVideoId });
+                      setYtLikedIds((prev) => new Set(prev).add(ytVideoId));
+                      showStatus(`Liked: ${track.display_name}`);
+                    } catch (err) { showStatus(`Like failed: ${err}`, 6000); }
+                  }
+                  else if (sel === "yt_unlike" && ytVideoId) {
+                    try {
+                      await invoke("youtube_unlike_track", { videoId: ytVideoId });
+                      setYtLikedIds((prev) => { const s2 = new Set(prev); s2.delete(ytVideoId); return s2; });
+                      showStatus(`Unliked: ${track.display_name}`);
+                      // Library liked-songs list may differ from local cache; resync.
+                      refreshYtLikedIds();
+                    } catch (err) { showStatus(`Unlike failed: ${err}`, 6000); }
+                  }
+                  else if (sel.startsWith("yt_pl_") && ytVideoId) {
+                    const playlistId = sel.slice("yt_pl_".length);
+                    try {
+                      await invoke("youtube_add_to_yt_playlist", { playlistId, videoId: ytVideoId });
+                      showStatus(`Added to YouTube playlist`);
+                    } catch (err) { showStatus(`Add to playlist failed: ${err}`, 6000); }
+                  }
+                  else if (sel === "remove") {
+                    try {
+                      const next = await invoke<PlaylistState>("playlist_remove_tracks", { ids: [track.id] });
+                      setPlaylist(next);
+                    } catch (err) { showStatus(`Remove failed: ${err}`, 6000); }
+                  }
                 }}
                 style={{
                   display: "flex",
@@ -542,14 +652,21 @@ export default function PlaylistWindow({ skin, scale }: Props) {
         </div>
 
         <div style={{ flex: 1, minWidth: 0, overflow: "hidden", ...bgTile("PL_BOTTOM_TILE", "repeat-x") }}>
-          <div style={{
-            display: "flex", alignItems: "center", justifyContent: "center",
-            height: "100%",
-            fontFamily: `"${ps.font}", Arial, sans-serif`,
-            fontSize: Math.round(9 * s),
-            color: ps.normal,
-          }}>
-            {playlist.total_duration ? formatTime(playlist.total_duration) : ""}
+          <div
+            title={statusMsg ?? undefined}
+            style={{
+              display: "flex", alignItems: "center", justifyContent: "center",
+              height: "100%",
+              padding: `0 ${6 * s}px`,
+              fontFamily: `"${ps.font}", Arial, sans-serif`,
+              fontSize: Math.round(9 * s),
+              color: ps.normal,
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            }}
+          >
+            {statusMsg ?? (playlist.total_duration ? formatTime(playlist.total_duration) : "")}
           </div>
         </div>
 

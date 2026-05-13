@@ -45,6 +45,87 @@ fn emit_session_expired() {
     }
 }
 
+/// Merge `Set-Cookie` headers from a YouTube response into an existing
+/// cookie string, returning `Some(updated)` if anything changed and `None`
+/// if the response had no rotation effect.
+///
+/// Only the leading `name=value` pair of each `Set-Cookie` header is used —
+/// path/domain/expires attributes are ignored because we send a single
+/// flat `Cookie` header to `music.youtube.com` and don't keep per-attribute
+/// state.  An empty value is treated as a deletion (browsers do this with
+/// `Max-Age=0`/expired cookies).
+fn merge_set_cookies<I: IntoIterator<Item = String>>(
+    existing: &str,
+    set_cookies: I,
+) -> Option<String> {
+    use std::collections::HashMap;
+
+    // Preserve insertion order so we don't reshuffle the cookie string
+    // unnecessarily on no-op merges.
+    let mut order: Vec<String> = Vec::new();
+    let mut map: HashMap<String, String> = HashMap::new();
+    for part in existing.split(';') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if let Some((k, v)) = part.split_once('=') {
+            let k = k.trim().to_string();
+            if !map.contains_key(&k) {
+                order.push(k.clone());
+            }
+            map.insert(k, v.trim().to_string());
+        }
+    }
+
+    let mut changed = false;
+    for sc in set_cookies {
+        let Some(first) = sc.split(';').next() else { continue };
+        let first = first.trim();
+        let Some((name, value)) = first.split_once('=') else { continue };
+        let name = name.trim();
+        let value = value.trim();
+        if name.is_empty() {
+            continue;
+        }
+
+        if value.is_empty() {
+            if map.remove(name).is_some() {
+                order.retain(|k| k != name);
+                changed = true;
+            }
+        } else if map.get(name).map(|v| v != value).unwrap_or(true) {
+            if !map.contains_key(name) {
+                order.push(name.to_string());
+            }
+            map.insert(name.to_string(), value.to_string());
+            changed = true;
+        }
+    }
+
+    if !changed {
+        return None;
+    }
+
+    Some(
+        order
+            .into_iter()
+            .filter_map(|k| map.get(&k).map(|v| format!("{k}={v}")))
+            .collect::<Vec<_>>()
+            .join("; "),
+    )
+}
+
+/// Persist a refreshed cookie string to `config.toml`.  Invoked after
+/// every successful InnerTube response that carried rotated tokens.
+fn persist_refreshed_cookie(merged: String) {
+    let mut cfg = crate::config::AppConfig::load();
+    cfg.youtube.cookie = Some(merged);
+    if let Err(e) = cfg.save() {
+        log::warn!("[youtube] failed to persist refreshed cookie: {e}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Direct InnerTube API client for library queries
 // ---------------------------------------------------------------------------
@@ -144,6 +225,23 @@ fn innertube_request(
         }
         Err(e) => return Err(format!("InnerTube {endpoint} request failed: {e}")),
     };
+
+    // Capture rotated session cookies (Set-Cookie response headers) before
+    // consuming the body.  YouTube rotates `__Secure-3PSIDTS` etc. on every
+    // authenticated request — by merging them back into our saved cookie we
+    // keep the session alive indefinitely without ever loading a WebView.
+    let set_cookies: Vec<String> = response
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok().map(|s| s.to_string()))
+        .collect();
+    if !set_cookies.is_empty() {
+        if let Some(merged) = merge_set_cookies(cookie, set_cookies) {
+            log::debug!("[youtube] refreshed rotated session cookies");
+            persist_refreshed_cookie(merged);
+        }
+    }
 
     let body_str = response
         .into_body()

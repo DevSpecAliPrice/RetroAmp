@@ -367,10 +367,12 @@ function SkinSection({
   const [renderCount, setRenderCount] = useState(PAGE_SIZE);
   const sentinelRef = useRef<HTMLDivElement>(null);
 
-  // Reset render count when skins list or collapse state changes.
+  // Reset render count when collapse state changes. Deliberately NOT keyed on
+  // `skins` — resetting on every list change snaps scroll to the top when an
+  // item is removed (e.g. deleting a skin from a long list).
   useEffect(() => {
     setRenderCount(PAGE_SIZE);
-  }, [skins, collapsed]);
+  }, [collapsed]);
 
   const visibleSkins = skins.slice(0, renderCount);
   const hasMore = renderCount < skins.length;

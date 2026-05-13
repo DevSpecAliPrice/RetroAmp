@@ -1027,6 +1027,14 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
               {shelf.items.map((item, j) => {
                 const rendered = parseHomeItem(item);
                 if (!rendered) return null;
+                const asYtTrack = (): YtTrack | null => rendered.videoId ? ({
+                  video_id: rendered.videoId,
+                  title: rendered.title,
+                  artists: [{ browse_id: null, name: rendered.subtitle }],
+                  duration_ms: rendered.durationMs,
+                  thumbnail_url: rendered.thumbnailUrl,
+                  explicit: false,
+                }) : null;
                 return (
                   <div key={j}
                     onClick={() => {
@@ -1034,9 +1042,17 @@ export default function YouTubeBrowserWindow({ skin, scale }: Props) {
                         if (rendered.type === "artist") pushDetail({ type: "artist", id: rendered.browseId, name: rendered.title });
                         else if (rendered.type === "album") pushDetail({ type: "album", id: rendered.browseId, name: rendered.title });
                         else pushDetail({ type: "playlist", id: rendered.browseId, name: rendered.title });
-                      } else if (rendered.videoId) {
-                        playTrack({ video_id: rendered.videoId, title: rendered.title, artists: [{ browse_id: null, name: rendered.subtitle }], duration_ms: rendered.durationMs, explicit: false } as YtTrack);
+                      } else {
+                        const t = asYtTrack();
+                        if (t) playTrack(t);
                       }
+                    }}
+                    onContextMenu={(e) => {
+                      const t = asYtTrack();
+                      if (!t) return;
+                      e.preventDefault();
+                      e.stopPropagation();
+                      openTrackMenu(t, e.clientX, e.clientY);
                     }}
                     style={{
                       minWidth: 48 * s, maxWidth: 60 * s, cursor: "pointer", flexShrink: 0,
