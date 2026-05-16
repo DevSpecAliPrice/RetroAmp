@@ -640,9 +640,77 @@ fn resolve_with_ytdlp(url: &str) -> Result<(String, Option<f64>, String), String
     Ok((stream_url, duration_secs, content_type))
 }
 
+/// Opens (or re-opens) the HTTP stream for the resolved URL. If `range_start`
+/// is non-zero, requests `Range: bytes=<range_start>-` to resume from that
+/// offset. Returns the body reader, the server-reported total content length
+/// (when known), and whether the server honored the Range request (206) — if
+/// not (200), the caller must skip `range_start` bytes off the front.
+struct OpenedStream {
+    reader: Box<dyn Read + Send>,
+    total_len: Option<u64>,
+    honored_range: bool,
+}
+
+fn open_stream(stream_url: &str, range_start: u64) -> Result<OpenedStream, String> {
+    let mut req = ureq::get(stream_url).header("User-Agent", "Mozilla/5.0");
+    if range_start > 0 {
+        req = req.header("Range", format!("bytes={range_start}-"));
+    }
+
+    let response = req
+        .config()
+        .timeout_connect(Some(Duration::from_secs(15)))
+        .timeout_recv_body(None)
+        .build()
+        .call()
+        .map_err(|e| format!("connect: {e}"))?;
+
+    let status = response.status();
+    let honored_range = range_start == 0 || status.as_u16() == 206;
+
+    // Total expected length:
+    //   - 206 Partial Content: from Content-Range "bytes start-end/total"
+    //   - 200 OK: from Content-Length
+    let headers = response.headers();
+    let total_len = if status.as_u16() == 206 {
+        headers
+            .get("content-range")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.rsplit('/').next())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+    } else {
+        headers
+            .get("content-length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+    };
+
+    if range_start > 0 && !honored_range {
+        log::warn!(
+            "[youtube] server ignored Range (status {}), will skip {} bytes",
+            status, range_start
+        );
+    }
+
+    let reader = response.into_body().into_reader();
+    Ok(OpenedStream {
+        reader: Box::new(reader),
+        total_len,
+        honored_range,
+    })
+}
+
+/// Maximum consecutive read-error retries before giving up.
+const MAX_DOWNLOAD_RETRIES: u32 = 8;
+
 /// Download thread: resolves the stream URL, then downloads bytes into both
 /// the in-memory SharedBuf (for streaming playback) and a temp file on disk
 /// (for seeking once download completes).
+///
+/// Transparently resumes on mid-stream disconnects via HTTP Range requests —
+/// the googlevideo CDN routinely drops long-running streaming connections, and
+/// without resume the in-memory buffer would end short and the engine would
+/// auto-advance well before the actual end of the track.
 fn download_thread_main(
     url: String,
     buf: Arc<Mutex<SharedBuf>>,
@@ -651,7 +719,7 @@ fn download_thread_main(
     temp_path: PathBuf,
     temp_ready: Arc<AtomicBool>,
 ) {
-    let (stream_url, duration_secs, content_type) = match resolve_with_ytdlp(&url) {
+    let (mut stream_url, duration_secs, content_type) = match resolve_with_ytdlp(&url) {
         Ok(result) => result,
         Err(e) => {
             let _ = meta_tx.send(Err(e));
@@ -660,15 +728,8 @@ fn download_thread_main(
         }
     };
 
-    let response = match ureq::get(&stream_url)
-        .header("User-Agent", "Mozilla/5.0")
-        .config()
-        .timeout_connect(Some(Duration::from_secs(15)))
-        .timeout_recv_body(None)
-        .build()
-        .call()
-    {
-        Ok(resp) => resp,
+    let mut opened = match open_stream(&stream_url, 0) {
+        Ok(s) => s,
         Err(e) => {
             log::error!("[youtube] failed to connect: {e}");
             let _ = meta_tx.send(Err(format!("failed to connect: {e}")));
@@ -694,7 +755,13 @@ fn download_thread_main(
         }
     };
 
-    let mut reader = response.into_body().into_reader();
+    let mut total_len = opened.total_len;
+    let mut total_read: u64 = 0;
+    // When the server ignores a Range request (returns 200 instead of 206),
+    // it sends the full file from offset 0 — we must discard the first
+    // `skip_remaining` bytes of the new stream to avoid corrupting the buffer.
+    let mut skip_remaining: u64 = if opened.honored_range { 0 } else { total_read };
+    let mut retry_count: u32 = 0;
     let mut tmp = [0u8; 8192];
 
     loop {
@@ -703,43 +770,175 @@ fn download_thread_main(
             return;
         }
 
-        match reader.read(&mut tmp) {
+        match opened.reader.read(&mut tmp) {
             Ok(0) => {
-                buf.lock().unwrap().finished = true;
-
-                // Flush and close temp file, then signal ready.
-                if let Some(mut f) = temp_file.take() {
-                    if f.flush().is_ok() {
-                        drop(f);
-                        let size = std::fs::metadata(&temp_path)
-                            .map(|m| m.len())
-                            .unwrap_or(0);
-                        log::info!(
-                            "[youtube] download complete: {} bytes ({:.1} MB) — seeking enabled",
-                            size, size as f64 / 1_048_576.0,
+                // Clean EOF. If we know the expected length and fell short,
+                // try one more resume — some CDNs close early under throttle.
+                if let Some(expected) = total_len {
+                    if total_read < expected && retry_count < MAX_DOWNLOAD_RETRIES {
+                        retry_count += 1;
+                        log::warn!(
+                            "[youtube] stream ended early ({}/{} bytes), resuming (attempt {}/{})",
+                            total_read, expected, retry_count, MAX_DOWNLOAD_RETRIES
                         );
-                        temp_ready.store(true, Ordering::Release);
+                        if let Some(new_opened) = reconnect(
+                            &mut stream_url,
+                            &url,
+                            total_read,
+                            retry_count,
+                            &stop,
+                        ) {
+                            skip_remaining = if new_opened.honored_range { 0 } else { total_read };
+                            opened = new_opened;
+                            if total_len.is_none() {
+                                total_len = opened.total_len;
+                            }
+                            continue;
+                        }
                     }
                 }
+
+                finalize_download(buf, temp_file, &temp_path, &temp_ready);
                 return;
             }
             Ok(n) => {
-                buf.lock().unwrap().data.extend_from_slice(&tmp[..n]);
+                let chunk = &tmp[..n];
 
-                // Also write to temp file (best-effort — don't fail playback).
-                if let Some(ref mut f) = temp_file {
-                    if f.write_all(&tmp[..n]).is_err() {
-                        log::warn!("[youtube] temp file write failed, disabling seek");
-                        temp_file = None;
-                        let _ = std::fs::remove_file(&temp_path);
+                // Discard overlap if the server didn't honor our Range.
+                let to_consume = if skip_remaining > 0 {
+                    let skip = (skip_remaining as usize).min(n);
+                    skip_remaining -= skip as u64;
+                    &chunk[skip..]
+                } else {
+                    chunk
+                };
+
+                if !to_consume.is_empty() {
+                    buf.lock().unwrap().data.extend_from_slice(to_consume);
+
+                    if let Some(ref mut f) = temp_file {
+                        if f.write_all(to_consume).is_err() {
+                            log::warn!("[youtube] temp file write failed, disabling seek");
+                            temp_file = None;
+                            let _ = std::fs::remove_file(&temp_path);
+                        }
                     }
+
+                    total_read += to_consume.len() as u64;
                 }
+                retry_count = 0;
             }
             Err(e) => {
-                log::error!("[youtube] stream read error: {e}");
-                buf.lock().unwrap().finished = true;
-                return;
+                log::error!("[youtube] stream read error at {} bytes: {}", total_read, e);
+
+                // If we already have everything, treat as success.
+                if let Some(expected) = total_len {
+                    if total_read >= expected {
+                        log::info!("[youtube] error after full download received — completing");
+                        finalize_download(buf, temp_file, &temp_path, &temp_ready);
+                        return;
+                    }
+                }
+
+                if retry_count >= MAX_DOWNLOAD_RETRIES {
+                    log::error!(
+                        "[youtube] giving up after {} resume attempts",
+                        MAX_DOWNLOAD_RETRIES
+                    );
+                    buf.lock().unwrap().finished = true;
+                    return;
+                }
+
+                retry_count += 1;
+                log::warn!(
+                    "[youtube] resuming download from byte {} (attempt {}/{})",
+                    total_read, retry_count, MAX_DOWNLOAD_RETRIES
+                );
+
+                if let Some(new_opened) = reconnect(
+                    &mut stream_url,
+                    &url,
+                    total_read,
+                    retry_count,
+                    &stop,
+                ) {
+                    skip_remaining = if new_opened.honored_range { 0 } else { total_read };
+                    opened = new_opened;
+                    if total_len.is_none() {
+                        total_len = opened.total_len;
+                    }
+                } else {
+                    log::error!("[youtube] resume failed, giving up");
+                    buf.lock().unwrap().finished = true;
+                    return;
+                }
             }
+        }
+    }
+}
+
+/// Attempt to reconnect to the stream starting at `range_start`. Performs an
+/// exponential backoff before each try, and if Range resume keeps failing
+/// (e.g. the URL expired) falls back to re-resolving via yt-dlp once.
+fn reconnect(
+    stream_url: &mut String,
+    page_url: &str,
+    range_start: u64,
+    retry_count: u32,
+    stop: &AtomicBool,
+) -> Option<OpenedStream> {
+    let backoff_ms = (250u64 * (1u64 << retry_count.min(4))).min(4000);
+    for _ in 0..(backoff_ms / 50) {
+        if stop.load(Ordering::Relaxed) {
+            return None;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    match open_stream(stream_url, range_start) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            log::warn!("[youtube] resume connect failed: {e} — re-resolving via yt-dlp");
+            match resolve_with_ytdlp(page_url) {
+                Ok((new_url, _, _)) => {
+                    *stream_url = new_url;
+                    match open_stream(stream_url, range_start) {
+                        Ok(s) => Some(s),
+                        Err(e2) => {
+                            log::error!("[youtube] resume after re-resolve failed: {e2}");
+                            None
+                        }
+                    }
+                }
+                Err(e2) => {
+                    log::error!("[youtube] re-resolve failed: {e2}");
+                    None
+                }
+            }
+        }
+    }
+}
+
+/// Mark the buffer finished, flush the temp file, and signal seeking is
+/// available.
+fn finalize_download(
+    buf: Arc<Mutex<SharedBuf>>,
+    temp_file: Option<std::fs::File>,
+    temp_path: &PathBuf,
+    temp_ready: &Arc<AtomicBool>,
+) {
+    buf.lock().unwrap().finished = true;
+
+    if let Some(mut f) = temp_file {
+        if f.flush().is_ok() {
+            drop(f);
+            let size = std::fs::metadata(temp_path).map(|m| m.len()).unwrap_or(0);
+            log::info!(
+                "[youtube] download complete: {} bytes ({:.1} MB) — seeking enabled",
+                size,
+                size as f64 / 1_048_576.0,
+            );
+            temp_ready.store(true, Ordering::Release);
         }
     }
 }
