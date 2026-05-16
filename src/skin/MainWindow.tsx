@@ -593,9 +593,13 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
         const fraction = Math.max(0, Math.min(1, (x - REGIONS.volume.x) / REGIONS.volume.w));
         invoke("set_volume", { volume: fraction });
       } else if (type === "balance") {
-        // Balance: 0.0 at left edge → 1.0 at right edge, map to -1.0..1.0
-        const fraction = Math.max(0, Math.min(1, (x - REGIONS.balance.x) / REGIONS.balance.w));
-        invoke("set_balance", { balance: fraction * 2 - 1 });
+        // Balance: 0.0 at left edge → 1.0 at right edge, map to -1.0..1.0.
+        // Classic Winamp snaps to center within a few pixels of the midpoint.
+        const center = REGIONS.balance.x + REGIONS.balance.w / 2;
+        const balance = Math.abs(x - center) <= 2
+          ? 0
+          : Math.max(-1, Math.min(1, ((x - REGIONS.balance.x) / REGIONS.balance.w) * 2 - 1));
+        invoke("set_balance", { balance });
       } else if (type === "posbar") {
         if (status.duration && status.duration > 0) {
           const fraction = Math.max(0, Math.min(1, (x - REGIONS.posbar.x) / REGIONS.posbar.w));
