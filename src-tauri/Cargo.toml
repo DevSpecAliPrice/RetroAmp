@@ -75,6 +75,10 @@ ytmapi-rs = { version = "0.3", features = ["reqwest"] }
 reqwest = { version = "0.13", default-features = false, features = ["cookies"] }
 chrono = { version = "0.4", default-features = false, features = ["now"] }
 audiopus = "0.2"
+# Needed for Windows: lib.rs queries the main window's HWND via the
+# HasWindowHandle trait to hand it to souvlaki. Tauri uses raw-window-handle
+# internally, but transitive deps aren't importable — declare it directly.
+raw-window-handle = "0.6"
 
 # HE-AAC (SBR + Parametric Stereo) decoder. Symphonia's AAC decoder only
 # implements AAC-LC, so HE-AACv1/v2 streams (e.g. Radio Paradise) decode

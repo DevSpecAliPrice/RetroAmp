@@ -23,10 +23,13 @@ jobs:
           # compatible only, so an AppImage built on 24.04 won't run on 22.04.
           - platform: ubuntu-22.04
             args: ""
-          # macOS-latest is Apple Silicon. We build a universal binary so a
-          # single .dmg covers Intel and ARM Macs.
+          # macOS-latest is Apple Silicon — build natively for arm64 only.
+          # Universal builds break audiopus_sys (its autotools build.rs can't
+          # cross-compile libopus, so the x86_64 half of a universal build
+          # contains arm64 object files and the linker rejects them).
+          # Intel Macs stopped shipping in 2023; arm64-only is acceptable.
           - platform: macos-latest
-            args: "--target universal-apple-darwin"
+            args: ""
           - platform: windows-latest
             args: ""
 
@@ -73,8 +76,6 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - name: Cache Rust build
         uses: swatinem/rust-cache@v2

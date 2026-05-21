@@ -5629,6 +5629,7 @@ dependencies = [
  "log",
  "percent-encoding",
  "rand 0.10.0",
+ "raw-window-handle",
  "reqwest 0.13.2",
  "ringbuf",
  "rubato",
