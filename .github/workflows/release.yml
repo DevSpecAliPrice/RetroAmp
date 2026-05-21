@@ -46,6 +46,7 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev libxdo-dev \
             libasound2-dev libdbus-1-dev libopus-dev \
+            libunwind-dev \
             clang libclang-dev cmake \
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             libgstreamer-plugins-bad1.0-dev \
@@ -55,8 +56,6 @@ jobs:
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 10
 
       - name: Install Node
         uses: actions/setup-node@v4
