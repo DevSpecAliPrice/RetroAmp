@@ -44,7 +44,7 @@ interface YtLibPlaylist {
 }
 
 interface YtAuthStatus {
-  is_authenticated: boolean;
+  authenticated: boolean;
 }
 
 interface Props {
@@ -201,8 +201,8 @@ export default function PlaylistWindow({ skin, scale }: Props) {
     (async () => {
       try {
         const status = await invoke<YtAuthStatus>("youtube_auth_status");
-        setYtAuth(status.is_authenticated);
-        if (!status.is_authenticated) return;
+        setYtAuth(status.authenticated);
+        if (!status.authenticated) return;
         const [pls, liked] = await Promise.all([
           invoke<YtLibPlaylist[]>("youtube_get_library_playlists"),
           invoke<{ video_id: string }[]>("youtube_get_library_songs"),

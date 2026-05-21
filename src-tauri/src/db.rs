@@ -204,6 +204,15 @@ impl Database {
                 CREATE TABLE IF NOT EXISTS playlist_tracks (
                     position INTEGER PRIMARY KEY,
                     path     TEXT NOT NULL
+                );
+
+                -- Records skins that have been copied from the bundled seed
+                -- library into the user's skins directory. Once a row exists,
+                -- the seeder never re-copies that skin — so user deletions
+                -- stick and app updates don't resurrect removed seeds.
+                CREATE TABLE IF NOT EXISTS seeded_skins (
+                    skin_id   TEXT PRIMARY KEY,
+                    seeded_at INTEGER NOT NULL
                 );",
             )
             .map_err(|e| format!("failed to initialize database schema: {e}"))?;
@@ -375,6 +384,35 @@ impl Database {
             .map_err(|e| format!("query error: {e}"))?;
 
         Ok(new_val)
+    }
+
+    /// Has this bundled seed skin already been copied into the user's
+    /// skins directory? Returns true even if the user later deleted the file —
+    /// that's the point, so we don't keep restoring removed seeds.
+    pub fn is_skin_seeded(&self, skin_id: &str) -> Result<bool, String> {
+        self.conn
+            .query_row(
+                "SELECT 1 FROM seeded_skins WHERE skin_id = ?1",
+                params![skin_id],
+                |_| Ok(true),
+            )
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(false),
+                other => Err(format!("seeded lookup failed: {other}")),
+            })
+    }
+
+    /// Record that a bundled seed skin has been copied into the user's
+    /// skins directory. Subsequent calls to `is_skin_seeded` will return true.
+    pub fn mark_skin_seeded(&self, skin_id: &str) -> Result<(), String> {
+        let now = unix_now();
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO seeded_skins (skin_id, seeded_at) VALUES (?1, ?2)",
+                params![skin_id, now],
+            )
+            .map_err(|e| format!("failed to mark skin seeded: {e}"))?;
+        Ok(())
     }
 
     /// Record that a skin was just used — set last_used and bump use_count.

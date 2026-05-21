@@ -19,6 +19,9 @@
     "active": true,
     "targets": "all",
     "createUpdaterArtifacts": true,
+    "resources": {
+      "../skins/*.wsz": "skins/"
+    },
     "publisher": "RetroAmp",
     "category": "Music",
     "shortDescription": "Cross-platform desktop audio player inspired by Winamp 2.x",

@@ -51,6 +51,19 @@ Commit the lockfile change.
 
 ## Cutting a release
 
+0. (Optional) If you've favourited or unfavourited skins in the running app
+   since the last release and want those changes to ship as the seed
+   library, run:
+
+   ```sh
+   ./scripts/rebuild_skin_seeds.sh
+   git add skins/
+   ```
+
+   The seed library is what every new install receives on first launch
+   (see `src-tauri/src/skin/seed.rs`). Skipping this step is fine — the
+   previously bundled set ships unchanged.
+
 1. Bump the version in **all three** of these files (must match):
    - `package.json` — `"version"`
    - `src-tauri/Cargo.toml` — `[package] version`

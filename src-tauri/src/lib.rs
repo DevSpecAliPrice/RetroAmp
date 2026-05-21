@@ -212,6 +212,10 @@ pub fn run() {
         .manage(Arc::clone(&database))
         .manage(Arc::clone(&recorder_state))
         .setup(move |app| {
+            // Copy any never-seen bundled seed skins into the user's skins
+            // directory. Tracked per-skin in the DB so deletions stick.
+            skin::seed::ensure_seed_skins(app.handle(), &database);
+
             // Spotify player — created inside setup() because Session::new()
             // requires a Tokio runtime to be active.
             let spotify_cache_dir = dirs::config_dir()

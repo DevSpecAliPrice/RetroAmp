@@ -16,7 +16,10 @@ import TagEditorWindow from "./tageditor/TagEditorWindow";
 import VisualizerWindow from "./visualizer/VisualizerWindow";
 import { checkForUpdates } from "./updater";
 
-const DEFAULT_SKIN_NAME = "RetroAmp Default";
+// Preferred first-launch skin (a bundled seed). Falls back to the always-
+// embedded RetroAmp Default if it's not available, then the first skin found.
+const PREFERRED_SKIN_NAME = "Black_SlanXP2_Update";
+const FALLBACK_SKIN_NAME = "RetroAmp Default";
 
 function detectPanel(): string {
   const params = new URLSearchParams(window.location.search);
@@ -83,7 +86,9 @@ function App() {
         } else {
           // First launch — pick a default from available skins.
           const skins = await invoke<{ name: string; path: string }[]>("get_skins");
-          const preferred = skins.find((s) => s.name === DEFAULT_SKIN_NAME);
+          const preferred =
+            skins.find((s) => s.name === PREFERRED_SKIN_NAME) ??
+            skins.find((s) => s.name === FALLBACK_SKIN_NAME);
           const fallback = preferred ?? skins[0];
           if (fallback) {
             await invoke("set_active_skin", { path: fallback.path });

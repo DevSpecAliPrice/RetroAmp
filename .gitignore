@@ -20,8 +20,5 @@ Thumbs.db
 .env
 .env.local
 
-# Skins (user data — stored in platform config dir)
-skins/
-
 # Logs
 *.log
