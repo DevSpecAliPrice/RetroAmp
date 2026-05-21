@@ -20,7 +20,9 @@
     "targets": "all",
     "createUpdaterArtifacts": true,
     "resources": {
-      "../skins/*.wsz": "skins/"
+      "../skins/*.wsz": "skins/",
+      "../LICENSE": "LICENSE",
+      "../THIRD_PARTY_LICENSES.md": "THIRD_PARTY_LICENSES.md"
     },
     "publisher": "RetroAmp",
     "category": "Music",
