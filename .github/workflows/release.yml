@@ -54,6 +54,14 @@ jobs:
             gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
             gstreamer1.0-libav
 
+      - name: Install macOS build dependencies
+        if: matrix.platform == 'macos-latest'
+        # audiopus_sys falls back to building libopus from source via
+        # autotools when pkg-config can't find a system libopus, which
+        # is the case on GitHub's macOS runners. Install the autotools
+        # chain so autogen.sh / configure / make can run.
+        run: brew install autoconf automake libtool
+
       - name: Install pnpm
         uses: pnpm/action-setup@v4
 
