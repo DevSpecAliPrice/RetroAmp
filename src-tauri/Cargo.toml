@@ -1,6 +1,6 @@
 [package]
 name = "retroamp"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Cross-platform desktop audio player inspired by Winamp 2.x"
 license = "MIT"

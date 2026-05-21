@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import butterchurnRaw from "butterchurn";
 import butterchurnPresetsRaw from "butterchurn-presets";
@@ -36,9 +37,21 @@ export default function VisualizerWindow({ skin, scale }: Props) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const visualizerRef = useRef<any>(null);
   const rafRef = useRef<number>(0);
-  const fetchRafRef = useRef<number>(0);
+  const fftTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const cycleTimerRef = useRef<ReturnType<typeof setInterval>>(0 as unknown as ReturnType<typeof setInterval>);
   const initDoneRef = useRef(false);
+  // Mirror of initDoneRef as state so the render-loop controller effect
+  // re-runs when init transitions from in-progress to complete (a ref
+  // change alone can't trigger an effect).
+  const [initDone, setInitDone] = useState(false);
+
+  // The animation loop runs only when audio is playing AND the window is
+  // user-visible. Both signals are tracked as refs so the render-loop
+  // controller doesn't tear down/re-create on every state change — the
+  // controller just checks the current values when deciding to start.
+  const isPlayingRef = useRef(false);
+  const isVisibleRef = useRef(true);
+  const [shouldAnimate, setShouldAnimate] = useState(false);
 
   const [presetName, setPresetName] = useState("");
   const [showPresetName, setShowPresetName] = useState(false);
@@ -219,28 +232,6 @@ export default function VisualizerWindow({ skin, scale }: Props) {
         invoke("set_last_visualizer_preset", { preset: names[startIndex] }).catch(() => {});
       }
 
-      // Render loop — always runs at display refresh rate
-      const renderLoop = () => {
-        if (visualizerRef.current) {
-          visualizerRef.current.render();
-        }
-        rafRef.current = requestAnimationFrame(renderLoop);
-      };
-      rafRef.current = requestAnimationFrame(renderLoop);
-
-      // Data fetch loop — async, decoupled from render
-      const fetchLoop = () => {
-        invoke<FftData>("get_fft_data")
-          .then((data) => {
-            if (adapterRef.current) {
-              adapterRef.current.update(data);
-            }
-          })
-          .catch(() => {});
-        fetchRafRef.current = requestAnimationFrame(fetchLoop);
-      };
-      fetchRafRef.current = requestAnimationFrame(fetchLoop);
-
       // Auto-cycle presets — gated by user settings.
       const tick = () => {
         const cfg = vizSettingsRef.current;
@@ -253,11 +244,19 @@ export default function VisualizerWindow({ skin, scale }: Props) {
       };
       cycleTimerRef.current = setInterval(tick, vizSettingsRef.current.cycle_secs * 1000);
 
+      // Mark init complete — this re-triggers the render-loop controller
+      // effect which may have early-returned earlier because init wasn't
+      // ready yet. If the user was already playing music when the window
+      // opened, the controller will start the rAF + FFT loops here.
+      setInitDone(true);
+      setShouldAnimate(isPlayingRef.current && isVisibleRef.current);
+
       console.log("[visualizer] init complete");
     } catch (e) {
       console.error("[visualizer] init failed:", e);
       setError(`Visualizer init failed: ${e}`);
       initDoneRef.current = false; // allow retry
+      setInitDone(false);
     }
   }, [loadPresetByIndex]);
 
@@ -296,7 +295,7 @@ export default function VisualizerWindow({ skin, scale }: Props) {
     return () => {
       observer.disconnect();
       cancelAnimationFrame(rafRef.current);
-      cancelAnimationFrame(fetchRafRef.current);
+      if (fftTimerRef.current) clearInterval(fftTimerRef.current);
       clearInterval(cycleTimerRef.current);
       clearTimeout(fadeTimerRef.current);
       if (adapterRef.current) {
@@ -307,6 +306,95 @@ export default function VisualizerWindow({ skin, scale }: Props) {
       initDoneRef.current = false;
     };
   }, [initVisualizer]);
+
+  // Track playback + window visibility so the render loop only runs when
+  // there's actually motion to show AND a human looking at it.
+  //
+  // Without this gate, the rAF loop runs at display refresh rate
+  // unconditionally — burning GPU + CPU on Butterchurn shader work even
+  // when the window is hidden or audio is paused.
+  useEffect(() => {
+    let canceled = false;
+    const cleanups: Array<() => void> = [];
+
+    const updateShouldAnimate = () => {
+      const next = isPlayingRef.current && isVisibleRef.current;
+      setShouldAnimate((prev) => (prev === next ? prev : next));
+    };
+
+    // Page Visibility API — Tauri forwards window hide/minimise to the
+    // WebView's visibilitychange event on all supported platforms. This
+    // is the right primitive for "is the user actually looking at this".
+    const onVis = () => {
+      isVisibleRef.current = document.visibilityState === "visible";
+      updateShouldAnimate();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    cleanups.push(() => document.removeEventListener("visibilitychange", onVis));
+    isVisibleRef.current = document.visibilityState === "visible";
+    updateShouldAnimate();
+
+    (async () => {
+      try {
+        const status = await invoke<{ state: "Stopped" | "Playing" | "Paused" }>("get_status");
+        if (!canceled) {
+          isPlayingRef.current = status.state === "Playing";
+          updateShouldAnimate();
+        }
+      } catch (e) {
+        console.warn("[visualizer] initial status fetch failed:", e);
+      }
+
+      const sub = await listen<"Stopped" | "Playing" | "Paused">("player-state-changed", (e) => {
+        isPlayingRef.current = e.payload === "Playing";
+        updateShouldAnimate();
+      });
+      if (canceled) {
+        sub();
+      } else {
+        cleanups.push(sub);
+      }
+    })();
+
+    return () => {
+      canceled = true;
+      cleanups.forEach((fn) => fn());
+    };
+  }, []);
+
+  // Render-loop controller. Starts the rAF + FFT polling loops when
+  // `shouldAnimate` flips on, and tears them down cleanly when it flips
+  // off. Cancellation is via the rAF id + the interval id stored in refs.
+  useEffect(() => {
+    if (!shouldAnimate || !initDone) return;
+
+    const renderLoop = () => {
+      const viz = visualizerRef.current;
+      if (viz) viz.render();
+      rafRef.current = requestAnimationFrame(renderLoop);
+    };
+    rafRef.current = requestAnimationFrame(renderLoop);
+
+    // Throttle FFT fetch to ~30 Hz — Butterchurn doesn't need fresh data
+    // on every render frame, and pulling it over IPC at display refresh
+    // rate (60–144 Hz) is enormous overhead for visually-imperceptible
+    // improvement.
+    const fetchTick = () => {
+      invoke<FftData>("get_fft_data")
+        .then((data) => adapterRef.current?.update(data))
+        .catch(() => {});
+    };
+    fetchTick();
+    fftTimerRef.current = setInterval(fetchTick, 33);
+
+    return () => {
+      cancelAnimationFrame(rafRef.current);
+      if (fftTimerRef.current) {
+        clearInterval(fftTimerRef.current);
+        fftTimerRef.current = null;
+      }
+    };
+  }, [shouldAnimate, initDone]);
 
   // Keyboard shortcuts
   useEffect(() => {

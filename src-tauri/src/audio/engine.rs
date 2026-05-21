@@ -9,7 +9,7 @@
 
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -58,10 +58,31 @@ pub struct EngineStatus {
     pub is_stream: bool,
 }
 
-/// Events emitted by the audio engine.
+/// Events emitted by the audio engine to the main thread.
+///
+/// The audio thread is the single source of truth for playback state; instead
+/// of letting the frontend poll `get_status` at high frequency, the engine
+/// pushes events on every state transition. A separate dispatcher loop on the
+/// main thread forwards them to the frontend via Tauri events.
 #[derive(Debug, Clone)]
 pub enum EngineEvent {
-    /// The current source finished playing (reached end of data).
+    /// Playback state transitioned (Stopped/Playing/Paused). Fired after
+    /// micro-fade resolves so the UI matches what's audible.
+    StateChanged(PlaybackState),
+    /// Track metadata changed — either a new track activated or a streaming
+    /// source reported new ICY metadata. Carries the full status snapshot so
+    /// the frontend doesn't need a follow-up `get_status` call.
+    TrackChanged(EngineStatus),
+    /// Periodic position update while playing (~4 Hz). Frontend interpolates
+    /// between ticks using `performance.now()` for smooth time display.
+    PositionTick { position: Option<f64>, duration: Option<f64> },
+    /// Volume changed in response to `SetVolume`.
+    VolumeChanged(f32),
+    /// Balance changed in response to `SetBalance`.
+    BalanceChanged(f32),
+    /// The current source finished playing (reached end of data). Consumed by
+    /// the auto-advance loop; not forwarded to the frontend (a `StateChanged`
+    /// or `TrackChanged` follows it once the next track activates).
     TrackFinished,
 }
 
@@ -190,14 +211,75 @@ impl AudioEngine {
         let _ = self.command_tx.send(EngineCommand::Shutdown);
     }
 
+    /// Block until the next engine event is available.
+    /// Used by the dispatcher loop on a dedicated thread.
+    pub fn recv_event(&self) -> Option<EngineEvent> {
+        self.event_rx.lock().ok()?.recv().ok()
+    }
+
     /// Try to receive a pending engine event (non-blocking).
-    /// Used by the auto-advance listener.
+    /// Retained for callers that need to drain without blocking; the main
+    /// dispatcher should prefer `recv_event` to avoid busy-waiting.
     pub fn try_recv_event(&self) -> Option<EngineEvent> {
         if let Ok(rx) = self.event_rx.lock() {
             rx.try_recv().ok()
         } else {
             None
         }
+    }
+}
+
+/// A compact identity for a track's metadata, used to detect changes
+/// without sending the full payload (including cover art bytes) every time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MetadataSignature {
+    title: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+    duration_ms: Option<u64>,
+}
+
+impl MetadataSignature {
+    fn from_status(status: &EngineStatus) -> Option<Self> {
+        let meta = status.metadata.as_ref()?;
+        Some(Self {
+            title: meta.title.clone(),
+            artist: meta.artist.clone(),
+            album: meta.album.clone(),
+            duration_ms: meta.duration.map(|d| d.as_millis() as u64),
+        })
+    }
+}
+
+/// Snapshot the current status and emit state/track events if anything
+/// observable changed since the last emit. Centralises the
+/// "update + maybe-notify" pattern so individual command handlers don't
+/// each have to remember to emit.
+fn update_and_notify(
+    status: &Arc<Mutex<EngineStatus>>,
+    source: &Option<Box<dyn AudioSource>>,
+    state: PlaybackState,
+    volume: f32,
+    balance: f32,
+    event_tx: &mpsc::Sender<EngineEvent>,
+    last_state: &mut PlaybackState,
+    last_meta: &mut Option<MetadataSignature>,
+) {
+    update_status(status, source, state, volume, balance);
+
+    if state != *last_state {
+        *last_state = state;
+        let _ = event_tx.send(EngineEvent::StateChanged(state));
+    }
+
+    let snapshot = match status.lock() {
+        Ok(s) => s.clone(),
+        Err(_) => return,
+    };
+    let sig = MetadataSignature::from_status(&snapshot);
+    if sig != *last_meta {
+        *last_meta = sig;
+        let _ = event_tx.send(EngineEvent::TrackChanged(snapshot));
     }
 }
 
@@ -254,6 +336,18 @@ fn audio_thread(
     let mut pending_source: Option<Box<dyn AudioSource>> = None;
     let mut activate_pending = false;
 
+    // Event-emission bookkeeping. The audio thread runs the inner loop at
+    // hundreds of Hz, so we throttle/dedupe events:
+    //  - StateChanged: only when playback_state actually transitions.
+    //  - TrackChanged: only when the metadata signature differs from the
+    //    last emitted value (catches both new tracks and ICY mid-stream
+    //    updates without spamming).
+    //  - PositionTick: emitted at ~4 Hz while playing.
+    let mut last_emitted_state = playback_state;
+    let mut last_meta_sig: Option<MetadataSignature> = None;
+    let mut last_position_tick = Instant::now();
+    const POSITION_TICK_INTERVAL: Duration = Duration::from_millis(250);
+
     loop {
         while let Ok(cmd) = command_rx.try_recv() {
             match cmd {
@@ -280,7 +374,8 @@ fn audio_thread(
                         } else {
                             playback_state = PlaybackState::Paused;
                             fade_action = FadeAction::None;
-                            update_status(&status, &source, playback_state, volume, balance);
+                            update_and_notify(&status, &source, playback_state, volume, balance,
+                                &event_tx, &mut last_emitted_state, &mut last_meta_sig);
                         }
                     }
                 }
@@ -290,7 +385,8 @@ fn audio_thread(
                         fade_gain = 0.0;
                         fade_target = 1.0;
                         fade_step = 1.0 / (current_rate as f32 * FADE_SECS);
-                        update_status(&status, &source, playback_state, volume, balance);
+                        update_and_notify(&status, &source, playback_state, volume, balance,
+                            &event_tx, &mut last_emitted_state, &mut last_meta_sig);
                     }
                 }
                 EngineCommand::Stop => {
@@ -309,7 +405,8 @@ fn audio_thread(
                                 fade_gain = 1.0;
                                 fade_target = 1.0;
                                 fade_action = FadeAction::None;
-                                update_status(&status, &source, playback_state, volume, balance);
+                                update_and_notify(&status, &source, playback_state, volume, balance,
+                                    &event_tx, &mut last_emitted_state, &mut last_meta_sig);
                             }
                         }
                         PlaybackState::Paused => {
@@ -319,7 +416,8 @@ fn audio_thread(
                             fade_gain = 1.0;
                             fade_target = 1.0;
                             fade_action = FadeAction::None;
-                            update_status(&status, &source, playback_state, volume, balance);
+                            update_and_notify(&status, &source, playback_state, volume, balance,
+                                &event_tx, &mut last_emitted_state, &mut last_meta_sig);
                         }
                         _ => {}
                     }
@@ -328,6 +426,18 @@ fn audio_thread(
                     if let Some(src) = source.as_mut() {
                         if let Err(e) = src.seek(pos) {
                             log::warn!("seek failed: {e}");
+                        } else {
+                            // Refresh status + push an immediate position tick
+                            // so the UI snaps to the new spot without waiting
+                            // for the next periodic tick.
+                            update_status(&status, &source, playback_state, volume, balance);
+                            if let Ok(s) = status.lock() {
+                                let _ = event_tx.send(EngineEvent::PositionTick {
+                                    position: s.position,
+                                    duration: s.duration,
+                                });
+                            }
+                            last_position_tick = Instant::now();
                         }
                     }
                 }
@@ -337,10 +447,12 @@ fn audio_thread(
                 EngineCommand::SetVolume(v) => {
                     volume = v.clamp(0.0, 1.0);
                     update_status(&status, &source, playback_state, volume, balance);
+                    let _ = event_tx.send(EngineEvent::VolumeChanged(volume));
                 }
                 EngineCommand::SetBalance(b) => {
                     balance = b.clamp(-1.0, 1.0);
                     update_status(&status, &source, playback_state, volume, balance);
+                    let _ = event_tx.send(EngineEvent::BalanceChanged(balance));
                 }
                 EngineCommand::Shutdown => {
                     return;
@@ -443,7 +555,9 @@ fn audio_thread(
                 fade_gain = 0.0;
                 fade_target = 1.0;
                 fade_step = 1.0 / (current_rate as f32 * FADE_SECS);
-                update_status(&status, &source, playback_state, volume, balance);
+                update_and_notify(&status, &source, playback_state, volume, balance,
+                    &event_tx, &mut last_emitted_state, &mut last_meta_sig);
+                last_position_tick = Instant::now();
             }
         }
 
@@ -457,11 +571,16 @@ fn audio_thread(
             Some(src) => match src.next_buffer() {
                 Ok(Some(buf)) => buf,
                 Ok(None) => {
-                    // Source exhausted — notify for auto-advance.
+                    // Source exhausted — notify for auto-advance. Emit
+                    // StateChanged(Stopped) too so that if there's no next
+                    // track the UI doesn't get stuck in "Playing". When a
+                    // next track is available, the Play command that
+                    // follows will quickly emit StateChanged(Playing).
                     playback_state = PlaybackState::Stopped;
                     source = None;
                     resampler = None;
-                    update_status(&status, &source, playback_state, volume, balance);
+                    update_and_notify(&status, &source, playback_state, volume, balance,
+                        &event_tx, &mut last_emitted_state, &mut last_meta_sig);
                     let _ = event_tx.send(EngineEvent::TrackFinished);
                     continue;
                 }
@@ -470,14 +589,16 @@ fn audio_thread(
                     playback_state = PlaybackState::Stopped;
                     source = None;
                     resampler = None;
-                    update_status(&status, &source, playback_state, volume, balance);
+                    update_and_notify(&status, &source, playback_state, volume, balance,
+                        &event_tx, &mut last_emitted_state, &mut last_meta_sig);
                     let _ = event_tx.send(EngineEvent::TrackFinished);
                     continue;
                 }
             },
             None => {
                 playback_state = PlaybackState::Stopped;
-                update_status(&status, &source, playback_state, volume, balance);
+                update_and_notify(&status, &source, playback_state, volume, balance,
+                    &event_tx, &mut last_emitted_state, &mut last_meta_sig);
                 continue;
             }
         };
@@ -550,11 +671,13 @@ fn audio_thread(
                         playback_state = PlaybackState::Stopped;
                         fade_gain = 1.0;
                         fade_target = 1.0;
-                        update_status(&status, &source, playback_state, volume, balance);
+                        update_and_notify(&status, &source, playback_state, volume, balance,
+                            &event_tx, &mut last_emitted_state, &mut last_meta_sig);
                     }
                     FadeAction::Pause => {
                         playback_state = PlaybackState::Paused;
-                        update_status(&status, &source, playback_state, volume, balance);
+                        update_and_notify(&status, &source, playback_state, volume, balance,
+                            &event_tx, &mut last_emitted_state, &mut last_meta_sig);
                     }
                     FadeAction::Switch => {
                         activate_pending = true;
@@ -582,6 +705,24 @@ fn audio_thread(
         }
 
         update_status(&status, &source, playback_state, volume, balance);
+
+        // Periodic position tick (~4 Hz). Also acts as a heartbeat for
+        // detecting ICY metadata changes on radio streams.
+        let now = Instant::now();
+        if now.duration_since(last_position_tick) >= POSITION_TICK_INTERVAL {
+            last_position_tick = now;
+            if let Ok(s) = status.lock() {
+                let _ = event_tx.send(EngineEvent::PositionTick {
+                    position: s.position,
+                    duration: s.duration,
+                });
+                let sig = MetadataSignature::from_status(&s);
+                if sig != last_meta_sig {
+                    last_meta_sig = sig;
+                    let _ = event_tx.send(EngineEvent::TrackChanged(s.clone()));
+                }
+            }
+        }
     }
 }
 

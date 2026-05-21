@@ -149,10 +149,22 @@ pub fn set_balance(engine: State<'_, Arc<AudioEngine>>, balance: f32) {
 
 // -- Playlist commands --
 
+/// Snapshot the playlist state, broadcast a `playlist-changed` event to all
+/// windows, and return the snapshot. Call after every mutation so every
+/// window stays in sync without polling. The returned state is also handed
+/// back from each `#[tauri::command]` to satisfy callers that read the
+/// response directly (e.g. an `await invoke(...)` site).
+fn emit_playlist_changed(app: &AppHandle, pl: &PlaylistManager) -> PlaylistState {
+    let state = pl.state();
+    let _ = app.emit("playlist-changed", &state);
+    state
+}
+
 /// Add files to the playlist and start playing the first one if nothing
 /// is currently playing.
 #[tauri::command]
 pub fn playlist_add_files(
+    app: AppHandle,
     engine: State<'_, Arc<AudioEngine>>,
     playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
     paths: Vec<String>,
@@ -204,16 +216,18 @@ pub fn playlist_add_files(
             let meta = track.to_source_metadata();
             drop(pl);
             play_path(&engine, &path, None, Some(meta))?;
-            return Ok(playlist.lock().map_err(|e| e.to_string())?.state());
+            let pl = playlist.lock().map_err(|e| e.to_string())?;
+            return Ok(emit_playlist_changed(&app, &pl));
         }
     }
 
-    Ok(pl.state())
+    Ok(emit_playlist_changed(&app, &pl))
 }
 
 /// Add a single file — convenience wrapper that also starts playback.
 #[tauri::command]
 pub fn play_file(
+    app: AppHandle,
     engine: State<'_, Arc<AudioEngine>>,
     playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
     path: String,
@@ -230,6 +244,7 @@ pub fn play_file(
 
     // Play this track.
     pl.play_track(id);
+    let _ = emit_playlist_changed(&app, &pl);
     drop(pl); // Release lock before engine call.
     play_path(&engine, &path, None, None)?;
     Ok(())
@@ -258,6 +273,7 @@ pub fn playlist_play_index(
     let track = pl.play_index(index).ok_or("invalid index")?;
     let path = track.path.clone();
     let meta = track.to_source_metadata();
+    let _ = emit_playlist_changed(&app, &pl);
     drop(pl);
     play_path_with_recorder(&engine, &path, Some(RecorderContext {
         recorder_state: Arc::clone(&*recorder_state),
@@ -279,6 +295,7 @@ pub fn next_track(
         Some(track) => {
             let path = track.path.clone();
             let meta = track.to_source_metadata();
+            let _ = emit_playlist_changed(&app, &pl);
             drop(pl);
             play_path_with_recorder(&engine, &path, Some(RecorderContext {
                 recorder_state: Arc::clone(&*recorder_state),
@@ -307,6 +324,7 @@ pub fn previous_track(
         Some(track) => {
             let path = track.path.clone();
             let meta = track.to_source_metadata();
+            let _ = emit_playlist_changed(&app, &pl);
             drop(pl);
             play_path_with_recorder(&engine, &path, Some(RecorderContext {
                 recorder_state: Arc::clone(&*recorder_state),
@@ -320,166 +338,174 @@ pub fn previous_track(
 /// Toggle shuffle mode.
 #[tauri::command]
 pub fn toggle_shuffle(
+    app: AppHandle,
     playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
 ) -> Result<PlaylistState, String> {
     let mut pl = playlist.lock().map_err(|e| e.to_string())?;
     pl.toggle_shuffle();
-    Ok(pl.state())
+    Ok(emit_playlist_changed(&app, &pl))
 }
 
 /// Cycle repeat mode: Off → Playlist → Track → Off.
 #[tauri::command]
 pub fn cycle_repeat(
+    app: AppHandle,
     playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
 ) -> Result<PlaylistState, String> {
     let mut pl = playlist.lock().map_err(|e| e.to_string())?;
     pl.cycle_repeat();
-    Ok(pl.state())
+    Ok(emit_playlist_changed(&app, &pl))
 }
 
 /// Select a single track (replaces current selection).
 #[tauri::command]
 pub fn playlist_select_track(
+    app: AppHandle,
     id: TrackId,
     playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
 ) -> Result<PlaylistState, String> {
     let mut pl = playlist.lock().map_err(|e| e.to_string())?;
     pl.select_track(id);
-    Ok(pl.state())
+    Ok(emit_playlist_changed(&app, &pl))
 }
 
 /// Toggle a track's selection (for Ctrl+click).
 #[tauri::command]
 pub fn playlist_toggle_select(
+    app: AppHandle,
     id: TrackId,
     playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
 ) -> Result<PlaylistState, String> {
     let mut pl = playlist.lock().map_err(|e| e.to_string())?;
     pl.toggle_select(id);
-    Ok(pl.state())
+    Ok(emit_playlist_changed(&app, &pl))
 }
 
 /// Remove selected tracks from the playlist.
 #[tauri::command]
 pub fn playlist_remove_selected(
+    app: AppHandle,
     playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
 ) -> Result<PlaylistState, String> {
     let mut pl = playlist.lock().map_err(|e| e.to_string())?;
     pl.remove_selected();
-    Ok(pl.state())
+    Ok(emit_playlist_changed(&app, &pl))
 }
 
 /// Remove specific tracks by ID.
 #[tauri::command]
 pub fn playlist_remove_tracks(
+    app: AppHandle,
     ids: Vec<TrackId>,
     playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
 ) -> Result<PlaylistState, String> {
     let mut pl = playlist.lock().map_err(|e| e.to_string())?;
     pl.remove_tracks(&ids);
-    Ok(pl.state())
+    Ok(emit_playlist_changed(&app, &pl))
 }
 
 /// Sort the playlist alphabetically by display name.
 #[tauri::command]
 pub fn playlist_sort_by_title(
+    app: AppHandle,
     playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
 ) -> Result<PlaylistState, String> {
     let mut pl = playlist.lock().map_err(|e| e.to_string())?;
     pl.sort_by_title();
-    Ok(pl.state())
+    Ok(emit_playlist_changed(&app, &pl))
 }
 
 /// Reverse the playlist order.
 #[tauri::command]
 pub fn playlist_reverse(
+    app: AppHandle,
     playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
 ) -> Result<PlaylistState, String> {
     let mut pl = playlist.lock().map_err(|e| e.to_string())?;
     pl.reverse();
-    Ok(pl.state())
+    Ok(emit_playlist_changed(&app, &pl))
 }
 
 /// Randomize the playlist order.
 #[tauri::command]
 pub fn playlist_randomize(
+    app: AppHandle,
     playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
 ) -> Result<PlaylistState, String> {
     let mut pl = playlist.lock().map_err(|e| e.to_string())?;
     pl.randomize();
-    Ok(pl.state())
+    Ok(emit_playlist_changed(&app, &pl))
 }
 
 /// Select all tracks.
 #[tauri::command]
 pub fn playlist_select_all(
+    app: AppHandle,
     playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
 ) -> Result<PlaylistState, String> {
     let mut pl = playlist.lock().map_err(|e| e.to_string())?;
     pl.select_all();
-    Ok(pl.state())
+    Ok(emit_playlist_changed(&app, &pl))
 }
 
 /// Clear the selection.
 #[tauri::command]
 pub fn playlist_select_none(
+    app: AppHandle,
     playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
 ) -> Result<PlaylistState, String> {
     let mut pl = playlist.lock().map_err(|e| e.to_string())?;
     pl.select_none();
-    Ok(pl.state())
+    Ok(emit_playlist_changed(&app, &pl))
 }
 
 /// Invert the current selection.
 #[tauri::command]
 pub fn playlist_invert_selection(
+    app: AppHandle,
     playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
 ) -> Result<PlaylistState, String> {
     let mut pl = playlist.lock().map_err(|e| e.to_string())?;
     pl.invert_selection();
-    Ok(pl.state())
+    Ok(emit_playlist_changed(&app, &pl))
 }
 
 /// Crop — keep only the selected tracks, remove the rest.
 #[tauri::command]
 pub fn playlist_crop(
+    app: AppHandle,
     playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
 ) -> Result<PlaylistState, String> {
     let mut pl = playlist.lock().map_err(|e| e.to_string())?;
     pl.crop_to_selection();
-    Ok(pl.state())
+    Ok(emit_playlist_changed(&app, &pl))
 }
 
 /// Queue a track to play next (front of the queue).
 #[tauri::command]
 pub fn playlist_play_next(
+    app: AppHandle,
     id: TrackId,
     playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
 ) -> Result<PlaylistState, String> {
     let mut pl = playlist.lock().map_err(|e| e.to_string())?;
     pl.play_next(id);
-    Ok(pl.state())
+    Ok(emit_playlist_changed(&app, &pl))
 }
 
 /// Clear the entire playlist.
 #[tauri::command]
 pub fn playlist_clear(
+    app: AppHandle,
     engine: State<'_, Arc<AudioEngine>>,
     playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
 ) -> Result<PlaylistState, String> {
     let mut pl = playlist.lock().map_err(|e| e.to_string())?;
     pl.clear();
+    let state = emit_playlist_changed(&app, &pl);
     drop(pl);
     engine.stop();
-    Ok(PlaylistState {
-        tracks: vec![],
-        current_index: None,
-        current_track_id: None,
-        shuffle: crate::playlist::sequence::ShuffleMode::Off,
-        repeat: crate::playlist::sequence::RepeatMode::Off,
-        total_duration: None,
-        track_count: 0,
-    })
+    Ok(state)
 }
 
 /// Save the current playlist to a file (M3U, M3U8, or PLS based on extension).
@@ -511,6 +537,7 @@ pub fn playlist_save(
 /// Load a playlist file, replacing the current playlist.
 #[tauri::command]
 pub fn playlist_load(
+    app: AppHandle,
     engine: State<'_, Arc<AudioEngine>>,
     playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
     path: String,
@@ -577,11 +604,12 @@ pub fn playlist_load(
             let meta = track.to_source_metadata();
             drop(pl);
             play_path(&engine, &track_path, None, Some(meta))?;
-            return Ok(playlist.lock().map_err(|e| e.to_string())?.state());
+            let pl = playlist.lock().map_err(|e| e.to_string())?;
+            return Ok(emit_playlist_changed(&app, &pl));
         }
     }
 
-    Ok(pl.state())
+    Ok(emit_playlist_changed(&app, &pl))
 }
 
 // -- Playlist persistence --
@@ -714,6 +742,7 @@ pub async fn toggle_window(
         wm.get_states()
     };
     save_window_layout(&app, &states);
+    let _ = app.emit("window-states-changed", &states);
     Ok(states)
 }
 
@@ -743,6 +772,7 @@ pub async fn cycle_scale(
         wm.get_states()
     };
     save_window_layout(&app, &states);
+    let _ = app.emit("window-states-changed", &states);
     Ok(states)
 }
 
@@ -759,6 +789,7 @@ pub async fn set_scale(
         wm.get_states()
     };
     save_window_layout(&app, &states);
+    let _ = app.emit("window-states-changed", &states);
     Ok(states)
 }
 
@@ -857,12 +888,19 @@ pub fn load_skin(
 /// Also persists the choice to config so it survives restarts.
 #[tauri::command]
 pub fn set_active_skin(
+    app: AppHandle,
     window_manager: State<'_, Mutex<WindowManager>>,
     database: State<'_, Arc<Mutex<Database>>>,
     path: String,
 ) -> Result<(), String> {
-    let mut wm = window_manager.lock().map_err(|e| e.to_string())?;
-    wm.set_active_skin_path(path.clone());
+    let states = {
+        let mut wm = window_manager.lock().map_err(|e| e.to_string())?;
+        wm.set_active_skin_path(path.clone());
+        wm.get_states()
+    };
+
+    // Broadcast so every window reloads the skin without polling.
+    let _ = app.emit("window-states-changed", &states);
 
     // Persist to config (best-effort — don't fail the command if this errors).
     let mut cfg = crate::config::AppConfig::load();
@@ -1287,6 +1325,7 @@ pub async fn play_url(
             pl.update_display_name(id, name);
         }
         pl.play_track(id);
+        let _ = emit_playlist_changed(&app, &pl);
         id
     };
 
@@ -1338,6 +1377,7 @@ pub async fn play_url(
     if let Ok(meta) = source.metadata() {
         if let Ok(mut pl) = playlist.lock() {
             pl.update_metadata(id, &meta);
+            let _ = emit_playlist_changed(&app, &pl);
         }
     }
 
@@ -1348,6 +1388,7 @@ pub async fn play_url(
 /// Add a radio stream URL to the playlist without playing it.
 #[tauri::command]
 pub fn playlist_add_url(
+    app: AppHandle,
     playlist: State<'_, Arc<Mutex<PlaylistManager>>>,
     url: String,
     name: Option<String>,
@@ -1357,7 +1398,7 @@ pub fn playlist_add_url(
     if let Some(name) = name {
         pl.update_display_name(id, &name);
     }
-    Ok(pl.state())
+    Ok(emit_playlist_changed(&app, &pl))
 }
 
 // -- Radio browser commands --

@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::audio::engine::{AudioEngine, PlaybackState};
 use crate::commands;
@@ -72,6 +72,7 @@ pub fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                         if let Some(track) = pl.previous_track() {
                             let path = track.path.clone();
                             let meta = track.to_source_metadata();
+                            let _ = app.emit("playlist-changed", pl.state());
                             drop(pl);
                             let _ = commands::play_path(engine, &path, None, Some(meta));
                         }
@@ -82,6 +83,7 @@ pub fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                         if let Some(track) = pl.next_track() {
                             let path = track.path.clone();
                             let meta = track.to_source_metadata();
+                            let _ = app.emit("playlist-changed", pl.state());
                             drop(pl);
                             let _ = commands::play_path(engine, &path, None, Some(meta));
                         }

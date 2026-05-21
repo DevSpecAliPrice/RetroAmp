@@ -24,7 +24,7 @@ use tauri::{Emitter, Manager};
 
 use serde::Serialize;
 
-use audio::engine::{AudioEngine, EngineEvent};
+use audio::engine::AudioEngine;
 use audio::eq::EqSettings;
 use audio::recorder::RadioRecorder;
 use db::Database;
@@ -331,7 +331,7 @@ pub fn run() {
                     }
                 }
 
-                match media_controls::MediaService::new(engine_mc, playlist_mc, hwnd) {
+                match media_controls::MediaService::new(app.handle().clone(), engine_mc, playlist_mc, hwnd) {
                     Ok(service) => {
                         app.manage(service);
                         log::info!("OS media controls registered");
@@ -383,11 +383,11 @@ pub fn run() {
                 let spotify = Arc::clone(&spotify_player);
                 let app_handle = app.handle().clone();
                 thread::Builder::new()
-                    .name("retroamp-auto-advance".into())
+                    .name("retroamp-engine-events".into())
                     .spawn(move || {
-                        auto_advance_loop(engine, playlist, rec_state, app_handle, spotify);
+                        engine_event_loop(engine, playlist, rec_state, app_handle, spotify);
                     })
-                    .expect("failed to spawn auto-advance thread");
+                    .expect("failed to spawn engine event dispatcher thread");
             }
 
             // Create the main window programmatically (same code path as
@@ -1002,17 +1002,41 @@ fn sync_skin_catalog(db: Arc<Mutex<Database>>, app: tauri::AppHandle) {
     log::info!("skin catalog sync complete: {total} skins, {thumb_total} thumbnails generated");
 }
 
-/// Polls the engine for TrackFinished events and advances the playlist.
-fn auto_advance_loop(
+/// Dispatch engine events: forward to the frontend over Tauri, and
+/// auto-advance the playlist on TrackFinished.
+///
+/// Runs on a dedicated thread and blocks on `engine.recv_event()` — no
+/// busy-waiting. Sends a typed Tauri event for each state transition so
+/// the frontend never has to poll `get_status`.
+fn engine_event_loop(
     engine: Arc<AudioEngine>,
     playlist: Arc<Mutex<PlaylistManager>>,
     recorder_state: Arc<Mutex<Option<Arc<RadioRecorder>>>>,
     app_handle: tauri::AppHandle,
     spotify_player: Arc<crate::audio::spotify::SpotifyPlayer>,
 ) {
-    loop {
-        match engine.try_recv_event() {
-            Some(EngineEvent::TrackFinished) => {
+    use audio::engine::EngineEvent::*;
+    while let Some(event) = engine.recv_event() {
+        match event {
+            StateChanged(state) => {
+                let _ = app_handle.emit("player-state-changed", state);
+            }
+            TrackChanged(status) => {
+                let _ = app_handle.emit("player-track-changed", status);
+            }
+            PositionTick { position, duration } => {
+                let _ = app_handle.emit(
+                    "player-position",
+                    serde_json::json!({ "position": position, "duration": duration }),
+                );
+            }
+            VolumeChanged(v) => {
+                let _ = app_handle.emit("player-volume", v);
+            }
+            BalanceChanged(b) => {
+                let _ = app_handle.emit("player-balance", b);
+            }
+            TrackFinished => {
                 let mut pl = match playlist.lock() {
                     Ok(pl) => pl,
                     Err(_) => continue,
@@ -1022,7 +1046,10 @@ fn auto_advance_loop(
                     Some(track) => {
                         let path = track.path.clone();
                         let track_meta = track.to_source_metadata();
-                        drop(pl); // Release lock before engine call.
+                        // Current index advanced — notify before we drop
+                        // the lock so the UI updates immediately.
+                        let _ = app_handle.emit("playlist-changed", pl.state());
+                        drop(pl);
 
                         let ctx = commands::RecorderContext {
                             recorder_state: Arc::clone(&recorder_state),
@@ -1036,6 +1063,7 @@ fn auto_advance_loop(
                                         if let Some(track) = pl.current_track() {
                                             let id = track.id;
                                             pl.update_metadata(id, &meta);
+                                            let _ = app_handle.emit("playlist-changed", pl.state());
                                         }
                                     }
                                 }
@@ -1053,10 +1081,6 @@ fn auto_advance_loop(
                         log::info!("auto-advance: end of playlist");
                     }
                 }
-            }
-            None => {
-                // No event — sleep briefly before polling again.
-                thread::sleep(Duration::from_millis(50));
             }
         }
     }

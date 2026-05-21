@@ -18,6 +18,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { SkinData } from "./parser";
 import { showContextMenu, type NativeMenuEntry } from "../nativeMenu";
@@ -140,6 +141,7 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
   console.log(`[MainWindow] window.innerWidth=${window.innerWidth} window.innerHeight=${window.innerHeight} → scale=${s} → skin=${W*s}x${(isShade?14:116)*s}`);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const spectrumCanvasRef = useRef<HTMLCanvasElement>(null);
   const [status, setStatus] = useState<EngineStatus>({
     state: "Stopped",
     position: null,
@@ -151,6 +153,12 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
     has_duration: false,
     is_stream: false,
   });
+  // Position interpolation baseline: each `player-position` event sets
+  // `value` to the engine's authoritative position and `at` to the
+  // performance.now() of receipt. While playing, a 4 Hz tick advances
+  // `status.position` based on elapsed wall time — so the time display
+  // updates smoothly without flooding the IPC channel.
+  const positionBaseline = useRef<{ value: number; at: number }>({ value: 0, at: 0 });
   const [windowStates, setWindowStates] = useState<Record<string, { visible: boolean }>>({});
   const [playlist, setPlaylist] = useState<PlaylistState>({
     shuffle: "Off",
@@ -207,30 +215,119 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
     setMarqueeOffset(0);
   }, [marqueeText]);
 
-  // Poll engine and playlist state.
+  // Initial sync + event subscriptions.
+  //
+  // The backend pushes a typed Tauri event for every state mutation so the
+  // frontend never polls. We do one upfront fetch on mount to populate state
+  // for events that fired before we subscribed (e.g. on a fresh window open
+  // mid-playback), then react to events from then on.
   useEffect(() => {
-    const interval = setInterval(async () => {
+    let canceled = false;
+    let unlisteners: Array<() => void> = [];
+
+    (async () => {
       try {
         const [s, pl, ws] = await Promise.all([
           invoke<EngineStatus>("get_status"),
           invoke<PlaylistState>("get_playlist"),
           invoke<{ windows: Record<string, { visible: boolean }> }>("get_window_states"),
         ]);
+        if (canceled) return;
         setStatus(s);
         setPlaylist(pl);
         setWindowStates(ws.windows);
-        if (s.state === "Playing") {
-          const fft = await invoke<{ magnitudes: number[] }>("get_fft_data");
-          setFftData(fft.magnitudes);
-        } else {
-          setFftData([]);
-        }
+        positionBaseline.current = { value: s.position ?? 0, at: performance.now() };
       } catch (e) {
-        console.error(e);
+        console.error("[MainWindow] initial sync failed:", e);
       }
-    }, 50);
-    return () => clearInterval(interval);
+
+      const subs = await Promise.all([
+        listen<EngineStatus["state"]>("player-state-changed", (e) => {
+          setStatus((prev) => ({ ...prev, state: e.payload }));
+        }),
+        listen<EngineStatus>("player-track-changed", (e) => {
+          setStatus(e.payload);
+          positionBaseline.current = {
+            value: e.payload.position ?? 0,
+            at: performance.now(),
+          };
+        }),
+        listen<{ position: number | null; duration: number | null }>("player-position", (e) => {
+          positionBaseline.current = {
+            value: e.payload.position ?? 0,
+            at: performance.now(),
+          };
+          setStatus((prev) => ({
+            ...prev,
+            position: e.payload.position,
+            duration: e.payload.duration ?? prev.duration,
+          }));
+        }),
+        listen<number>("player-volume", (e) => {
+          setStatus((prev) => ({ ...prev, volume: e.payload }));
+        }),
+        listen<number>("player-balance", (e) => {
+          setStatus((prev) => ({ ...prev, balance: e.payload }));
+        }),
+        listen<PlaylistState>("playlist-changed", (e) => {
+          setPlaylist(e.payload);
+        }),
+        listen<{ windows: Record<string, { visible: boolean }> }>("window-states-changed", (e) => {
+          setWindowStates(e.payload.windows);
+        }),
+      ]);
+
+      if (canceled) {
+        subs.forEach((fn) => fn());
+        return;
+      }
+      unlisteners = subs;
+    })();
+
+    return () => {
+      canceled = true;
+      unlisteners.forEach((fn) => fn());
+    };
   }, []);
+
+  // Interpolate playback position between server ticks. Runs only while
+  // Playing — when paused/stopped, the baseline already matches displayed
+  // position and there's nothing to advance.
+  useEffect(() => {
+    if (status.state !== "Playing") return;
+    const id = setInterval(() => {
+      const { value, at } = positionBaseline.current;
+      const elapsed = (performance.now() - at) / 1000;
+      setStatus((prev) => ({ ...prev, position: value + elapsed }));
+    }, 250);
+    return () => clearInterval(id);
+  }, [status.state]);
+
+  // Poll FFT data only while playing. Separate from the rest of the state
+  // graph because it updates much faster (~30 Hz) and drives only the
+  // spectrum canvas (see the spectrum-draw effect below).
+  useEffect(() => {
+    if (status.state !== "Playing") {
+      if (fftData.length > 0) setFftData([]);
+      return;
+    }
+    let canceled = false;
+    const tick = async () => {
+      try {
+        const fft = await invoke<{ magnitudes: number[] }>("get_fft_data");
+        if (!canceled) setFftData(fft.magnitudes);
+      } catch (e) {
+        console.error("[MainWindow] fft fetch failed:", e);
+      }
+    };
+    tick();
+    const id = setInterval(tick, 33); // ~30 Hz — visually indistinguishable from 60 Hz
+    return () => {
+      canceled = true;
+      clearInterval(id);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status.state]);
 
   // Current canvas height depends on shade mode.
   const canvasH = isShade ? SHADE_H : H;
@@ -353,42 +450,10 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
       ctx.restore();
     }
 
-    // 2.7) Draw spectrum analyser in the vis area.
-    // Position: x=24, y=43, 75px wide, 16px tall.
-    // Uses viscolor.txt colours: 0 = background, 2-17 = bar gradient (bottom to top), 23 = peaks.
-    const VIS_X = 24;
-    const VIS_Y = 43;
-    const VIS_W = 75;
-    const VIS_H = 16;
-    const NUM_BARS = 19; // Classic Winamp "wide" bar mode: 19 bars, each 3px wide + 1px gap
-    const BAR_W = 3;
-    const BAR_GAP = 1;
-
-    // Fill vis background.
-    ctx.fillStyle = skin.colors[0] ?? "rgb(0,0,0)";
-    ctx.fillRect(VIS_X, VIS_Y, VIS_W, VIS_H);
-
-    if (fftData.length > 0) {
-      for (let i = 0; i < NUM_BARS; i++) {
-        // Map bar index to FFT bin — use lower bins where music content lives.
-        // Use logarithmic mapping for more musically useful distribution.
-        const binIndex = Math.floor(Math.pow(i / NUM_BARS, 1.5) * 80) + 2;
-        const magnitude = fftData[binIndex] ?? 0;
-
-        // Convert magnitude to bar height (0 to VIS_H pixels).
-        const barHeight = Math.min(Math.round(magnitude * VIS_H * 5), VIS_H);
-
-        const barX = VIS_X + i * (BAR_W + BAR_GAP);
-
-        // Draw bar from bottom up, one pixel row at a time with gradient colours.
-        // Colours 2-17 map to the 16 pixel rows (bottom = green/index 17, top = red/index 2).
-        for (let row = 0; row < barHeight; row++) {
-          const colorIndex = 17 - Math.floor((row / VIS_H) * 15);
-          ctx.fillStyle = skin.colors[colorIndex] ?? "rgb(0,255,0)";
-          ctx.fillRect(barX, VIS_Y + VIS_H - 1 - row, BAR_W, 1);
-        }
-      }
-    }
+    // 2.7) Spectrum analyser is drawn on a separate overlay canvas — see
+    // the spectrumCanvasRef effect below. Keeping it off the main canvas
+    // means a fresh FFT frame (~30 Hz) doesn't force the rest of the
+    // window (background, time, sliders, transport) to repaint.
 
     // 3) Draw play/pause/stop indicator.
     const playpaus = skin.sheets["playpaus"];
@@ -584,7 +649,72 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
     }
 
     } // end normal mode
-  }, [skin, status, playlist, pressed, marqueeOffset, scrollText, fftData, windowStates, showRemaining, isShade, canvasH, s]);
+  }, [skin, status, playlist, pressed, marqueeOffset, scrollText, windowStates, showRemaining, isShade, canvasH, s]);
+
+  // Precomputed gradient strip for the spectrum bars — built once per
+  // skin (16 px tall × 3 px wide, colours[17]→colours[2] bottom-up).
+  // Drawing each bar then collapses to a single drawImage that clips off
+  // the unfilled top portion, instead of the ~300 per-pixel fillRect
+  // calls the original code did.
+  const VIS_W = REGIONS.vis.w;
+  const VIS_H = REGIONS.vis.h;
+  const NUM_BARS = 19;
+  const BAR_W = 3;
+  const BAR_GAP = 1;
+
+  const spectrumStripRef = useRef<HTMLCanvasElement | null>(null);
+  useEffect(() => {
+    const strip = document.createElement("canvas");
+    strip.width = BAR_W;
+    strip.height = VIS_H;
+    const sctx = strip.getContext("2d");
+    if (!sctx) return;
+    const stripData = sctx.createImageData(BAR_W, VIS_H);
+    for (let row = 0; row < VIS_H; row++) {
+      const colorIndex = 17 - Math.floor((row / VIS_H) * 15);
+      const color = skin.colors[colorIndex] ?? "rgb(0,255,0)";
+      const m = /rgb\((\d+),\s*(\d+),\s*(\d+)\)/.exec(color);
+      const r = m ? +m[1] : 0;
+      const g = m ? +m[2] : 255;
+      const b = m ? +m[3] : 0;
+      const y = VIS_H - 1 - row;
+      for (let x = 0; x < BAR_W; x++) {
+        const off = (y * BAR_W + x) * 4;
+        stripData.data[off] = r;
+        stripData.data[off + 1] = g;
+        stripData.data[off + 2] = b;
+        stripData.data[off + 3] = 255;
+      }
+    }
+    sctx.putImageData(stripData, 0, 0);
+    spectrumStripRef.current = strip;
+  }, [skin, BAR_W, VIS_H]);
+
+  // Spectrum analyser draw — fires only when fftData updates (~30 Hz).
+  useEffect(() => {
+    if (isShade) return;
+    const canvas = spectrumCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    ctx.setTransform(s, 0, 0, s, 0, 0);
+    ctx.fillStyle = skin.colors[0] ?? "rgb(0,0,0)";
+    ctx.fillRect(0, 0, VIS_W, VIS_H);
+
+    const strip = spectrumStripRef.current;
+    if (!strip || fftData.length === 0) return;
+
+    for (let i = 0; i < NUM_BARS; i++) {
+      const binIndex = Math.floor(Math.pow(i / NUM_BARS, 1.5) * 80) + 2;
+      const magnitude = fftData[binIndex] ?? 0;
+      const barHeight = Math.min(Math.round(magnitude * VIS_H * 5), VIS_H);
+      if (barHeight <= 0) continue;
+      const barX = i * (BAR_W + BAR_GAP);
+      const srcY = VIS_H - barHeight;
+      ctx.drawImage(strip, 0, srcY, BAR_W, barHeight, barX, srcY, BAR_W, barHeight);
+    }
+  }, [fftData, skin, s, isShade, VIS_W, VIS_H, BAR_W, BAR_GAP, NUM_BARS]);
 
   // Slider drag helper — converts pixel x to the appropriate invoke call.
   const applySlider = useCallback(
@@ -958,6 +1088,27 @@ export default function MainWindow({ skin, isShade = false, onSkinChange }: Prop
         onDoubleClick={handleDoubleClick}
         onContextMenu={handleContextMenu}
       />
+
+      {/* Spectrum analyser overlay — its own canvas so 30 Hz FFT updates
+          don't force the rest of the main window to repaint. Sized to the
+          VIS region in scaled coordinates and pointer-events disabled so
+          clicks fall through to the main canvas. */}
+      {!isShade && (
+        <canvas
+          ref={spectrumCanvasRef}
+          width={REGIONS.vis.w * s}
+          height={REGIONS.vis.h * s}
+          style={{
+            position: "absolute",
+            left: REGIONS.vis.x * s,
+            top: REGIONS.vis.y * s,
+            width: REGIONS.vis.w * s,
+            height: REGIONS.vis.h * s,
+            imageRendering: "pixelated",
+            pointerEvents: "none",
+          }}
+        />
+      )}
 
       {/* Tooltip */}
       {tooltip && createPortal(

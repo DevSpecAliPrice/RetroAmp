@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/nicedoc/schema/master/tauri-config-v2.json",
   "productName": "RetroAmp",
   "identifier": "com.retroamp.app",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",

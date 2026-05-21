@@ -10,6 +10,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import type { SkinData } from "./parser";
@@ -170,17 +171,31 @@ export default function PlaylistWindow({ skin, scale }: Props) {
     syncScrollRatio();
   }, [scrollRatio, HANDLE_HEIGHT, syncScrollRatio]);
 
-  // Poll playlist state.
+  // Initial sync + event subscription. The backend emits `playlist-changed`
+  // on every mutation, so polling is unnecessary.
   useEffect(() => {
-    const interval = setInterval(async () => {
+    let canceled = false;
+    let unlisten: (() => void) | undefined;
+
+    (async () => {
       try {
         const pl = await invoke<PlaylistState>("get_playlist");
-        setPlaylist(pl);
+        if (!canceled) setPlaylist(pl);
       } catch (e) {
-        console.error(e);
+        console.error("[PlaylistWindow] initial fetch failed:", e);
       }
-    }, 200);
-    return () => clearInterval(interval);
+
+      const fn = await listen<PlaylistState>("playlist-changed", (e) => {
+        setPlaylist(e.payload);
+      });
+      if (canceled) fn();
+      else unlisten = fn;
+    })();
+
+    return () => {
+      canceled = true;
+      unlisten?.();
+    };
   }, []);
 
   // Eagerly prefetch YT auth + library data the first time any YT track

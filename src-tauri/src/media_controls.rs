@@ -41,6 +41,7 @@ impl MediaService {
     /// 2. Polls engine status and pushes metadata/playback updates
     /// 3. Receives media key events and dispatches them to the engine
     pub fn new(
+        app: tauri::AppHandle,
         engine: Arc<AudioEngine>,
         playlist: Arc<Mutex<PlaylistManager>>,
         #[allow(unused_variables)] hwnd: Option<*mut std::ffi::c_void>,
@@ -86,9 +87,10 @@ impl MediaService {
                 // Attach the event handler for media key presses.
                 let engine_handler = Arc::clone(&engine);
                 let playlist_handler = Arc::clone(&playlist);
+                let app_handler = app.clone();
 
                 if let Err(e) = controls.attach(move |event: MediaControlEvent| {
-                    handle_media_event(&event, &engine_handler, &playlist_handler);
+                    handle_media_event(&event, &engine_handler, &playlist_handler, &app_handler);
                 }) {
                     log::warn!("failed to attach media control handler: {e}");
                     return;
@@ -114,7 +116,9 @@ fn handle_media_event(
     event: &MediaControlEvent,
     engine: &AudioEngine,
     playlist: &Mutex<PlaylistManager>,
+    app: &tauri::AppHandle,
 ) {
+    use tauri::Emitter;
     match event {
         MediaControlEvent::Play => {
             engine.resume();
@@ -134,6 +138,7 @@ fn handle_media_event(
                 if let Some(track) = pl.next_track() {
                     let path = track.path.clone();
                     let meta = track.to_source_metadata();
+                    let _ = app.emit("playlist-changed", pl.state());
                     drop(pl);
                     if let Err(e) = commands::play_path(engine, &path, None, Some(meta)) {
                         log::error!("media controls: next_track failed: {e}");
@@ -146,6 +151,7 @@ fn handle_media_event(
                 if let Some(track) = pl.previous_track() {
                     let path = track.path.clone();
                     let meta = track.to_source_metadata();
+                    let _ = app.emit("playlist-changed", pl.state());
                     drop(pl);
                     if let Err(e) = commands::play_path(engine, &path, None, Some(meta)) {
                         log::error!("media controls: previous_track failed: {e}");

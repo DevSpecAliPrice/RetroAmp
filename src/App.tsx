@@ -126,22 +126,19 @@ function App() {
     return () => { unlisten.then((fn) => fn()); };
   }, []);
 
-  // Poll the backend for skin/scale changes (so all windows stay in sync).
+  // React to scale + skin changes broadcast from the backend. The initial
+  // load happens elsewhere (the load-skin effect above seeds `scale` and
+  // `currentSkinPath`); this just keeps every window in sync as the user
+  // changes the global scale or active skin from any other window.
   useEffect(() => {
-    const interval = setInterval(async () => {
-      try {
-        const ws = await invoke<WindowStates>("get_window_states");
-        setScale(ws.scale);
-
-        // If the active skin path changed (another window triggered it), reload.
-        if (ws.active_skin_path && ws.active_skin_path !== currentSkinPath.current) {
-          doLoadSkin(ws.active_skin_path);
-        }
-      } catch (e) {
-        console.error(e);
+    const unlisten = listen<WindowStates>("window-states-changed", (e) => {
+      const ws = e.payload;
+      setScale(ws.scale);
+      if (ws.active_skin_path && ws.active_skin_path !== currentSkinPath.current) {
+        doLoadSkin(ws.active_skin_path);
       }
-    }, 500);
-    return () => clearInterval(interval);
+    });
+    return () => { unlisten.then((fn) => fn()); };
   }, []);
 
   // Keyboard shortcuts — Winamp-classic bindings.
