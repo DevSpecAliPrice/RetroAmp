@@ -98,8 +98,33 @@ jobs:
             See the assets below to download and install RetroAmp.
 
             - Windows: `RetroAmp_*_x64-setup.exe` or `RetroAmp_*_x64_en-US.msi`
-            - macOS: `RetroAmp_*_universal.dmg`
+            - macOS (Apple Silicon): `RetroAmp_*_macOS_aarch64.dmg`
             - Linux: `.AppImage` (portable), `.deb` (Debian/Ubuntu), or `.rpm` (Fedora/RHEL)
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+
+      # Tauri's bundler names the DMG `RetroAmp_<ver>_aarch64.dmg`, which reads
+      # as Linux ARM to most users. Rename the uploaded asset (not the local
+      # file — tauri-action has already uploaded it) so it advertises macOS.
+      # Only the DMG is renamed: the .app.tar.gz is referenced by URL from
+      # latest.json and renaming it would break the auto-updater.
+      - name: Rename macOS DMG to include "macOS"
+        if: matrix.platform == 'macos-latest' && startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          OLD="RetroAmp_${VERSION}_aarch64.dmg"
+          NEW="RetroAmp_${VERSION}_macOS_aarch64.dmg"
+          ASSET_ID=$(gh api "repos/${{ github.repository }}/releases" \
+            --jq "[.[] | select(.tag_name == \"${GITHUB_REF_NAME}\") | .assets[] | select(.name == \"${OLD}\")][0].id")
+          if [ -z "${ASSET_ID}" ] || [ "${ASSET_ID}" = "null" ]; then
+            echo "Asset ${OLD} not found on release ${GITHUB_REF_NAME}; nothing to rename." >&2
+            exit 0
+          fi
+          gh api -X PATCH "repos/${{ github.repository }}/releases/assets/${ASSET_ID}" \
+            -f name="${NEW}"
+          echo "Renamed ${OLD} -> ${NEW}"
